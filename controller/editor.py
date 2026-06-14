@@ -5,9 +5,11 @@ from enum import Enum, auto
 from model.geom_utils import (
     can_merge_arcs,
     can_merge_straight,
+    is_biarc_collinear_straight,
     is_t1_consistent_with_target,
     merged_arc_b_point,
     project_along_direction,
+    solve_biarc,
     solve_case2_arc,
 )
 from model.rail_network import RailNetwork
@@ -178,15 +180,18 @@ class Editor:
         if snap.snapped:
             m2 = snap.position
             m2_node_id = snap.snapped_node_id
+            t2_candidates = list(snap.tangent_candidates)
         else:
             m2 = world_pos
             m2_node_id = None
+            t2_candidates = []
 
-        # 2. 计算建造计划（注意：T2 暂忽略，等 Case 3 Biarc 实现）
+        # 2. 计算建造计划
         plan = self._compute_plan(
             m1=self.build_m1,
             m2=m2,
             t1_candidates=self.build_t1_candidates,
+            t2_candidates=t2_candidates,
             m1_node_id=self.build_m1_node_id,
             m2_node_id=m2_node_id,
         )
@@ -206,6 +211,7 @@ class Editor:
         m1: Vec3,
         m2: Vec3,
         t1_candidates: list[Vec3],
+        t2_candidates: list[Vec3],
         m1_node_id: int | None,
         m2_node_id: int | None,
     ) -> ConstructionPlan:
@@ -213,9 +219,11 @@ class Editor:
 
         分支：
         - 无 T1 候选 → Case 1（直接连 M1→M2）
-        - 有 T1 候选 → 选最佳 T1（与 (M2-M1) 夹角最小者）；之后：
-            - force_straight=True：沿 T1 直线（终点是 M2 在 T1 射线上的投影）
-            - 否则求 Case 2 弧；半径过大或不可解时同样退化为沿 T1 直线
+        - 有 T1 候选无 T2 候选 → 选最佳 T1，求 Case 2 单弧（半径过大或 force_straight 退化为沿 T1 直线）
+        - T1 + T2 都有候选 → 选各自最佳（按 (M2-M1) / (M1-M2) 内积），尝试 Case 3 Biarc
+            - 共线退化 fast-path → Case 1
+            - force_straight=True → 仍走 T1 退化直线（Case 3 是后续约束，强制直线优先级更高）
+            - 其他失败 → 直接拒绝（按用户决议；不向 Case 2 降级）
         - Q2/Q5 拒绝条件适用于所有有 T1 的分支（含强制直线），保证既有轨道方向连续
         """
         # M1 == M2 → 拒绝
@@ -258,11 +266,21 @@ class Editor:
         if not is_t1_consistent_with_target(best_t1, m1, m2):
             return ConstructionPlan(case=2, m1=m1, m2=m2, valid=False)
 
-        # 强制直线：跳过弧，直接沿 T1 退化
+        # 强制直线：跳过弧 / Biarc，直接沿 T1 退化（优先级高于 Case 3）
         if self.force_straight:
             return self._degenerate_to_straight(m1, best_t1, m2, m1_node_id)
 
-        # 求弧
+        if t2_candidates:
+            # Case 3 候选路径：枚举所有 T2 候选，挑能解出且 R 最大者
+            plan_3 = self._try_case3_biarc(
+                m1, best_t1, m2, t2_candidates, m1_node_id, m2_node_id
+            )
+            if plan_3 is not None:
+                return plan_3
+            # 失败 → 直接拒绝（按用户决议：不向 Case 2 降级）
+            return ConstructionPlan(case=3, m1=m1, m2=m2, valid=False)
+
+        # 无 T2 → 走 Case 2 单弧
         result = solve_case2_arc(m1, best_t1, m2)
         if result is None:
             # 弧不可解（M2 几乎在 T1 延长线上）→ 退化为沿 T1 的直线
@@ -283,6 +301,65 @@ class Editor:
             edge_geometry=[b_point],  # 弧用 B 点表示
             valid=True,
         )
+
+    def _try_case3_biarc(
+        self,
+        m1: Vec3,
+        t1: Vec3,
+        m2: Vec3,
+        t2_candidates: list[Vec3],
+        m1_node_id: int | None,
+        m2_node_id: int | None,
+    ) -> ConstructionPlan | None:
+        """尝试 Case 3 Biarc。枚举所有 T2 候选，每个候选求 biarc 解，
+        返回 R 最大（曲率最小）的合法 Plan，或 None（全部不可解 / 半径超限）。
+
+        T1 和 T2 候选的语义都是"远离自身节点的另一端，朝外延伸"。
+        biarc 数学约定 T2 是"沿 M_mid → M2 进入 M2 的方向"，所以传入
+        solve_biarc 时取 -t2。共线退化 fast-path 同样用取负后的 t2 判定。
+        """
+        best_plan: ConstructionPlan | None = None
+        best_r = -1.0
+
+        for t2_raw in t2_candidates:
+            t2_for_biarc = t2_raw.normalize() * -1.0
+
+            # Fast-path: T1 与 -T2 同向 且 d∥T1 → Case 1 直线（最高优先级）
+            if is_biarc_collinear_straight(t1, t2_for_biarc, m1, m2):
+                return ConstructionPlan(
+                    case=1,
+                    m1=m1,
+                    m2=m2,
+                    node_a_id=m1_node_id,
+                    node_b_id=m2_node_id,
+                    edge_geometry=[],
+                    valid=True,
+                )
+
+            result = solve_biarc(m1, t1, m2, t2_for_biarc)
+            if result is None:
+                continue
+            m_mid, b1, b2, an1, an2, radius = result
+
+            if radius > MAX_ARC_RADIUS:
+                continue
+
+            if radius > best_r:
+                best_r = radius
+                best_plan = ConstructionPlan(
+                    case=3,
+                    m1=m1,
+                    m2=m2,
+                    node_a_id=m1_node_id,
+                    node_b_id=m2_node_id,
+                    edge_geometry=[],
+                    biarc_mid=m_mid,
+                    biarc_geom_1=[b1],
+                    biarc_geom_2=[b2],
+                    valid=True,
+                )
+
+        return best_plan
 
     def _degenerate_to_straight(
         self,
@@ -326,7 +403,20 @@ class Editor:
         if node_a.node_id == node_b.node_id:
             return
 
-        # 创建边
+        if plan.case == 3:
+            # Biarc 方案 A：两条 Edge + 中间 Node
+            if plan.biarc_mid is None or plan.biarc_geom_1 is None or plan.biarc_geom_2 is None:
+                return
+            mid_node = self.network.add_node(plan.biarc_mid)
+            try:
+                self.network.add_edge(node_a, mid_node, plan.biarc_geom_1)
+                self.network.add_edge(mid_node, node_b, plan.biarc_geom_2)
+            except ValueError:
+                # 数学解算失败兜底：清理已添加的资源（保守处理）
+                self.network.remove_node(mid_node.node_id)
+            return
+
+        # Case 1 / Case 2：单条 Edge
         self.network.add_edge(node_a, node_b, plan.edge_geometry)
 
     def _update_preview(self, snap: SnapResult) -> None:
@@ -336,12 +426,14 @@ class Editor:
             return
 
         m2 = snap.position
+        t2_candidates = list(snap.tangent_candidates) if snap.snapped else []
 
         # 计算预览计划（和提交时相同逻辑）
         plan = self._compute_plan(
             m1=self.build_m1,
             m2=m2,
             t1_candidates=self.build_t1_candidates,
+            t2_candidates=t2_candidates,
             m1_node_id=self.build_m1_node_id,
             m2_node_id=snap.snapped_node_id,
         )
@@ -352,6 +444,9 @@ class Editor:
             case=plan.case,
             edge_geometry=plan.edge_geometry,
             valid=plan.valid,
+            biarc_mid=plan.biarc_mid,
+            biarc_geom_1=plan.biarc_geom_1,
+            biarc_geom_2=plan.biarc_geom_2,
         )
 
     # ===== DELETE 逻辑 =====

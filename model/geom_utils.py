@@ -308,3 +308,176 @@ def merged_arc_b_point(
     d = b_pos - a_pos
     k = (d.x * t_b.y - d.y * t_b.x) / det
     return a_pos + t_a * k
+
+
+# ===== Case 3: 等半径 Biarc 求解 =====
+
+# Biarc 共线退化阈值：T1∥T2 同向且 d∥T1 时退化为直线
+BIARC_COLLINEAR_DOT_MIN = 1.0 - 1e-6
+
+
+def _biarc_arc_b_point(
+    m_a: Vec3, t_a: Vec3, m_b: Vec3, t_b: Vec3
+) -> Vec3 | None:
+    """两条切线 (m_a, t_a) 和 (m_b, t_b) 的交点；用于反算弧的 B 点。
+
+    解：m_a + k * t_a = m_b - k' * t_b（即 t_a 与 -t_b 在前方相交）
+    """
+    det = t_a.x * (-t_b.y) - t_a.y * (-t_b.x)
+    if abs(det) < 1e-9:
+        return None
+    d = m_b - m_a
+    k = (d.x * (-t_b.y) - d.y * (-t_b.x)) / det
+    return m_a + t_a * k
+
+
+def _biarc_arc_normal(center: Vec3, m_start: Vec3, t_start: Vec3) -> Vec3:
+    """根据起点位置和切线，确定弧 normal（+Z 或 -Z）。"""
+    radius_vec = m_start - center
+    cross_z = radius_vec.x * t_start.y - radius_vec.y * t_start.x
+    return Vec3(0.0, 0.0, 1.0 if cross_z > 0 else -1.0)
+
+
+def _biarc_arc_sweep_angle(
+    center: Vec3, m_start: Vec3, m_end: Vec3, arc_normal: Vec3
+) -> float:
+    """弧从 m_start 到 m_end 的扫角（沿 arc_normal 决定的方向，0 ≤ θ ≤ 2π）。"""
+    v_start = m_start - center
+    v_end = m_end - center
+    # 平面内带符号角：normal·(v_start × v_end)
+    cross_z = v_start.x * v_end.y - v_start.y * v_end.x
+    cos_a = v_start.x * v_end.x + v_start.y * v_end.y
+    r2 = v_start.length() * v_end.length()
+    if r2 < 1e-12:
+        return 0.0
+    cos_n = max(-1.0, min(1.0, cos_a / r2))
+    angle = math.acos(cos_n)  # [0, π]
+    sign = arc_normal.z * (1.0 if cross_z >= 0 else -1.0)
+    if sign < 0:
+        angle = 2.0 * math.pi - angle
+    return angle
+
+
+def is_biarc_collinear_straight(t1: Vec3, t2: Vec3, m1: Vec3, m2: Vec3) -> bool:
+    """T1∥T2 同向 且 d∥T1 → 共线直线 fast-path。
+
+    满足时调用方应直接走 Case 1（M1→M2 直线）。
+    """
+    t1n = t1.normalize()
+    t2n = t2.normalize()
+    if t1n.dot(t2n) < BIARC_COLLINEAR_DOT_MIN:
+        return False
+    d = m2 - m1
+    if d.length() < 1e-9:
+        return False
+    return d.normalize().dot(t1n) >= BIARC_COLLINEAR_DOT_MIN
+
+
+def solve_biarc(
+    m1: Vec3, t1: Vec3, m2: Vec3, t2: Vec3
+) -> tuple[Vec3, Vec3, Vec3, Vec3, Vec3, float] | None:
+    """等半径 Biarc 求解：两段弧 R1=R2=R，在中间点 G1 连续衔接 M1, M2。
+
+    输入：M1 处切于 T1（指向 M2 一侧），M2 处切于 T2（指向 M1 一侧的反向，即"延伸方向"）。
+
+    返回 `(m_mid, b1, b2, arc1_normal, arc2_normal, radius)` 或 `None`（不可解）。
+
+    `b1, b2` 是两段弧的切线交点，配合 `Edge.geometry=[B]` 直接生成两段连续的 Edge。
+
+    算法：
+    - 弧 1 圆心 O1 = M1 + σ1·R·perp(T1)；弧 2 圆心 O2 = M2 + σ2·R·perp(T2)，σ∈{+1,-1}
+    - G1 连续 ⇔ |O2 - O1| = 2R，且 M_mid = (O1 + O2)/2
+    - 解关于 R 的二次方程，过滤 R ≤ 0 与"绕大圈"（任一弧扫角 > π）的解
+    - 枚举 4 个 σ 组合，每组取较大 R 解；最终在所有合法解中取 R 最大者（曲率最小）
+    """
+    t1n = t1.normalize()
+    t2n = t2.normalize()
+    if t1n.length() < 1e-9 or t2n.length() < 1e-9:
+        return None
+
+    d = m2 - m1
+    if d.length() < 1e-9:
+        return None
+
+    n1_base = perp_xy(t1n)  # σ1 = +1 时 O1 在 M1 + R·n1_base 处
+    n2_base = perp_xy(t2n)
+
+    best: tuple[Vec3, Vec3, Vec3, Vec3, Vec3, float] | None = None
+    best_r = -1.0
+
+    for sigma1 in (1.0, -1.0):
+        for sigma2 in (1.0, -1.0):
+            v1 = n1_base * sigma1
+            v2 = n2_base * sigma2
+            dv = v2 - v1
+            # |d + R·dv|² = 4R²  →  (|dv|² - 4)·R² + 2(d·dv)·R + |d|² = 0
+            a = dv.length_squared() - 4.0
+            b = 2.0 * d.dot(dv)
+            c = d.length_squared()
+
+            # 候选 R：求所有 R > 0 解
+            r_candidates: list[float] = []
+            if abs(a) < 1e-12:
+                # 退化为线性 b·R + c = 0
+                if abs(b) > 1e-12:
+                    r = -c / b
+                    if r > 1e-9:
+                        r_candidates.append(r)
+            else:
+                disc = b * b - 4.0 * a * c
+                if disc < -1e-9:
+                    continue
+                disc = max(disc, 0.0)
+                sqd = math.sqrt(disc)
+                for r in ((-b + sqd) / (2.0 * a), (-b - sqd) / (2.0 * a)):
+                    if r > 1e-9:
+                        r_candidates.append(r)
+
+            for r in r_candidates:
+                o1 = m1 + v1 * r
+                o2 = m2 + v2 * r
+                m_mid = (o1 + o2) * 0.5
+
+                # 验证：M_mid 在两弧上（半径都 ≈ r）
+                r1_check = m_mid.distance_to(o1)
+                r2_check = m_mid.distance_to(o2)
+                if abs(r1_check - r) > 1e-4 or abs(r2_check - r) > 1e-4:
+                    continue
+
+                # 弧 1 的 normal：由 (M1 - O1) 与 T1 的关系决定
+                an1 = _biarc_arc_normal(o1, m1, t1n)
+                # 弧 2 的 normal：在 M_mid 处的切线必须与弧 1 在 M_mid 处一致；
+                # 弧 2 起于 M_mid 终于 M2，T_mid 应等于"弧 1 在 M_mid 处的 forward"
+                t_mid_arc1 = an1.cross(m_mid - o1)
+                t_mid_arc1_len = t_mid_arc1.length()
+                if t_mid_arc1_len < 1e-9:
+                    continue
+                t_mid = t_mid_arc1 * (1.0 / t_mid_arc1_len)
+                an2 = _biarc_arc_normal(o2, m_mid, t_mid)
+
+                # 验证弧 2 在 M2 处的切向 ≈ T2
+                t2_check = an2.cross(m2 - o2)
+                t2_check_len = t2_check.length()
+                if t2_check_len < 1e-9:
+                    continue
+                t2_check = t2_check * (1.0 / t2_check_len)
+                if t2_check.dot(t2n) < BIARC_COLLINEAR_DOT_MIN:
+                    continue
+
+                # 排除"绕大圈"：任一弧扫角 > π 视为不合理
+                sweep1 = _biarc_arc_sweep_angle(o1, m1, m_mid, an1)
+                sweep2 = _biarc_arc_sweep_angle(o2, m_mid, m2, an2)
+                if sweep1 > math.pi + 1e-6 or sweep2 > math.pi + 1e-6:
+                    continue
+
+                # 反算 B 点
+                b1 = _biarc_arc_b_point(m1, t1n, m_mid, t_mid)
+                b2 = _biarc_arc_b_point(m_mid, t_mid, m2, t2n)
+                if b1 is None or b2 is None:
+                    continue
+
+                if r > best_r:
+                    best_r = r
+                    best = (m_mid, b1, b2, an1, an2, r)
+
+    return best

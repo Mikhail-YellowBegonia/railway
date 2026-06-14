@@ -223,10 +223,14 @@ class ConstructionPlan:
     m2: Vec3
     node_a_id: int | None            # M1 端的 Node ID（None 则需新建）
     node_b_id: int | None            # M2 端的 Node ID（None 则需新建）
-    edge_geometry: list[Vec3]        # [] 直线, [B] 弧, [B1, B2] biarc
+    edge_geometry: list[Vec3]        # [] 直线, [B] 弧（Case 3 不用此字段）
     split_edge_id: int | None        # 需要截断的 Edge ID（待实现）
     split_at_t: float | None         # 截断参数 t ∈ [0,1]
     valid: bool                      # 几何是否合法
+    # Case 3 Biarc 专用（方案 A）
+    biarc_mid: Vec3 | None           # 中间节点位置 M_mid
+    biarc_geom_1: list[Vec3] | None  # 弧 1 几何（[B1]）
+    biarc_geom_2: list[Vec3] | None  # 弧 2 几何（[B2]）
 ```
 
 ### 4.4 Case 1: 无切线约束 → 自由直线
@@ -278,52 +282,39 @@ M1 → M2'，其中 `M2' = M1 + ((M2-M1)·T1*) · T1*`，即 M2 在 T1* 上的
 
 ### 4.6 Case 3: 双切线约束 → 等半径 Biarc
 
-```
-输入：M1, M2, T1, T2
-输出：两条圆弧首尾相接，共用一个中间点 M_mid
-```
+输入：M1（切于 T1）, M2（切于 T2），T1/T2 同语义"远离自身节点的另一端，朝外延伸"。
+输出：两段等半径圆弧首尾相接，共用中间点 M_mid（G1 连续）。
 
-**等半径策略：**
+**算法概要：**
 
-两条弧的半径相等：`R1 = R2 = R`。
+枚举 4 种手性组合 σ1, σ2 ∈ {+1, -1}（O1 在 T1 法线哪一侧、O2 在 T2 法线哪一侧），
+对每组求解关于 R 的二次方程：
 
-1. 弧 1：起于 M1（切于 T1），终于 M_mid
-2. 弧 2：起于 M_mid（切于 T_mid），终于 M2（切于 T2）
-3. 两弧在 M_mid 处切线连续（G1），即 T_mid 一致
-4. 由于 `R1 = R2 = R`，且约束数量 = 未知数数量，可解
+`(|dv|² - 4)·R² + 2·(d·dv)·R + |d|² = 0`，其中 `d = M2 - M1`，
+`dv = σ2·perp(T2_in) - σ1·perp(T1)`，T2_in 是"沿 M_mid → M2 进入 M2"的方向（即 -T2_outward）。
 
-**算法概要（等半径 Biarc）：**
+每组解里取 R > 0 解，过滤"绕大圈"（任一弧扫角 > π），最后在所有合法解中取 **R 最大者**
+（曲率最小，符合运输类游戏直觉）。
 
-令 `d = M2 - M1`（端点连线向量）。
+数据写入采用方案 A（参见 §4.9）：拆为两段连续 Edge + 中间 Node。
 
-1. 构造两条射线：
-   - L1：过 M1，方向 `perp(T1)`（圆心方向线）
-   - L2：过 M2，方向 `perp(T2)`
-2. 弧 1 的圆心 O1 在 L1 上：`O1 = M1 + r * perp(T1)`
-3. 弧 2 的圆心 O2 在 L2 上：`O2 = M2 + r * perp(T2)`（`r` 有符号）
-4. 约束：M_mid = 弧 1 终点 = 弧 2 起点，且 T_mid 连续
-   等价于 `|O2 - O1| = 2R`（两圆心距离等于 2R，即两弧相切且方向恰好衔接）
+**Fast-path：共线退化为直线**
 
-   等等——更精确的约束：两弧在 M_mid 处 G1 连续 ⇔ `O1, M_mid, O2` 三点共线，且 `|O1 - M_mid| = |O2 - M_mid| = R`。
+当 T1 与 T2_in 同向、且 (M2-M1) 与 T1 共线（cos ≥ 1-1e-6）时，整段就是直线，
+直接走 Case 1 路径而不调用 biarc 求解。
 
-   这等价于 `|O2 - O1| = 2R`，且 M_mid 为 O1O2 中点。
+**失败处理：**
 
-5. 代入：
-   ```
-   |(M2 + r * perp(T2)) - (M1 + r * perp(T1))| = 2|r|
-   |d + r * (perp(T2) - perp(T1))| = 2|r|
-   ```
+- 4 组手性组合全部不可解 → 直接拒绝（保持 BUILD_ACTIVE，按 §4.0 静默）
+- 半径超过 `MAX_ARC_RADIUS` → 直接拒绝（按用户决议，不向 Case 2 降级；
+  待后续观察实际失败率，必要时再考虑退化策略）
 
-   展开得关于 `r` 的二次方程，取 |r| 较小的解（最小化曲率）。
+实现：`controller/editor.py::Editor._try_case3_biarc`、
+`model/geom_utils.py::solve_biarc / is_biarc_collinear_straight`。
 
-6. 解得 r 后：
-   - O1 = M1 + r * perp(T1)，O2 = M2 + r * perp(T2)
-   - M_mid = (O1 + O2) / 2
-   - T_mid = perp(M_mid - O1)（弧 1 在 M_mid 的切向）
-   - B1 = 弧 1 的切线交点（O1 到两切点 M1, M_mid 的切线交点）
-   - B2 = 弧 2 的切线交点（O2 到两切点 M_mid, M2 的切线交点）
-
-7. Edge 几何：`geometry = [B1, B2, M_mid]` —— 待我们确定数据模型如何支持双弧（参见 §4.9）。
+**T2 候选枚举：** `_try_case3_biarc` 直接对 `t2_candidates` 列表内每一项
+分别求解；C 形 / S 形 biarc 中 T2 与 (M2-M1) 反向也是合理配置，
+不能用方向打分预筛。最终在所有候选解里取 R 最大者。
 
 ### 4.7 截断（Edge 分割）
 
@@ -396,6 +387,8 @@ Delete 模式点击一个中间节点（`connection_count == 2`）触发。
 | `rotate_around_axis(v, axis, angle)` | Rodrigues 旋转 |
 | `perp_xy(v)` | XY 平面内逆时针 90° |
 | `solve_case2_arc(m1, t1, m2)` | Case 2 几何解：返回 `(center, B, normal, R)` 或 `None` |
+| `solve_biarc(m1, t1, m2, t2_in)` | Case 3 几何解：返回 `(M_mid, B1, B2, normal_1, normal_2, R)` 或 `None`。`t2_in` 是沿 M_mid→M2 进入方向 |
+| `is_biarc_collinear_straight(t1, t2_in, m1, m2)` | Case 3 共线退化 fast-path 判定 |
 | `is_t1_consistent_with_target(t1, m1, m2)` | T1 是否指向 M2 一侧（用于 Q2 拒绝） |
 | `project_along_direction(m1, t1, m2)` | M2 在 (M1, T1) 射线上的投影点（半径退化用） |
 | `can_merge_straight(a, mid, b)` | 两直线是否可合并（共线检查） |
@@ -418,9 +411,13 @@ Delete 模式点击一个中间节点（`connection_count == 2`）触发。
 class PreviewGeometry:
     m1: Vec3
     m2: Vec3
-    case: int                  # 1, 2, or 3
-    edge_geometry: list[Vec3]  # 待建 Edge 的 geometry
-    valid: bool                # 当前计算是否合法
+    case: int                       # 1, 2, or 3
+    edge_geometry: list[Vec3]       # Case 1/2 的 geometry
+    valid: bool                     # 当前计算是否合法
+    # Case 3 预览
+    biarc_mid: Vec3 | None
+    biarc_geom_1: list[Vec3] | None
+    biarc_geom_2: list[Vec3] | None
 ```
 
 渲染方式：
@@ -447,7 +444,7 @@ class PreviewGeometry:
 | **2** | **路径吸附 + DELETE 边导向** | ✅ 完成 | PathSnapProvider（直线+弧投影，`model/geom_utils.py` 几何工具集）。切线方向按 BUILD_ACTIVE 时 `(cursor - M1)` 夹角选择。DELETE 模式操作单位改为 Edge，自动清理孤立节点。优先级：点吸附 > 路径吸附。 |
 | **3** | **Case 2 弧建造** | ✅ 完成 | T1 候选化重构（`build_t1_candidates`）：道岔 N 候选、路径吸附 forward/reverse 双候选、端点 1 候选。提交时按 (M2-M1) 夹角选最佳。Q2: T1 反向拒绝；Q3: R > MAX_ARC_RADIUS (500.0) 退化为沿 T1 投影的直线；Q5: 所有候选钝角时拒绝。`solve_case2_arc` 几何工具。弧预览（虚线弧 + 切线辅助线）。 |
 | **4** | **删除-合并** | ✅ 完成 | DELETE 模式悬停优先级 节点 > 边；点击 connection==2 节点尝试合并两侧边。判定：直线共线检查（cos ≥ 1-1e-6）、弧同心同半径同向且切线连续。失败静默忽略。详见 §4.8。 |
-| **5** | **Case 3 Biarc** | 待实现 | 等半径双弧建造（方案 A：双 Edge + 中间 Node）。数学求解：二次方程解 r，计算 M_mid。 |
+| **5** | **Case 3 Biarc** | ✅ 完成 | 等半径双弧建造（方案 A：双 Edge + 中间 Node）。枚举 4 种手性组合，二次方程解 R，过滤"绕大圈"和半径超 MAX_ARC_RADIUS 的解，取 R 最大者。共线 fast-path 退化为直线。失败直接拒绝（按用户决议）。详见 §4.6。 |
 | **6** | **Edge 截断** | 待实现 | M2 路径吸附到既有边的内部点时，插入新节点分裂原边为两段（直线/弧）。截断后的弧需重新计算 B 点保证 GeoJSON 往返一致。 |
 
 ---

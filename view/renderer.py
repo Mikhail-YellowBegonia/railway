@@ -126,7 +126,7 @@ class Renderer:
 
         color = COLOR_PREVIEW if preview.valid else COLOR_PREVIEW_INVALID
 
-        if preview.case == 1 or not preview.edge_geometry:
+        if preview.case == 1 or (preview.case == 2 and not preview.edge_geometry):
             # 直线预览（Case 1 或 Case 2 退化）
             x1, y1 = cam.world_to_screen(preview.m1.x, preview.m1.y, w, h)
             x2, y2 = cam.world_to_screen(preview.m2.x, preview.m2.y, w, h)
@@ -136,7 +136,14 @@ class Renderer:
             self._draw_arc_preview(
                 preview.m1, preview.edge_geometry[0], preview.m2, color, cam, w, h
             )
-        # TODO: Case 3 Biarc 预览
+        elif preview.case == 3 and preview.valid:
+            # Biarc 预览：两段弧 + 中间锚点
+            self._draw_biarc_preview(preview, color, cam, w, h)
+        elif preview.case == 3 and not preview.valid:
+            # Biarc 不可建造：用红色直线连接 M1→M2 作为占位（提示用户）
+            x1, y1 = cam.world_to_screen(preview.m1.x, preview.m1.y, w, h)
+            x2, y2 = cam.world_to_screen(preview.m2.x, preview.m2.y, w, h)
+            _draw_dashed_line(self.surface, color, (x1, y1), (x2, y2), dash_len=10, gap_len=5)
 
         # 绘制 M1 锚点
         if editor.build_m1 is not None:
@@ -194,6 +201,37 @@ class Renderer:
         x2, y2 = cam.world_to_screen(c.x, c.y, w, h)
         _draw_dashed_line(self.surface, COLOR_TANGENT, (x1, y1), (xb, yb), dash_len=4, gap_len=4)
         _draw_dashed_line(self.surface, COLOR_TANGENT, (xb, yb), (x2, y2), dash_len=4, gap_len=4)
+
+    def _draw_biarc_preview(
+        self,
+        preview,
+        color: tuple[int, int, int],
+        cam: Camera,
+        w: int,
+        h: int,
+    ) -> None:
+        """绘制 Case 3 双弧预览：两段弧 + 中间锚点高亮。"""
+        if (
+            preview.biarc_mid is None
+            or preview.biarc_geom_1 is None
+            or preview.biarc_geom_2 is None
+        ):
+            return
+        if not preview.biarc_geom_1 or not preview.biarc_geom_2:
+            return
+
+        m_mid = preview.biarc_mid
+        b1 = preview.biarc_geom_1[0]
+        b2 = preview.biarc_geom_2[0]
+
+        # 弧 1: M1 → B1 → M_mid
+        self._draw_arc_preview(preview.m1, b1, m_mid, color, cam, w, h)
+        # 弧 2: M_mid → B2 → M2
+        self._draw_arc_preview(m_mid, b2, preview.m2, color, cam, w, h)
+
+        # 中间节点锚点（小圆点）
+        mx, my = cam.world_to_screen(m_mid.x, m_mid.y, w, h)
+        pygame.draw.circle(self.surface, COLOR_M1_ANCHOR, (int(mx), int(my)), 4)
 
     def _draw_warning(self, mouse_world: Vec3, cam: Camera, w: int, h: int) -> None:
         """绘制警告光标（红色圆环）"""
