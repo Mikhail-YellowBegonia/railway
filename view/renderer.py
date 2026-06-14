@@ -205,6 +205,8 @@ class Renderer:
 
     def _draw_mode_text(self, editor: Editor, screen_w: int) -> None:
         label = MODE_NAMES.get(editor.mode, "")
+        if editor.force_straight and editor.mode == EditMode.BUILD:
+            label = label + "  [STRAIGHT]"
         surf = self._font.render(label, True, COLOR_TEXT)
         self.surface.blit(surf, (10, 10))
 

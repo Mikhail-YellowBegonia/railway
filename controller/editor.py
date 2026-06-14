@@ -55,6 +55,10 @@ class Editor:
         # 警告状态（BUILD_IDLE 吸附关闭时邻近元素警告）
         self.show_warning: bool = False
 
+        # 修饰键标志：由 GameLoop 每帧同步
+        # force_straight=True 时强制走 Case 1 直线（即便 T1 有候选）。临时调试用，参见 docs §10.2
+        self.force_straight: bool = False
+
     def update_hover(self, world_pos: Vec3) -> None:
         """每帧更新：处理鼠标悬停 + 预览 + 警告"""
         # 吸附检测
@@ -206,14 +210,15 @@ class Editor:
 
         分支：
         - 无 T1 候选 → Case 1（直线）
+        - force_straight=True → Case 1（强制直线，临时调试，docs §10.2）
         - 有 T1 候选 → 按 (M2-M1) 选最佳 T1 → Case 2（弧 / 退化为沿 T1 直线）
         """
         # M1 == M2 → 拒绝
         if m1.distance_to(m2) < 1e-6:
             return ConstructionPlan(case=1, m1=m1, m2=m2, valid=False)
 
-        # Case 1：无切线约束
-        if not t1_candidates:
+        # Case 1：无切线约束 或 强制直线
+        if not t1_candidates or self.force_straight:
             return ConstructionPlan(
                 case=1,
                 m1=m1,
