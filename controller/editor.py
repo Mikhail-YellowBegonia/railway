@@ -12,10 +12,13 @@ WARNING_THRESHOLD = 0.5
 
 
 class EditMode(Enum):
-    """顶层编辑模式"""
+    """EditMode 顶层模式 = IDLE / BUILD / DELETE.
+
+    DELETE 操作单位是 Edge，自动清理孤立 Node。
+    """
     IDLE = auto()     # 空闲：仅视图操作
     BUILD = auto()    # 建造轨道
-    DELETE = auto()   # 删除节点或边
+    DELETE = auto()   # 删除轨道（边为单位）
 
 
 class BuildState(Enum):
@@ -49,15 +52,19 @@ class Editor:
     def update_hover(self, world_pos: Vec3) -> None:
         """每帧更新：处理鼠标悬停 + 预览 + 警告"""
         # 吸附检测
-        snap = self.snap_system.snap(world_pos, self.network)
+        snap = self._snap(world_pos)
 
         # 更新悬停状态（用于 DELETE 模式和高亮）
         self.hovered_node_id = snap.snapped_node_id
         if self.mode == EditMode.DELETE:
-            if self.hovered_node_id is not None:
+            # DELETE 模式：操作单位是边。点吸附到节点时不算 hover edge，
+            # 否则用路径吸附结果作为 hover edge。
+            if snap.snapped_node_id is not None:
                 self.hovered_edge_id = None
+            elif snap.snapped_edge_id is not None:
+                self.hovered_edge_id = snap.snapped_edge_id
             else:
-                self.hovered_edge_id = self.network.edge_id_at(world_pos, SNAP_THRESHOLD)
+                self.hovered_edge_id = None
         else:
             self.hovered_edge_id = None
 
@@ -65,10 +72,9 @@ class Editor:
         if self.mode == EditMode.BUILD and self.build_state == BuildState.ACTIVE:
             self._update_preview(snap)
 
-        # BUILD_IDLE: 检查警告（吸附关闭 + 邻近元素）
+        # BUILD_IDLE: 检查警告（所有吸附 Provider 关闭 + 邻近元素）
         if self.mode == EditMode.BUILD and self.build_state == BuildState.IDLE:
-            snap_enabled = self.snap_system.point_snap.enabled
-            if not snap_enabled and self._has_nearby_element(world_pos):
+            if not self.snap_system.any_enabled() and self._has_nearby_element(world_pos):
                 self.show_warning = True
             else:
                 self.show_warning = False
@@ -80,7 +86,7 @@ class Editor:
         if self.mode == EditMode.IDLE:
             return  # IDLE 模式下左键无效
 
-        snap = self.snap_system.snap(world_pos, self.network)
+        snap = self._snap(world_pos)
 
         if self.mode == EditMode.BUILD:
             if self.build_state == BuildState.IDLE:
@@ -89,7 +95,16 @@ class Editor:
                 self._commit_build(world_pos, snap)
 
         elif self.mode == EditMode.DELETE:
-            self._delete(snap)
+            self._delete()
+
+    def _snap(self, world_pos: Vec3) -> SnapResult:
+        """统一的吸附入口：BUILD_ACTIVE 时传入 M1 作为切线方向参考。"""
+        reference = (
+            self.build_m1
+            if (self.mode == EditMode.BUILD and self.build_state == BuildState.ACTIVE)
+            else None
+        )
+        return self.snap_system.snap(world_pos, self.network, reference)
 
     def handle_cancel(self) -> None:
         """处理 Esc 键"""
@@ -118,12 +133,14 @@ class Editor:
     # ===== BUILD 逻辑 =====
 
     def _start_build(self, world_pos: Vec3, snap: SnapResult) -> None:
-        """开始建造：记录 M1，进入 BUILD_ACTIVE"""
-        # 1. 建造前检查：吸附关闭且附近有元素 → 拒绝
-        snap_enabled = self.snap_system.point_snap.enabled
-        if not snap_enabled and self._has_nearby_element(world_pos):
+        """开始建造：记录 M1，进入 BUILD_ACTIVE。
+
+        拒绝条件：所有吸附 Provider 关闭 且 附近有既有元素。
+        """
+        # 1. 建造前检查
+        if not self.snap_system.any_enabled() and self._has_nearby_element(world_pos):
             self.show_warning = True
-            return
+            return  # 拒绝；保持 BUILD_IDLE
 
         # 2. 确定 M1
         if snap.snapped:
@@ -140,7 +157,10 @@ class Editor:
         self.preview = None  # 预览在 update_hover 中每帧更新
 
     def _commit_build(self, world_pos: Vec3, snap: SnapResult) -> None:
-        """提交建造：从 M1 到 M2 建造轨道"""
+        """提交建造：从 M1 到 M2 建造轨道。
+
+        所有拒绝（无效几何、M1==M2 等）一律保持 BUILD_ACTIVE 状态，由用户重新选 M2 或 Esc 取消。
+        """
         # 1. 确定 M2
         if snap.snapped:
             m2 = snap.position
@@ -162,13 +182,9 @@ class Editor:
         )
 
         if not plan.valid:
-            # 计划无效（例如 M1 == M2），拒绝
-            return
+            return  # 拒绝；保持 BUILD_ACTIVE
 
-        # 3. TODO: 如果需要截断（M2 在既有边中间），先执行截断
-        # if plan.split_edge_id is not None:
-        #     self._split_edge(plan.split_edge_id, plan.split_at_t)
-
+        # 3. TODO: 截断（M2 在既有边中间）
         # 4. 应用计划到网络
         self._apply_plan(plan)
 
@@ -254,14 +270,31 @@ class Editor:
 
     # ===== DELETE 逻辑 =====
 
-    def _delete(self, snap: SnapResult) -> None:
-        """删除悬停的节点或边"""
-        if self.hovered_node_id is not None:
-            self.network.remove_node(self.hovered_node_id)
-            self.hovered_node_id = None
-        elif self.hovered_edge_id is not None:
-            self.network.remove_edge(self.hovered_edge_id)
+    def _delete(self) -> None:
+        """删除悬停的 Edge，并连带清理变成孤立的 Node。
+
+        DELETE 模式以 Edge 为操作单位（用户期待与线要素互动而非节点）。
+        底线：删除后保证没有孤立节点（connection_count == 0）、没有无头边。
+        """
+        if self.hovered_edge_id is None:
+            return
+
+        edge = self.network.edges.get(self.hovered_edge_id)
+        if edge is None:
             self.hovered_edge_id = None
+            return
+
+        node_a_id = edge.node_a_id
+        node_b_id = edge.node_b_id
+
+        self.network.remove_edge(self.hovered_edge_id)
+        self.hovered_edge_id = None
+
+        # 连带清理：若任一端点变为孤立（connection_count == 0），删除之。
+        for nid in (node_a_id, node_b_id):
+            node = self.network.nodes.get(nid)
+            if node is not None and node.connection_count() == 0:
+                self.network.remove_node(nid)
 
     # ===== 辅助函数 =====
 

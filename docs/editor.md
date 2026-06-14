@@ -1,36 +1,716 @@
 # 编辑器设计需求
-总体目标：使用轻量化的方式，实现与《狂热运输2》类似的编辑体验
 
-## 模式状态机
-建造（B），移除（D），空闲（Esc），其它（预留）
+总体目标：使用轻量化的方式，实现与《狂热运输2》类似的编辑体验。
 
-## 数学约束
-对于每个有效的节点（Node对象），应当保持轨道切线的G1连续性，即切线方向一致
-在这样的约束下，对于在两点之间建立轨道的任务，应有如下三种情况：
+---
 
-设1号点之位置与切向`（M1，T1）`，2号点之位置与切向`（M2，T2）`
-**轨道由且只由直线和简单圆弧构成**
-其中单一直线的自由度为2，单一圆弧的自由度为3
+## 1. 模式状态机
 
-1. 当从空白处修建轨道至空白处时，给定`（M1，M2）`，因此能且只能修建直线。
-2. 当从空白处修建至既有轨道时，或从既有轨道修建至空白处时，给定`（M1，M2，T1）`或`（M1，M2，T2）`，因此具有3个约束，能且只能修建圆弧。（或圆弧+直线，如对最大曲线半径有限制）
-3. 当从既有轨道修建至既有轨道时，给定全部`（M1，M2，T1，T2）`，因此具有4个约束。使用一对圆弧（biarc），具有6个自由度，然后想办法确定一个有向中间点。因为两圆弧首尾相接，因此退化至4个自由度，恰好符合需求。（也可内插直线，如对最大曲线半径有限制）
+### 1.1 顶层级模式
 
-## 吸附逻辑
-暂定吸附的实现方式为直接覆盖光标的（虚拟）位置为吸附目标，然后在数据层面确保去重和正确连接。此处需进一步评估
-*提及的顺序表明优先级*
-1. 点状吸附：任意Node，不含3点型LineString的切线参考点（B点）
-2. 路径吸附：铁轨（无论直线或曲线）的任意位置
-3. 点状吸附：对于具有切线方向的端点与有效中间点，在切线的法线方向上一定距离的位置（用于创造平行铁轨）
-4. 路径吸附：同上，以一定距离平行于铁轨元素的任意位置
+| 按键 | 模式 | 说明 |
+|------|------|------|
+| `B`  | BUILD | 建造轨道 |
+| `D`  | DELETE | 删除轨道（以边为单位，自动清理孤立节点） |
+| `Esc` | （取消 / IDLE） | BUILD_ACTIVE 时取消当前建造退回 BUILD_IDLE；其它情况切换到 IDLE |
+| `Q`  | 退出程序 | （Esc 不再用于退出） |
 
-此处有一定性能顾虑，后期可考虑加入空间索引
+### 1.1.1 IDLE 模式
 
-## 建造逻辑细则
-应当分为下列几种情况：
-1. 当光标位于空白处时，提供位置约束
-2. 当光标位于端点处时，提供位置与切向约束
-3. 当光标位于路径上一点时（不含端点），提供位置与切向约束（因为切向分正切向与反切向，应结合鼠标位置取信合理的切线方向）
-在既有路径上添加新阶段时，原有路径会被截断，考虑到LineString是圆弧或直线，截断方式不难，截断结果相对干净。
-同理，删除时也应对有合并可能的LineString进行合并。
-可以考虑对最小曲率半径添加限制，在确实不合理的情况下拒绝生成，开发初期为了算法测试的方便可不加入，但应预留接口，很多判别（坡度、曲率、其它要求、地形碰撞）都有可能触发拒绝建造。
+进入 IDLE 后：
+- 左键点击无任何作用（不建造、不删除、不吸附响应）
+- 中键拖拽平移视图、滚轮缩放仍然工作
+- 此时鼠标的作用只剩"移动视图"
+
+启动时默认进入 IDLE 模式。
+
+### 1.2 Build 模式次级状态机
+
+Build 模式内部有两个子状态：
+
+```
+                  click (M1)
+    BUILD_IDLE ───────────────→ BUILD_ACTIVE
+         ↑                          │
+         │         click (M2)       │
+         └──────────────────────────┘
+         ↑                          │
+         │        Esc (cancel)      │
+         └──────────────────────────┘
+```
+
+| 状态 | 行为 |
+|------|------|
+| **BUILD_IDLE** | 鼠标移动 + 吸附检测；无预览；等待左键按下 |
+| **BUILD_ACTIVE** | 鼠标移动时实时预览轨道；等待左键确认 M2 或 Esc 取消 |
+
+#### 状态流转伪代码
+
+```python
+class BuildState(Enum):
+    IDLE = auto()
+    ACTIVE = auto()
+
+class Editor:
+    build_state: BuildState = BuildState.IDLE
+    build_m1: Vec3 | None = None       # M1 世界坐标
+    build_m1_is_node: bool = False     # M1 是吸附到既有节点还是空白
+    build_t1: Vec3 | None = None       # M1 处的切线方向 (有则为 Case2/3, 无则为 Case1)
+
+    def handle_click(self, world_pos: Vec3, snap: SnapResult):
+        if self.mode == EditMode.BUILD:
+            if self.build_state == BuildState.IDLE:
+                self._start_build(world_pos, snap)
+            else:
+                self._commit_build(world_pos, snap)
+
+        elif self.mode == EditMode.DELETE:
+            self._delete(snap)
+
+    def handle_cancel(self):
+        if self.build_state == BuildState.ACTIVE:
+            self.build_state = BuildState.IDLE
+            self.build_m1 = None
+            self.build_t1 = None
+
+    def handle_move(self, world_pos: Vec3, snap: SnapResult):
+        if self.build_state == BuildState.ACTIVE:
+            self.preview_m2 = world_pos   # 用于渲染预览
+            self.preview_snap = snap
+```
+
+### 1.3 Delete 模式
+
+**操作单位：边（Edge）**。
+
+设计原则：用户期望与"线要素"互动，而不必关心节点的存在。
+DELETE 模式因此简化为：
+
+- 点击吸附命中的边 → 删除该边
+- 端点节点 是否一并清理 由程序自动处理
+
+#### 自动清理规则
+
+删除一条边后，遍历其原本的两个端点：
+- 若端点变为孤立（`connection_count == 0`）→ 一并删除
+- 若端点仍连接其它边（`connection_count >= 1`）→ 保留
+
+只要遵循"删除作用于 Edge"的约束，可以保证两条底线：
+1. **没有孤立节点**：每次删除都会扫描端点
+2. **没有无头边**：边的端点要么仍存在，要么本就和这条边一起被删除
+
+不允许直接对节点执行删除。点吸附在 DELETE 模式下仅用于"明确指出鼠标命中的是节点而非边"，从而避免在节点附近误删邻接边——此时不响应点击。
+
+无次级状态。
+
+---
+
+## 2. 数据模型
+
+### 2.1 SnapResult
+
+吸附系统每帧输出一个 `SnapResult`：
+
+```python
+@dataclass
+class SnapResult:
+    snapped: bool                        # 是否发生了吸附
+    position: Vec3                       # 吸附后的世界坐标（无吸附时 = 原始光标位置）
+    tangent: Vec3 | None = None          # 该位置的切线方向（有切线约束时非 None）
+    snapped_node_id: int | None = None   # 吸附到的 Node ID（点吸附时）
+    snapped_edge_id: int | None = None   # 吸附到的 Edge ID（路径吸附时）
+    snapped_edge_t: float | None = None  # 路径吸附时沿边的参数 t ∈ [0,1]
+```
+
+### 2.2 切线方向获取
+
+一个 Node 处的切线方向由该 Node 连接的 Edge 决定：
+
+| Node 连接数 | 切线方向 |
+|-------------|----------|
+| 0（孤立节点）| `None`（无约束，Case 1） |
+| 1（端点）   | 取该 Edge 在 Node 处的切向（指向远处） |
+| ≥2（道岔/交叉/中间）| **不允许延伸**（待后期规则） |
+
+Edge 在 Node 处的切线方向计算：
+
+- **直边**：沿边方向 `(other_node.position - this_node.position)`
+- **弧边**：
+  - 若 `this_node` 是 `node_a`：切线方向 = `arc_normal × (this_node.position - arc_center)`（即切点处的切向，方向向外）
+  - 若 `this_node` 是 `node_b`：切线方向 = `-(arc_normal × (this_node.position - arc_center))`
+
+路径上任意点的切线方向（路径吸附用）：
+
+- **直边**：沿边方向（正/反两种）
+- **弧边**：该点处圆周切向（正/反两种）
+
+---
+
+## 3. 吸附系统
+
+### 3.1 架构
+
+吸附系统由多个独立的 `SnapProvider` 组成，按优先级依次执行：
+
+```
+SnapSystem
+  ├── PointSnapProvider      (优先级 1)
+  ├── PathSnapProvider       (优先级 2)
+  ├── ParallelPointProvider  (优先级 3, 留后)
+  └── ParallelPathProvider   (优先级 4, 留后)
+```
+
+每个 Provider 有一个独立的 `enabled: bool` 开关。
+
+每帧调用：遍历所有已启用的 Provider，按优先级取第一个命中结果。高优先级的命中直接返回，不检查低优先级。
+
+### 3.2 PointSnapProvider（点吸附）
+
+```python
+class PointSnapProvider:
+    threshold: float = 0.3        # 世界单位
+    enabled: bool = True
+
+    def snap(self, world_pos: Vec3, network: RailNetwork) -> SnapResult | None:
+        best_node_id = None
+        best_dist = float('inf')
+        for node_id, node in network.nodes.items():
+            d = node.position.distance_to(world_pos)
+            if d < self.threshold and d < best_dist:
+                best_dist = d
+                best_node_id = node_id
+
+        if best_node_id is None:
+            return None
+
+        node = network.nodes[best_node_id]
+        tangent = self._tangent_at_node(node, network)  # 见 §2.2
+        return SnapResult(
+            snapped=True,
+            position=node.position,       # 位置覆盖为 Node 坐标
+            tangent=tangent,
+            snapped_node_id=best_node_id,
+        )
+```
+
+### 3.3 PathSnapProvider（路径吸附）
+
+```python
+class PathSnapProvider:
+    threshold: float = 0.3        # 世界单位
+    enabled: bool = True
+
+    def snap(self, world_pos: Vec3, network: RailNetwork) -> SnapResult | None:
+        best_edge_id = None
+        best_t = 0.0
+        best_pos = Vec3()
+        best_dist = float('inf')
+
+        for edge_id, edge in network.edges.items():
+            node_a = network.nodes[edge.node_a_id]
+            node_b = network.nodes[edge.node_b_id]
+            t, proj_pos, dist = self._project_on_edge(world_pos, edge, node_a, node_b)
+            if dist < self.threshold and dist < best_dist:
+                best_dist = dist
+                best_edge_id = edge_id
+                best_t = t
+                best_pos = proj_pos
+
+        if best_edge_id is None:
+            return None
+
+        tangent = self._tangent_along_edge(best_edge_id, best_t, network, world_pos)
+        return SnapResult(
+            snapped=True,
+            position=best_pos,
+            tangent=tangent,
+            snapped_edge_id=best_edge_id,
+            snapped_edge_t=best_t,
+        )
+```
+
+**切线方向选择**（路径上点的正反切选择）：
+
+给定路径上的点及其两个候选切线方向 `t_forward` 和 `t_reverse`：
+- 在 `BUILD_ACTIVE` 状态且有 M1 时：取与 `(world_pos - M1)` 夹角较小的方向
+- 在 `BUILD_IDLE` 状态时：不产生切线（tangent 为 None）
+
+### 3.4 多边命中
+
+PathSnapProvider 在每个 Edge 上计算最短投影距离，取全局最小。多条边同时被命中时，返回距离最近的那条边。用户要吸附另一条边，需将鼠标移开以脱离当前边的吸附范围。
+
+---
+
+## 4. 建造逻辑
+
+### 4.0 拒绝处理（统一约定）
+
+任何"无法完成本次建造"的情况都属于"拒绝"，包括但不限于：
+
+- 在 BUILD_IDLE 中：吸附全部关闭 + 鼠标附近有既有元素
+- 在 BUILD_ACTIVE 中：M1 == M2、几何无解（例如 Case 2 弧半径过大）、连通性约束不满足
+- 在 BUILD_ACTIVE 中：M2 落在违反规则的位置
+
+**统一处理方式**：拒绝时 不修改网络、不切换状态。
+
+| 拒绝发生在 | 拒绝后状态 |
+|------------|------------|
+| BUILD_IDLE 的 M1 检查 | 仍在 BUILD_IDLE，可显示警告光标，用户可移动鼠标重试或换其它操作 |
+| BUILD_ACTIVE 的 M2 检查 | 仍在 BUILD_ACTIVE，M1 保留，用户可移动鼠标重选 M2 或按 Esc 取消 |
+
+预览渲染层面：拒绝（`plan.valid == False`）时仍绘制预览几何，但用红色或警示色，明示"现在按下不会成功"。
+
+### 4.1 开始建造（BUILD_IDLE 中按下鼠标）
+
+```python
+def _start_build(self, world_pos: Vec3, snap: SnapResult):
+    # 1. 建造前检查：吸附关闭且附近有元素 → 拒绝
+    if not snap_enabled and self._has_nearby_element(world_pos):
+        self._show_refusal()     # 光标红色警告，不进入 BUILD_ACTIVE
+        return
+
+    # 2. 确定 M1
+    if snap.snapped:
+        self.build_m1 = snap.position
+        self.build_m1_is_node = (snap.snapped_node_id is not None)
+        if snap.tangent is not None:
+            self.build_t1 = snap.tangent    # Case 2 或 Case 3
+        else:
+            self.build_t1 = None            # Case 1
+    else:
+        self.build_m1 = world_pos
+        self.build_m1_is_node = False
+        self.build_t1 = None                # 孤立点, Case 1
+
+    # 3. 进入建造活跃状态
+    self.build_state = BuildState.ACTIVE
+    self.preview_geometry = None  # 待每帧更新
+```
+
+`_has_nearby_element(world_pos)` 的判断逻辑：
+
+```python
+def _has_nearby_element(self, pos: Vec3) -> bool:
+    # 检查是否有 Node 在 WARNING_THRESHOLD 内
+    if self.network.node_id_at(pos, WARNING_THRESHOLD) is not None:
+        return True
+    # 检查是否有 Edge 在 WARNING_THRESHOLD 内
+    if self.network.edge_id_at(pos, WARNING_THRESHOLD) is not None:
+        return True
+    return False
+```
+
+其中 `WARNING_THRESHOLD` 应略大于 `SNAP_THRESHOLD`（例如 `SNAP_THRESHOLD = 0.3`，`WARNING_THRESHOLD = 0.5`），确保"肉眼可见但未触发吸附"的距离能被警告覆盖。
+
+### 4.2 提交建造（BUILD_ACTIVE 中按下鼠标）
+
+```python
+def _commit_build(self, world_pos: Vec3, snap: SnapResult):
+    # 1. 确定 M2
+    if snap.snapped:
+        m2 = snap.position
+        t2 = snap.tangent
+    else:
+        m2 = world_pos
+        t2 = None
+
+    # 2. 判断 Case 并计算几何 → 产生 ConstructionPlan
+    plan = self._compute_plan(
+        m1=self.build_m1, t1=self.build_t1,
+        m2=m2, t2=t2,
+        snap=snap,
+    )
+
+    # 3. 如果 plan 要求截断（M2 在既有边中间），先执行截断
+    if plan.split_edge_id is not None:
+        self._split_edge(plan.split_edge_id, plan.split_at_t)
+
+    # 4. 应用 plan 到网络（建 Node/Edge）
+    self._apply_plan(plan)
+
+    # 5. 回到 IDLE
+    self.build_state = BuildState.IDLE
+    self.build_m1 = None
+    self.build_t1 = None
+```
+
+### 4.3 ConstructionPlan
+
+```python
+@dataclass
+class ConstructionPlan:
+    case: int                        # 1, 2, or 3
+    m1: Vec3
+    m2: Vec3
+    node_a_id: int | None            # M1 端的 Node ID（None 则需新建）
+    node_b_id: int | None            # M2 端的 Node ID（None 则需新建）
+    edge_geometry: list[Vec3]        # [] 直线, [B] 弧, [B1, B2] biarc
+    split_edge_id: int | None        # 需要截断的 Edge ID
+    split_at_t: float | None         # 截断参数 t ∈ [0,1]
+```
+
+### 4.4 Case 1: 空白→空白（唯一直线）
+
+```
+输入：M1, M2（无切线）
+输出：直线 Edge，geometry = []
+```
+
+伪代码：
+
+```python
+def _case1_plan(m1, m2):
+    return ConstructionPlan(
+        case=1,
+        m1=m1, m2=m2,
+        node_a_id=None,          # 新建 Node
+        node_b_id=None,          # 新建 Node
+        edge_geometry=[],
+        split_edge_id=None,
+    )
+```
+
+### 4.5 Case 2: 单切线约束 → 唯一圆弧
+
+```
+输入：M1, M2, T1（M1 有切线约束）
+输出：圆弧 Edge，geometry = [B]
+```
+
+**几何解算：**
+
+给定 M1、T1（单位切向）、M2，求一个以 M1 为切点（切于 T1）、通过 M2 的圆的圆心 O 和半径 R。
+
+1. 过 M1 且垂直于 T1 的直线 L1：
+   ```
+   L1: M1 + t * perp(T1)    （perp 为平面内垂直方向）
+   ```
+2. 圆心 O 必在 L1 上，且 `|O - M1| = |O - M2| = R`
+3. 令 `d = M2 - M1`，`O = M1 + t * perp(T1)`
+4. 由 `|O - M1| = |O - M2|`：
+   ```
+   |t * perp(T1)|^2 = |M1 + t*perp(T1) - M2|^2
+   t^2 = |t*perp(T1) - d|^2
+   t^2 = t^2 - 2*t*dot(perp(T1), d) + |d|^2
+   0 = -2*t*dot(perp(T1), d) + |d|^2
+   t = |d|^2 / (2 * dot(perp(T1), d))
+   ```
+5. 圆心 `O = M1 + t * perp(T1)`
+6. 半径 `R = |t|`
+7. B 点（切线交点）的计算：
+   - T1 方向 = `t_perp = perp(T1)` … 切线方向即为 T1
+   - M2 处切向 = `O - M2` 的垂直方向
+   - B 是 M1 + k*T1 和 M2 + k'*(perp(M2-O)) 的交点
+   - 或者直接用公式：`B = M1 + (O - M1).length() * tan(α/2) * T1` 的某种形式
+
+   更简单的方法（用 §5.1 中已有的弧表示）：
+   - 使用 `_compute_arc(A=M1, B=B_candidate, C=M2)` 反求 B
+   - 由于已知 O 和 R，可先求出切点 M1 处的垂直方向为 T1，切线方向为 `perp(T1)`
+   - B 位于 `M1 + k * T1` 上
+   - B 还位于 `M2 + k' * perp(M2-O)` 上（M2 处的切向）
+   - 两线求交即可得 B
+
+8. 若 `dot(perp(T1), d)` 很小 —— 意味着 M2 几乎在 M1 的切线延长线上 → 弧半径极大，近似直线。可设定最小曲率半径阈值。
+
+**特殊情况：** 当 `dot(perp(T1), d)` 过小时，弧半径趋近无穷 → 退化为直线 + 折角？ 或拒绝并提示用户。初期可拒绝。
+
+### 4.6 Case 3: 双切线约束 → 等半径 Biarc
+
+```
+输入：M1, M2, T1, T2
+输出：两条圆弧首尾相接，共用一个中间点 M_mid
+```
+
+**等半径策略：**
+
+两条弧的半径相等：`R1 = R2 = R`。
+
+1. 弧 1：起于 M1（切于 T1），终于 M_mid
+2. 弧 2：起于 M_mid（切于 T_mid），终于 M2（切于 T2）
+3. 两弧在 M_mid 处切线连续（G1），即 T_mid 一致
+4. 由于 `R1 = R2 = R`，且约束数量 = 未知数数量，可解
+
+**算法概要（等半径 Biarc）：**
+
+令 `d = M2 - M1`（端点连线向量）。
+
+1. 构造两条射线：
+   - L1：过 M1，方向 `perp(T1)`（圆心方向线）
+   - L2：过 M2，方向 `perp(T2)`
+2. 弧 1 的圆心 O1 在 L1 上：`O1 = M1 + r * perp(T1)`
+3. 弧 2 的圆心 O2 在 L2 上：`O2 = M2 + r * perp(T2)`（`r` 有符号）
+4. 约束：M_mid = 弧 1 终点 = 弧 2 起点，且 T_mid 连续
+   等价于 `|O2 - O1| = 2R`（两圆心距离等于 2R，即两弧相切且方向恰好衔接）
+
+   等等——更精确的约束：两弧在 M_mid 处 G1 连续 ⇔ `O1, M_mid, O2` 三点共线，且 `|O1 - M_mid| = |O2 - M_mid| = R`。
+
+   这等价于 `|O2 - O1| = 2R`，且 M_mid 为 O1O2 中点。
+
+5. 代入：
+   ```
+   |(M2 + r * perp(T2)) - (M1 + r * perp(T1))| = 2|r|
+   |d + r * (perp(T2) - perp(T1))| = 2|r|
+   ```
+
+   展开得关于 `r` 的二次方程，取 |r| 较小的解（最小化曲率）。
+
+6. 解得 r 后：
+   - O1 = M1 + r * perp(T1)，O2 = M2 + r * perp(T2)
+   - M_mid = (O1 + O2) / 2
+   - T_mid = perp(M_mid - O1)（弧 1 在 M_mid 的切向）
+   - B1 = 弧 1 的切线交点（O1 到两切点 M1, M_mid 的切线交点）
+   - B2 = 弧 2 的切线交点（O2 到两切点 M_mid, M2 的切线交点）
+
+7. Edge 几何：`geometry = [B1, B2, M_mid]` —— 待我们确定数据模型如何支持双弧（参见 §4.9）。
+
+### 4.7 截断（Edge 分割）
+
+当 M2 通过路径吸附命中一条既有 Edge 的内部点（而非节点）时触发。
+
+```python
+def _split_edge(self, edge_id: int, t: float):
+    edge = self.network.edges[edge_id]
+    node_a = self.network.nodes[edge.node_a_id]
+    node_b = self.network.nodes[edge.node_b_id]
+
+    # 1. 计算截断点世界坐标和在该点的切线
+    split_pos = self._point_at_t(edge, node_a, node_b, t)
+
+    # 2. 创建新 Node
+    new_node = self.network.add_node(split_pos)
+
+    # 3. 原 Edge 移除，替换为两个新 Edge
+    if edge.is_arc:
+        # 将圆弧在参数 t 处分成两段圆弧
+        e1_geometry, e2_geometry = self._split_arc_geometry(edge, node_a, node_b, t)
+    else:
+        # 直线分裂为两段直线
+        e1_geometry = []
+        e2_geometry = []
+
+    self.network.remove_edge(edge_id)
+    self.network.add_edge(node_a, new_node, e1_geometry)
+    self.network.add_edge(new_node, node_b, e2_geometry)
+```
+
+圆弧分裂：给定弧 Edge 在参数 t ∈ [0,1] 处截断：
+- 计算截断点在弧上的世界坐标 P
+- 弧 1：从 node_a 到 P，B1 = 弧 1 的切线交点（可反算）
+- 弧 2：从 P 到 node_b，B2 = 弧 2 的切线交点（可反算）
+- 注意：截断点 P 的切线方向与原弧在 P 处一致（无损分割）
+
+### 4.8 删除与合并
+
+Delete 模式点击一个中间 Node（connection_count == 2）：
+
+```python
+def _delete_intermediate_node(self, node_id: int):
+    node = self.network.nodes[node_id]
+    edge_ids = list(node.incident_edge_ids)
+    if len(edge_ids) != 2:
+        return  # 不处理端点或道岔
+
+    e1 = self.network.edges[edge_ids[0]]
+    e2 = self.network.edges[edge_ids[1]]
+
+    # 检查合并条件
+    if not self._can_merge(e1, e2):
+        return  # 拒绝删除
+
+    # 找出两个端点（非当前 node 的端点）
+    other_a = e1.node_a_id if e1.node_a_id != node_id else e1.node_b_id
+    other_b = e2.node_a_id if e2.node_a_id != node_id else e2.node_b_id
+
+    # 移除两条边和中间节点
+    self.network.remove_edge(edge_ids[0])
+    self.network.remove_edge(edge_ids[1])
+    self.network.remove_node(node_id)
+
+    # 创建合并后的新边
+    if e1.is_arc and e2.is_arc:
+        merged_geometry = self._merge_arc_geometry(e1, e2, node, other_a, other_b)
+    else:
+        merged_geometry = []
+    self.network.add_edge(
+        self.network.nodes[other_a],
+        self.network.nodes[other_b],
+        merged_geometry,
+    )
+
+def _can_merge(self, e1: Edge, e2: Edge) -> bool:
+    if not e1.is_arc and not e2.is_arc:
+        return True  # 两条直线永远是共线的（因为我们只删除连接数为 2 的中间点）
+    if e1.is_arc and e2.is_arc:
+        return abs(e1.arc_radius - e2.arc_radius) < 1e-6
+    return False  # 一条直线一条弧不可合并
+```
+
+端点 Node（connection_count == 1）直接删除并连带 Edge。
+
+### 4.9 双弧 Edge 的数据模型考量
+
+当前 Edge 模型只支持"一段弧"（geometry 中单 B 点）。Biarc 需要两段弧。选择：
+
+**方案 A（暂定）**：Biarc 展开为两个连续的 Edge + 一个中间 Node。实现简单，对现有模型无侵入。
+
+```
+Edge.geometry 保持 [] 或 [B]，不变
+Biarc = 连续两个 Edge，中间自动插入一个隐藏 Node
+```
+
+这样做的好处：无需修改现有模型、渲染器、GeoJSON 读写。
+坏处：图上多了一个 Node（但这个 Node 是"虚拟"的——用户下次点击可选中它，编辑行为一致）。
+
+**是否接受方案 A**？如接受，Biarc 直接转化为两个 Edge 创建。
+
+---
+
+## 5. 几何工具函数
+
+### 5.1 点在边上的投影
+
+```python
+def project_point_on_edge(pos: Vec3, edge: Edge, node_a: Node, node_b: Node) -> tuple[float, Vec3, float]:
+    """返回 (t, projected_position, distance)"""
+    if edge.is_arc:
+        return _project_on_arc(pos, edge, node_a, node_b)
+    else:
+        return _project_on_line(pos, node_a.position, node_b.position)
+
+def _project_on_line(p: Vec3, a: Vec3, b: Vec3) -> tuple[float, Vec3, float]:
+    ab = b - a
+    ab_len_sq = ab.length_squared()
+    if ab_len_sq == 0.0:
+        return 0.0, a, p.distance_to(a)
+    t = max(0.0, min(1.0, (p - a).dot(ab) / ab_len_sq))
+    proj = a + ab * t
+    return t, proj, p.distance_to(proj)
+
+def _project_on_arc(p: Vec3, edge: Edge, node_a: Node, node_b: Node) -> tuple[float, Vec3, float]:
+    """将 p 投影到圆弧上"""
+    center = edge.arc_center
+    radius = edge.arc_radius
+    to_p = p - center
+    if to_p.length() == 0.0:
+        return 0.0, node_a.position, radius
+
+    # 将 to_p 缩放到半径，夹紧到弧的角度范围
+    on_circle = center + to_p.normalize() * radius
+
+    # 将 on_circle 夹紧到弧的起止角度之间
+    oa = node_a.position - center
+    oc = node_b.position - center
+
+    # 用 oa 和 oc 定义的角度范围 [0, edge.arc_angle_rad] 中插值
+    angle_p = signed_angle(oa, on_circle - center, edge.arc_normal)
+    clamped_angle = max(0.0, min(edge.arc_angle_rad, angle_p)) if edge.arc_angle_rad >= 0 else min(0.0, max(edge.arc_angle_rad, angle_p))
+
+    # 绕 normal 旋转 oa 得到投影点
+    rot_axis = edge.arc_normal
+    rotated = rotate_around(oa, rot_axis, clamped_angle)
+    projected = center + rotated
+
+    t = clamped_angle / edge.arc_angle_rad if edge.arc_angle_rad != 0 else 0.0
+    return t, projected, p.distance_to(projected)
+```
+
+### 5.2 切线计算
+
+```python
+def tangent_at_node(node: Node, edge: Edge, network: RailNetwork) -> Vec3 | None:
+    """返回 Node 处沿 Edge 的外向切线方向"""
+    other = network.nodes[edge.node_b_id if edge.node_a_id == node.node_id else edge.node_a_id]
+
+    if not edge.is_arc:
+        return (other.position - node.position).normalize()
+
+    center = edge.arc_center
+    to_node = node.position - center
+    tangent = edge.arc_normal.cross(to_node)   # 平面内垂直于半径 = 切线
+    outward_dir = (other.position - node.position).normalize()
+    if tangent.dot(outward_dir) < 0:
+        tangent = tangent * -1.0
+    return tangent.normalize()
+```
+
+---
+
+## 6. 预览渲染
+
+### 6.1 预览协议
+
+在 `BUILD_ACTIVE` 状态下，渲染器收到一个 `PreviewGeometry` 结构：
+
+```python
+@dataclass
+class PreviewGeometry:
+    m1: Vec3
+    m2: Vec3
+    case: int                  # 1, 2, or 3
+    edge_geometry: list[Vec3]  # 待建 Edge 的 geometry
+    valid: bool                # 当前计算是否合法
+```
+
+渲染方式：
+- 半透明或虚线绘制预览 Edge
+- M1 位置绘制高亮锚点
+- 若 `valid == False`，以红色/警告色绘制，提示无法建造
+
+### 6.2 警告指示器
+
+当 `BUILD_IDLE` 状态且满足以下条件时，光标显示红色警告：
+- 所有吸附 Provider 的 `enabled == False`
+- `_has_nearby_element(cursor_pos)` 返回 True
+
+渲染：在光标周围绘制红色圆环（或红色十字），表示"建议开启吸附"。
+
+---
+
+## 7. 实施步骤
+
+| 步 | 内容 | 状态 | 说明 |
+|----|------|------|------|
+| **0** | **清理遗留代码** | ✅ 完成 | 删除 `model/geometry.py` 重复定义 |
+| **1** | **Editor 模式重构 + 点吸附 + Case 1 + 预览 + 警告** | ✅ 完成 | 三模式（IDLE/BUILD/DELETE）+ BUILD 子状态机（IDLE/ACTIVE）。点吸附（PointSnapProvider）。Case 1 直线建造（四种端点组合）。实时预览（虚线+M1锚点）。警告指示器（红色十字+圆环）。拒绝处理统一为保持当前状态。 |
+| **2** | **路径吸附 + DELETE 边导向** | ✅ 完成 | PathSnapProvider（直线+弧投影，`model/geom_utils.py` 几何工具集）。切线方向按 BUILD_ACTIVE 时 `(cursor - M1)` 夹角选择。DELETE 模式操作单位改为 Edge，自动清理孤立节点。优先级：点吸附 > 路径吸附。 |
+| **3** | **Case 2 弧建造** | 待实现 | 单切线约束圆弧建造（从端点延伸、路径吸附交接）。B 点计算（圆心+半径反推切线交点）。实时弧预览。 |
+| **4** | **删除-合并** | 待实现 | 删除 connection_count==2 的中间节点时，检查两侧边是否可合并（共线直线 / 等半径等圆心弧）。合并成功则创建新边，否则拒绝删除。 |
+| **5** | **Case 3 Biarc** | 待实现 | 等半径双弧建造（方案 A：双 Edge + 中间 Node）。数学求解：二次方程解 r，计算 M_mid。 |
+| **6** | **Edge 截断** | 待实现 | M2 路径吸附到既有边的内部点时，插入新节点分裂原边为两段（直线/弧）。截断后的弧需重新计算 B 点保证 GeoJSON 往返一致。 |
+
+---
+
+## 8. 附录：同类参考
+
+### Biarc 中间点策略（运输类游戏常用）
+
+- **等半径**（equal radii）：两弧半径相等，对称美观
+- **最小化最大曲率**（minimize max curvature）：找使两弧中较大曲率最小化的解
+- **指定半径**（fixed radius）：允许用户指定其中一段弧的半径
+- **等弧长**：两弧弧长接近
+
+初期实现：**等半径策略**。其他策略可后续添加为 Biarc 策略的可选参数。
+
+### 曲率限制
+
+开发初期不实施最小/最大曲率半径限制。接口预留方式：
+
+```python
+def compute_case2_plan(m1, t1, m2, min_radius=None, max_radius=None):
+    ...
+    if min_radius is not None and R < min_radius:
+        return None   # 拒绝
+```
+
+---
+
+## 9. GeoJSON 兼容性
+
+### 双弧写入
+若采用方案 A（双 Edge + 中间 Node），GeoJSON 直接输出两个 3 点 LineString，无需特殊处理。
+
+### 截断后的弧元数据
+截断圆弧时需重新计算两半段的 B 点，确保写回 GeoJSON 后重载的弧元数据完全相等。截断算法必须精确（无信息丢失）。
+
+### 合并后的 GeoJSON
+合并两条直线为一个直线、合并两条等半径弧为一个弧 → GeoJSON 自然对应。

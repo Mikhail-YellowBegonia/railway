@@ -87,12 +87,18 @@ class Renderer:
         # 悬停边高亮（DELETE 模式）
         if editor.hovered_edge_id is not None:
             edge = network.edges.get(editor.hovered_edge_id)
-            if edge and not edge.is_arc:
+            if edge:
                 node_a = network.nodes[edge.node_a_id]
                 node_b = network.nodes[edge.node_b_id]
-                x1, y1 = cam.world_to_screen(node_a.position.x, node_a.position.y, w, h)
-                x2, y2 = cam.world_to_screen(node_b.position.x, node_b.position.y, w, h)
-                pygame.draw.line(self.surface, COLOR_HOVER_EDGE, (x1, y1), (x2, y2), 3)
+                if edge.is_arc:
+                    pts = edge.sample_arc_points(30)
+                    if len(pts) >= 2:
+                        screen_pts = [cam.world_to_screen(p.x, p.y, w, h) for p in pts]
+                        pygame.draw.lines(self.surface, COLOR_HOVER_EDGE, False, screen_pts, 3)
+                else:
+                    x1, y1 = cam.world_to_screen(node_a.position.x, node_a.position.y, w, h)
+                    x2, y2 = cam.world_to_screen(node_b.position.x, node_b.position.y, w, h)
+                    pygame.draw.line(self.surface, COLOR_HOVER_EDGE, (x1, y1), (x2, y2), 3)
 
         # 悬停节点高亮（吸附目标）
         if editor.hovered_node_id is not None:

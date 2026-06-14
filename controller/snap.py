@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from model.geom_utils import project_point_on_edge, tangent_along_edge
 from model.rail_network import RailNetwork
 from model.vec3 import Vec3
 
@@ -95,16 +96,97 @@ class SnapSystem:
 
     def __init__(self) -> None:
         self.point_snap = PointSnapProvider(threshold=0.3)
-        # TODO: 后续添加 PathSnapProvider, ParallelPointProvider, ParallelPathProvider
+        self.path_snap = PathSnapProvider(threshold=0.3)
+        # TODO: 后续添加 ParallelPointProvider, ParallelPathProvider
 
-    def snap(self, world_pos: Vec3, network: RailNetwork) -> SnapResult:
-        """按优先级依次尝试吸附，返回最终结果（总是返回，未吸附时 snapped=False）"""
+    def any_enabled(self) -> bool:
+        """是否有至少一个 Provider 启用"""
+        return self.point_snap.enabled or self.path_snap.enabled
+
+    def snap(
+        self,
+        world_pos: Vec3,
+        network: RailNetwork,
+        reference_pos: Vec3 | None = None,
+    ) -> SnapResult:
+        """按优先级依次尝试吸附。
+
+        reference_pos：用于路径吸附时选择切线正反方向（一般传 BUILD_ACTIVE 的 M1）。
+        BUILD_IDLE 状态传 None，此时路径吸附不产生切线。
+        """
         # 优先级 1: 点吸附
         result = self.point_snap.snap(world_pos, network)
         if result is not None:
             return result
 
-        # TODO: 优先级 2: 路径吸附
+        # 优先级 2: 路径吸附
+        result = self.path_snap.snap(world_pos, network, reference_pos)
+        if result is not None:
+            return result
 
         # 无吸附：返回原始位置
         return SnapResult(snapped=False, position=world_pos)
+
+
+class PathSnapProvider:
+    """路径吸附提供器：吸附到既有边的最近投影点"""
+
+    def __init__(self, threshold: float = 0.3) -> None:
+        self.threshold = threshold
+        self.enabled = True
+
+    def snap(
+        self,
+        world_pos: Vec3,
+        network: RailNetwork,
+        reference_pos: Vec3 | None,
+    ) -> SnapResult | None:
+        """尝试吸附到最近的边。reference_pos 不为 None 时计算切线方向。"""
+        if not self.enabled:
+            return None
+
+        best_edge_id: int | None = None
+        best_t = 0.0
+        best_pos = Vec3()
+        best_dist = float('inf')
+
+        for edge_id, edge in network.edges.items():
+            node_a = network.nodes[edge.node_a_id]
+            node_b = network.nodes[edge.node_b_id]
+            t, proj_pos, dist = project_point_on_edge(world_pos, edge, node_a, node_b)
+            if dist < self.threshold and dist < best_dist:
+                best_dist = dist
+                best_edge_id = edge_id
+                best_t = t
+                best_pos = proj_pos
+
+        if best_edge_id is None:
+            return None
+
+        edge = network.edges[best_edge_id]
+        node_a = network.nodes[edge.node_a_id]
+        node_b = network.nodes[edge.node_b_id]
+
+        # 切线方向选择：仅在 BUILD_ACTIVE（reference_pos 非 None）时计算
+        tangent: Vec3 | None = None
+        if reference_pos is not None:
+            forward = tangent_along_edge(edge, node_a, node_b, best_t)
+            reverse = forward * -1.0
+            # 取与 (world_pos - reference_pos) 夹角较小的方向
+            cursor_dir = world_pos - reference_pos
+            if cursor_dir.length() > 1e-9:
+                cursor_dir = cursor_dir.normalize()
+                if forward.dot(cursor_dir) >= reverse.dot(cursor_dir):
+                    tangent = forward
+                else:
+                    tangent = reverse
+            else:
+                tangent = forward  # cursor 与 reference 重合，任取
+
+        return SnapResult(
+            snapped=True,
+            position=best_pos,
+            tangent=tangent,
+            snapped_edge_id=best_edge_id,
+            snapped_edge_t=best_t,
+        )
