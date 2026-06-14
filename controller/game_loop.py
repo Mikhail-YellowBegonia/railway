@@ -37,7 +37,7 @@ class GameLoop:
 
             self.renderer.clear()
             self.renderer.draw_network(self.network)
-            self.renderer.draw_overlay(self.network, self.editor)
+            self.renderer.draw_overlay(self.network, self.editor, mouse_world)
             pygame.display.flip()
             self.clock.tick(60)
 
@@ -51,13 +51,14 @@ class GameLoop:
 
         if event.type == pygame.KEYDOWN:
             if event.key == pygame.K_ESCAPE:
-                self.running = False
-            elif event.key == pygame.K_p:
-                self.editor.set_mode(EditMode.PLACE)
-            elif event.key == pygame.K_c:
-                self.editor.set_mode(EditMode.CONNECT)
+                self.editor.handle_cancel()
+            elif event.key == pygame.K_b:
+                self.editor.set_mode(EditMode.BUILD)
             elif event.key == pygame.K_d:
                 self.editor.set_mode(EditMode.DELETE)
+            elif event.key == pygame.K_q:
+                # Q 键退出（Esc 现在用于取消而非退出）
+                self.running = False
             return
 
         if event.type == pygame.MOUSEBUTTONDOWN:

@@ -7,7 +7,7 @@ import pygame
 from model.rail_network import RailNetwork
 from model.vec3 import Vec3
 from view.camera import Camera
-from controller.editor import EditMode, Editor
+from controller.editor import EditMode, BuildState, Editor
 
 COLOR_BG = (30, 30, 30)
 COLOR_EDGE_STRAIGHT = (180, 180, 180)
@@ -22,13 +22,16 @@ COLOR_NODE: dict[int, tuple[int, int, int]] = {
     4: (60, 200, 100),
 }
 COLOR_HOVER = (255, 255, 100)
-COLOR_SELECTED = (100, 255, 100)
 COLOR_HOVER_EDGE = (255, 200, 80)
 COLOR_TEXT = (200, 200, 200)
+COLOR_PREVIEW = (120, 220, 255)
+COLOR_PREVIEW_INVALID = (255, 80, 80)
+COLOR_M1_ANCHOR = (100, 255, 100)
+COLOR_WARNING = (255, 60, 60)
 
 MODE_NAMES: dict[EditMode, str] = {
-    EditMode.PLACE: "PLACE (P)",
-    EditMode.CONNECT: "CONNECT (C)",
+    EditMode.IDLE: "IDLE",
+    EditMode.BUILD: "BUILD (B)",
     EditMode.DELETE: "DELETE (D)",
 }
 
@@ -76,11 +79,12 @@ class Renderer:
             color = COLOR_NODE.get(count, COLOR_NODE[1])
             pygame.draw.circle(self.surface, color, (int(cx), int(cy)), node_radius)
 
-    def draw_overlay(self, network: RailNetwork, editor: Editor) -> None:
+    def draw_overlay(self, network: RailNetwork, editor: Editor, mouse_world: Vec3) -> None:
         w = self.surface.get_width()
         h = self.surface.get_height()
         cam = self.camera
 
+        # 悬停边高亮（DELETE 模式）
         if editor.hovered_edge_id is not None:
             edge = network.edges.get(editor.hovered_edge_id)
             if edge and not edge.is_arc:
@@ -90,19 +94,52 @@ class Renderer:
                 x2, y2 = cam.world_to_screen(node_b.position.x, node_b.position.y, w, h)
                 pygame.draw.line(self.surface, COLOR_HOVER_EDGE, (x1, y1), (x2, y2), 3)
 
-        if editor.selected_node_id is not None:
-            node = network.nodes.get(editor.selected_node_id)
-            if node:
-                cx, cy = cam.world_to_screen(node.position.x, node.position.y, w, h)
-                pygame.draw.circle(self.surface, COLOR_SELECTED, (int(cx), int(cy)), 10, 2)
-
+        # 悬停节点高亮（吸附目标）
         if editor.hovered_node_id is not None:
             node = network.nodes.get(editor.hovered_node_id)
-            if node and editor.hovered_node_id != editor.selected_node_id:
+            if node:
                 cx, cy = cam.world_to_screen(node.position.x, node.position.y, w, h)
                 pygame.draw.circle(self.surface, COLOR_HOVER, (int(cx), int(cy)), 10, 2)
 
+        # BUILD_ACTIVE: 预览几何 + M1 锚点
+        if editor.mode == EditMode.BUILD and editor.build_state == BuildState.ACTIVE:
+            self._draw_preview(editor, cam, w, h)
+
+        # 警告指示器
+        if editor.show_warning:
+            self._draw_warning(mouse_world, cam, w, h)
+
+        # 模式标签
         self._draw_mode_text(editor, w)
+
+    def _draw_preview(self, editor: Editor, cam: Camera, w: int, h: int) -> None:
+        """绘制 BUILD_ACTIVE 状态下的预览几何"""
+        preview = editor.preview
+        if preview is None:
+            return
+
+        color = COLOR_PREVIEW if preview.valid else COLOR_PREVIEW_INVALID
+
+        # 绘制预览边（Step 1 仅 Case 1 直线）
+        if preview.case == 1:
+            x1, y1 = cam.world_to_screen(preview.m1.x, preview.m1.y, w, h)
+            x2, y2 = cam.world_to_screen(preview.m2.x, preview.m2.y, w, h)
+            _draw_dashed_line(self.surface, color, (x1, y1), (x2, y2), dash_len=10, gap_len=5)
+        # TODO: Case 2 弧预览, Case 3 Biarc 预览
+
+        # 绘制 M1 锚点
+        if editor.build_m1 is not None:
+            ax, ay = cam.world_to_screen(editor.build_m1.x, editor.build_m1.y, w, h)
+            pygame.draw.circle(self.surface, COLOR_M1_ANCHOR, (int(ax), int(ay)), 6)
+            pygame.draw.circle(self.surface, (255, 255, 255), (int(ax), int(ay)), 6, 1)
+
+    def _draw_warning(self, mouse_world: Vec3, cam: Camera, w: int, h: int) -> None:
+        """绘制警告光标（红色圆环）"""
+        cx, cy = cam.world_to_screen(mouse_world.x, mouse_world.y, w, h)
+        pygame.draw.circle(self.surface, COLOR_WARNING, (int(cx), int(cy)), 14, 2)
+        # 红色十字
+        pygame.draw.line(self.surface, COLOR_WARNING, (cx - 8, cy), (cx + 8, cy), 2)
+        pygame.draw.line(self.surface, COLOR_WARNING, (cx, cy - 8), (cx, cy + 8), 2)
 
     def _draw_mode_text(self, editor: Editor, screen_w: int) -> None:
         label = MODE_NAMES.get(editor.mode, "")
