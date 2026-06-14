@@ -203,3 +203,108 @@ def project_along_direction(m1: Vec3, t1: Vec3, m2: Vec3) -> Vec3:
     d = m2 - m1
     proj_len = d.dot(t1n)
     return m1 + t1n * proj_len
+
+
+# ===== 合并判定（DELETE 中间节点）=====
+
+# 合并几何严格阈值。距离/位置类用绝对阈值；方向类用 cos(夹角) 接近 1。
+MERGE_RADIUS_TOL = 1e-4         # 半径差
+MERGE_POSITION_TOL = 1e-4       # 圆心距离
+MERGE_DIR_DOT_MIN = 1.0 - 1e-6  # cos(夹角) 至少为此（约 0.08° 以内）
+
+
+def can_merge_straight(
+    a_pos: Vec3, mid_pos: Vec3, b_pos: Vec3
+) -> bool:
+    """两条直线相邻边能否合并为一条直线。
+
+    几何条件：A→mid 与 mid→B 共线（同向，单位向量内积 ≈ 1）。
+    """
+    v1 = mid_pos - a_pos
+    v2 = b_pos - mid_pos
+    if v1.length() < 1e-9 or v2.length() < 1e-9:
+        return False
+    return v1.normalize().dot(v2.normalize()) >= MERGE_DIR_DOT_MIN
+
+
+def can_merge_arcs(
+    edge_1, edge_2, mid_pos: Vec3, a_pos: Vec3, b_pos: Vec3
+) -> bool:
+    """两条圆弧相邻边能否合并为一条圆弧。
+
+    严格条件（缺一不可）：
+    - 半径相等：|R1 - R2| < tol
+    - 圆心重合：|center1 - center2| < tol
+    - 同向：在 mid_pos 处，弧 1 的"沿 t 增大方向切线"指向 mid（从 a 来）；
+      弧 2 的"沿 t 增大方向切线"从 mid 出发指向 b。两者夹角 ≈ 0。
+    - normal 同向：cross 积同号（保证两弧绕同一圆转同方向，不会一个顺时针一个逆时针）
+    """
+    if abs(edge_1.arc_radius - edge_2.arc_radius) > MERGE_RADIUS_TOL:
+        return False
+
+    if edge_1.arc_center is None or edge_2.arc_center is None:
+        return False
+    if edge_1.arc_center.distance_to(edge_2.arc_center) > MERGE_POSITION_TOL:
+        return False
+
+    # normal 同向（XY 平面假设下，比较 z 分量符号）
+    if edge_1.arc_normal is None or edge_2.arc_normal is None:
+        return False
+    if edge_1.arc_normal.dot(edge_2.arc_normal) < MERGE_DIR_DOT_MIN:
+        return False
+
+    # 切线连续性：mid_pos 处两弧切向应同向
+    # 弧 1 在 mid_pos 处的"指向 b"切线 = 沿弧 1 从 a 到 mid 的延伸方向
+    # 弧 2 在 mid_pos 处的"指向 b"切线 = 沿弧 2 从 mid 到 b 的方向
+    t1 = tangent_at_arc_point_forward(edge_1, mid_pos)
+    # edge_1 的 forward 方向是从 node_a → node_b；如果 mid 是 edge_1 的 node_b 那 forward
+    # 已经就是"指向 b"方向；如果 mid 是 edge_1 的 node_a 则要反号。但调用方保证
+    # mid 是被合并的中间节点，edge_1 的另一端是 a_pos。判断 a_pos 在 edge_1 上是 node_a
+    # 还是 node_b 比较繁琐，等价检查：t1 应大致指向 (b_pos - mid_pos) 方向。
+    flow_dir = (b_pos - mid_pos)
+    if flow_dir.length() < 1e-9:
+        return False
+    flow = flow_dir.normalize()
+    if t1.dot(flow) < 0:
+        t1 = t1 * -1.0
+
+    t2 = tangent_at_arc_point_forward(edge_2, mid_pos)
+    if t2.dot(flow) < 0:
+        t2 = t2 * -1.0
+
+    return t1.dot(t2) >= MERGE_DIR_DOT_MIN
+
+
+def merged_arc_b_point(
+    edge_1, edge_2, a_pos: Vec3, b_pos: Vec3
+) -> Vec3 | None:
+    """两条等圆心等半径的弧合并后的新 B 点（切线交点）。
+
+    用 a_pos 处的切线（指向 b 方向）和 b_pos 处的切线（指向 a 方向反向，即沿弧出发方向）
+    求两条切线的交点。
+    """
+    # a_pos 在弧 1 上；先确定弧 1 在 a_pos 处的切向
+    # 通过 tangent_at_arc_point_forward 取 forward 方向，再调整使其"远离 mid"——
+    # 简化：直接以 a→b 的整体方向校正
+    flow = b_pos - a_pos
+    if flow.length() < 1e-9:
+        return None
+    flow_n = flow.normalize()
+
+    t_a = tangent_at_arc_point_forward(edge_1, a_pos)
+    if t_a.dot(flow_n) < 0:
+        t_a = t_a * -1.0
+
+    t_b = tangent_at_arc_point_forward(edge_2, b_pos)
+    # b 处切线应指向 a 的反向；调整到与 flow 同向
+    if t_b.dot(flow_n) < 0:
+        t_b = t_b * -1.0
+
+    # 求 a_pos + k * t_a = b_pos + k' * (-t_b) 的交点（B 应在两段切线的"前方交点"）
+    # 即 a_pos + k*t_a - b_pos + k'*t_b = 0  →  k*t_a + k'*t_b = b_pos - a_pos
+    det = t_a.x * t_b.y - t_a.y * t_b.x
+    if abs(det) < 1e-9:
+        return None
+    d = b_pos - a_pos
+    k = (d.x * t_b.y - d.y * t_b.x) / det
+    return a_pos + t_a * k
