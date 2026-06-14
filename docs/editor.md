@@ -114,35 +114,51 @@ DELETE 模式因此简化为：
 ```python
 @dataclass
 class SnapResult:
-    snapped: bool                        # 是否发生了吸附
-    position: Vec3                       # 吸附后的世界坐标（无吸附时 = 原始光标位置）
-    tangent: Vec3 | None = None          # 该位置的切线方向（有切线约束时非 None）
-    snapped_node_id: int | None = None   # 吸附到的 Node ID（点吸附时）
-    snapped_edge_id: int | None = None   # 吸附到的 Edge ID（路径吸附时）
-    snapped_edge_t: float | None = None  # 路径吸附时沿边的参数 t ∈ [0,1]
+    snapped: bool                           # 是否发生了吸附
+    position: Vec3                          # 吸附后的世界坐标
+    tangent: Vec3 | None = None             # 最佳切线方向（端点唯一 / 路径按 reference 选）
+    tangent_candidates: list[Vec3] = []     # 该位置所有候选切线（动态由 M2 选择最佳）
+    snapped_node_id: int | None = None      # 吸附到的 Node ID（点吸附时）
+    snapped_edge_id: int | None = None      # 吸附到的 Edge ID（路径吸附时）
+    snapped_edge_t: float | None = None     # 路径吸附时沿边的参数 t ∈ [0,1]
 ```
+
+`tangent` 与 `tangent_candidates` 的区别：
+- `tangent`：吸附时计算的"单一最佳值"，仅在能确定方向时有值（端点；路径
+  吸附 + 已传入 reference_pos）。供轻量场景或调试展示使用。
+- `tangent_candidates`：所有合法候选；BUILD 阶段把它存进 `build_t1_candidates`，
+  到 `_compute_plan` 阶段拿到 M2 后再选最佳。这是支持道岔分支建造和路径
+  吸附 M1 的关键。
 
 ### 2.2 切线方向获取
 
-一个 Node 处的切线方向由该 Node 连接的 Edge 决定：
+一个 Node 处的切线方向由该 Node 连接的 Edge 决定。
 
-| Node 连接数 | 切线方向 |
-|-------------|----------|
-| 0（孤立节点）| `None`（无约束，Case 1） |
-| 1（端点）   | 取该 Edge 在 Node 处的切向（指向远处） |
-| ≥2（道岔/交叉/中间）| **不允许延伸**（待后期规则） |
+**T1 语义**：T1 表示"从 M1 继续延伸的方向"，即新建段在 M1 处的切向。
+为保持切线连续不折返，T1 必然是"远离 other 节点"的方向。
 
-Edge 在 Node 处的切线方向计算：
+| Node 连接数 | T1 候选 |
+|-------------|---------|
+| 0（孤立节点）| `[]`（无切线约束，Case 1） |
+| 1（端点）   | `[t]`，t = 该 Edge 在 Node 处沿"远离 other"方向的切向 |
+| ≥ 2（道岔/中间）| `[t1, t2, ...]`，每条相邻边一个候选；最终选哪个由 M2 方向决定 |
 
-- **直边**：沿边方向 `(other_node.position - this_node.position)`
+**多候选的选择规则**：BUILD_ACTIVE 中提交时（M2 已知），从所有候选中
+取 `t.dot((M2-M1).normalize())` 最大者。若最大值 < ~0（所有候选都与
+(M2-M1) 钝角或垂直）→ 拒绝（按 §4.0）。
+
+Edge 在 Node 处的"远离 other"切向计算：
+
+- **直边**：`(node.position - other.position).normalize()`
 - **弧边**：
-  - 若 `this_node` 是 `node_a`：切线方向 = `arc_normal × (this_node.position - arc_center)`（即切点处的切向，方向向外）
-  - 若 `this_node` 是 `node_b`：切线方向 = `-(arc_normal × (this_node.position - arc_center))`
+  - `tangent = arc_normal × (node.position - arc_center)`
+  - 若 `tangent · (node.position - other.position) < 0`，反号
+  - 归一化
 
 路径上任意点的切线方向（路径吸附用）：
 
-- **直边**：沿边方向（正/反两种）
-- **弧边**：该点处圆周切向（正/反两种）
+- 路径吸附返回两个候选 `[forward, reverse]`，BUILD_ACTIVE 中按 (M2-M1)
+  夹角选择，规则同上
 
 ---
 
@@ -373,46 +389,43 @@ def _case1_plan(m1, m2):
 ### 4.5 Case 2: 单切线约束 → 唯一圆弧
 
 ```
-输入：M1, M2, T1（M1 有切线约束）
-输出：圆弧 Edge，geometry = [B]
+输入：M1, T1_candidates (≥1 个), M2
+处理：
+  1. 从 T1_candidates 中选 T1*（与 (M2-M1) 夹角最小者）
+  2. 若所有候选都与 (M2-M1) 夹角 ≥ 90°（dot < 阈值）→ 拒绝（Q5）
+  3. 若 M2 在 T1* 的"背后"（M2-M1)·T1* ≤ 0）→ 拒绝（Q2）
+  4. 解圆弧（见下"几何解算"）
+  5. 若 R > MAX_ARC_RADIUS（默认 500.0）→ 退化为沿 T1* 的直线（Q3）
+  6. 输出弧 Edge，geometry = [B]
 ```
 
-**几何解算：**
+**退化为直线的处理**：当 Case 2 计算结果半径过大或几何不可解时，
+为保持起点切线连续（避免 M1 处折角），不直接连 M1→M2，而是建造
+M1 → M2'，其中 `M2' = M1 + ((M2-M1)·T1*) · T1*`，即 M2 在 T1* 上的
+投影。这样肉眼看上去就是沿 T1* 方向画一条直线"画到鼠标横向位置"。
 
-给定 M1、T1（单位切向）、M2，求一个以 M1 为切点（切于 T1）、通过 M2 的圆的圆心 O 和半径 R。
+> 后续计划：当弧半径超限时，应改为"圆弧+直线"的复合结果（先按
+> MAX_ARC_RADIUS 画一段弧，再接直线到 M2）。当前简化为单一直线，
+> 是临时退化方案。
 
-1. 过 M1 且垂直于 T1 的直线 L1：
+**几何解算（圆心、半径、B 点）：**
+
+给定 M1、T1*（单位切向）、M2，求一个以 M1 为切点（切于 T1*）、通过 M2 的圆。
+
+1. 圆心 O 必在过 M1 且垂直于 T1* 的法线上：
    ```
-   L1: M1 + t * perp(T1)    （perp 为平面内垂直方向）
+   O = M1 + s · perp(T1*)        ，perp 在 XY 平面内逆时针 90°
    ```
-2. 圆心 O 必在 L1 上，且 `|O - M1| = |O - M2| = R`
-3. 令 `d = M2 - M1`，`O = M1 + t * perp(T1)`
-4. 由 `|O - M1| = |O - M2|`：
+2. 由 `|O - M1| = |O - M2| = R` 解出：
    ```
-   |t * perp(T1)|^2 = |M1 + t*perp(T1) - M2|^2
-   t^2 = |t*perp(T1) - d|^2
-   t^2 = t^2 - 2*t*dot(perp(T1), d) + |d|^2
-   0 = -2*t*dot(perp(T1), d) + |d|^2
-   t = |d|^2 / (2 * dot(perp(T1), d))
+   s = |M2 - M1|² / (2 · perp(T1*) · (M2 - M1))
    ```
-5. 圆心 `O = M1 + t * perp(T1)`
-6. 半径 `R = |t|`
-7. B 点（切线交点）的计算：
-   - T1 方向 = `t_perp = perp(T1)` … 切线方向即为 T1
-   - M2 处切向 = `O - M2` 的垂直方向
-   - B 是 M1 + k*T1 和 M2 + k'*(perp(M2-O)) 的交点
-   - 或者直接用公式：`B = M1 + (O - M1).length() * tan(α/2) * T1` 的某种形式
+3. `R = |s|`；分母趋于 0 时（M2 几乎在 T1* 延长线上）→ 退化为直线
+4. **arc_normal**：取 +Z 或 -Z，由 `(M1 - O) × T1*` 的 z 分量符号决定
+5. **B 点**（切线交点）：M1 处切线 `M1 + k·T1*` 与 M2 处切线 `M2 + k'·T2`
+   的交点。其中 M2 处切向 `T2 = arc_normal × (M2 - O)`，归一化后求 2x2 线性方程的交点。
 
-   更简单的方法（用 §5.1 中已有的弧表示）：
-   - 使用 `_compute_arc(A=M1, B=B_candidate, C=M2)` 反求 B
-   - 由于已知 O 和 R，可先求出切点 M1 处的垂直方向为 T1，切线方向为 `perp(T1)`
-   - B 位于 `M1 + k * T1` 上
-   - B 还位于 `M2 + k' * perp(M2-O)` 上（M2 处的切向）
-   - 两线求交即可得 B
-
-8. 若 `dot(perp(T1), d)` 很小 —— 意味着 M2 几乎在 M1 的切线延长线上 → 弧半径极大，近似直线。可设定最小曲率半径阈值。
-
-**特殊情况：** 当 `dot(perp(T1), d)` 过小时，弧半径趋近无穷 → 退化为直线 + 折角？ 或拒绝并提示用户。初期可拒绝。
+实现见 `model/geom_utils.solve_case2_arc()`。
 
 ### 4.6 Case 3: 双切线约束 → 等半径 Biarc
 
@@ -673,7 +686,7 @@ class PreviewGeometry:
 | **0** | **清理遗留代码** | ✅ 完成 | 删除 `model/geometry.py` 重复定义 |
 | **1** | **Editor 模式重构 + 点吸附 + Case 1 + 预览 + 警告** | ✅ 完成 | 三模式（IDLE/BUILD/DELETE）+ BUILD 子状态机（IDLE/ACTIVE）。点吸附（PointSnapProvider）。Case 1 直线建造（四种端点组合）。实时预览（虚线+M1锚点）。警告指示器（红色十字+圆环）。拒绝处理统一为保持当前状态。 |
 | **2** | **路径吸附 + DELETE 边导向** | ✅ 完成 | PathSnapProvider（直线+弧投影，`model/geom_utils.py` 几何工具集）。切线方向按 BUILD_ACTIVE 时 `(cursor - M1)` 夹角选择。DELETE 模式操作单位改为 Edge，自动清理孤立节点。优先级：点吸附 > 路径吸附。 |
-| **3** | **Case 2 弧建造** | 待实现 | 单切线约束圆弧建造（从端点延伸、路径吸附交接）。B 点计算（圆心+半径反推切线交点）。实时弧预览。 |
+| **3** | **Case 2 弧建造** | ✅ 完成 | T1 候选化重构（`build_t1_candidates`）：道岔 N 候选、路径吸附 forward/reverse 双候选、端点 1 候选。提交时按 (M2-M1) 夹角选最佳。Q2: T1 反向拒绝；Q3: R > MAX_ARC_RADIUS (500.0) 退化为沿 T1 投影的直线；Q5: 所有候选钝角时拒绝。`solve_case2_arc` 几何工具。弧预览（虚线弧 + 切线辅助线）。 |
 | **4** | **删除-合并** | 待实现 | 删除 connection_count==2 的中间节点时，检查两侧边是否可合并（共线直线 / 等半径等圆心弧）。合并成功则创建新边，否则拒绝删除。 |
 | **5** | **Case 3 Biarc** | 待实现 | 等半径双弧建造（方案 A：双 Edge + 中间 Node）。数学求解：二次方程解 r，计算 M_mid。 |
 | **6** | **Edge 截断** | 待实现 | M2 路径吸附到既有边的内部点时，插入新节点分裂原边为两段（直线/弧）。截断后的弧需重新计算 B 点保证 GeoJSON 往返一致。 |

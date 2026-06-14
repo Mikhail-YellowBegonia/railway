@@ -126,18 +126,74 @@ class Renderer:
 
         color = COLOR_PREVIEW if preview.valid else COLOR_PREVIEW_INVALID
 
-        # 绘制预览边（Step 1 仅 Case 1 直线）
-        if preview.case == 1:
+        if preview.case == 1 or not preview.edge_geometry:
+            # 直线预览（Case 1 或 Case 2 退化）
             x1, y1 = cam.world_to_screen(preview.m1.x, preview.m1.y, w, h)
             x2, y2 = cam.world_to_screen(preview.m2.x, preview.m2.y, w, h)
             _draw_dashed_line(self.surface, color, (x1, y1), (x2, y2), dash_len=10, gap_len=5)
-        # TODO: Case 2 弧预览, Case 3 Biarc 预览
+        elif preview.case == 2 and len(preview.edge_geometry) == 1:
+            # 弧预览：通过 [A, B, C] 三点采样
+            self._draw_arc_preview(
+                preview.m1, preview.edge_geometry[0], preview.m2, color, cam, w, h
+            )
+        # TODO: Case 3 Biarc 预览
 
         # 绘制 M1 锚点
         if editor.build_m1 is not None:
             ax, ay = cam.world_to_screen(editor.build_m1.x, editor.build_m1.y, w, h)
             pygame.draw.circle(self.surface, COLOR_M1_ANCHOR, (int(ax), int(ay)), 6)
             pygame.draw.circle(self.surface, (255, 255, 255), (int(ax), int(ay)), 6, 1)
+
+    def _draw_arc_preview(
+        self,
+        a: Vec3,
+        b: Vec3,
+        c: Vec3,
+        color: tuple[int, int, int],
+        cam: Camera,
+        w: int,
+        h: int,
+    ) -> None:
+        """绘制弧预览：临时构造一个 Edge 并用其 sample_arc_points 渲染。
+
+        同时绘制切线辅助线（M1→B→M2 虚线）。
+        """
+        from model.rail_network import Edge, _compute_arc
+
+        result = _compute_arc(a, b, c)
+        if result is None:
+            # 不可解：退化为直线
+            x1, y1 = cam.world_to_screen(a.x, a.y, w, h)
+            x2, y2 = cam.world_to_screen(c.x, c.y, w, h)
+            _draw_dashed_line(self.surface, color, (x1, y1), (x2, y2), dash_len=10, gap_len=5)
+            return
+
+        center, radius, angle, normal = result
+        edge = Edge(
+            edge_id=-1,
+            node_a_id=-1,
+            node_b_id=-1,
+            geometry=[b],
+            length=radius * abs(angle),
+            is_arc=True,
+            arc_center=center,
+            arc_radius=radius,
+            arc_angle_rad=angle,
+            arc_start_dir=(a - center).normalize(),
+            arc_normal=normal,
+        )
+        pts = edge.sample_arc_points(30)
+        if len(pts) < 2:
+            return
+        screen_pts = [cam.world_to_screen(p.x, p.y, w, h) for p in pts]
+        _draw_dashed_polyline(self.surface, color, screen_pts, dash_len=10, gap_len=5)
+
+        # 切线辅助线 M1→B→M2（半透明灰色）
+        x1, y1 = cam.world_to_screen(a.x, a.y, w, h)
+        xb, yb = cam.world_to_screen(b.x, b.y, w, h)
+        x2, y2 = cam.world_to_screen(c.x, c.y, w, h)
+        _draw_dashed_line(self.surface, COLOR_TANGENT, (x1, y1), (xb, yb), dash_len=4, gap_len=4)
+        _draw_dashed_line(self.surface, COLOR_TANGENT, (xb, yb), (x2, y2), dash_len=4, gap_len=4)
 
     def _draw_warning(self, mouse_world: Vec3, cam: Camera, w: int, h: int) -> None:
         """绘制警告光标（红色圆环）"""
@@ -198,3 +254,15 @@ def _draw_dashed_line(
         pygame.draw.line(surface, color, (sx, sy), (ex, ey))
         pos = seg_end + gap_len
         segment = dash_len
+
+
+def _draw_dashed_polyline(
+    surface: pygame.Surface,
+    color: tuple[int, int, int],
+    points: list[tuple[float, float]],
+    dash_len: int = 8,
+    gap_len: int = 6,
+) -> None:
+    """对折线段逐段画虚线（不跨段保持 dash 相位，简单实现就够用）。"""
+    for i in range(len(points) - 1):
+        _draw_dashed_line(surface, color, points[i], points[i + 1], dash_len, gap_len)

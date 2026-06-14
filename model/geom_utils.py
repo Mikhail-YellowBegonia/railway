@@ -112,3 +112,94 @@ def rotate_around_axis(v: Vec3, axis: Vec3, angle: float) -> Vec3:
     cos_a = math.cos(angle)
     sin_a = math.sin(angle)
     return v * cos_a + k.cross(v) * sin_a + k * (k.dot(v)) * (1.0 - cos_a)
+
+
+# ===== Case 2: 单切线约束圆弧 =====
+
+PLANE_NORMAL = Vec3(0.0, 0.0, 1.0)  # 假定轨道在 XY 平面
+
+
+def perp_xy(v: Vec3) -> Vec3:
+    """XY 平面内逆时针 90° 旋转。"""
+    return Vec3(-v.y, v.x, 0.0)
+
+
+def solve_case2_arc(
+    m1: Vec3, t1: Vec3, m2: Vec3
+) -> tuple[Vec3, Vec3, Vec3, float] | None:
+    """求一个以 M1 为切点（切于 T1）、通过 M2 的圆弧。
+
+    返回 (center, B, arc_normal, radius) 或 None（不可解）。
+
+    几何推导：
+    - 圆心 O 必在过 M1 且垂直于 T1 的法线上：O = M1 + s * n，n = perp_xy(T1)
+    - |O - M1| = |O - M2| = R
+    - 解出 s = |d|² / (2 * n·d)，其中 d = M2 - M1
+    - 当 n·d 趋于 0 时（M2 几乎落在 T1 延长线上）→ 半径无穷，返回 None 让上层退化为直线
+
+    切线交点 B：M1 处切线 (M1 + k·T1) 与 M2 处切线 (M2 + k'·T2) 的交点。
+    M2 处切向 T2 与 M2-O 垂直。
+    """
+    t1n = t1.normalize()
+    if t1n.length() < 1e-9:
+        return None
+
+    n = perp_xy(t1n)  # M1 处法线（指向某一侧的圆心方向）
+    d = m2 - m1
+    nd = n.dot(d)
+
+    if abs(nd) < 1e-9:
+        # M2 几乎在 T1 延长线上 → 半径无穷
+        return None
+
+    s = d.length_squared() / (2.0 * nd)
+    center = m1 + n * s
+    radius = abs(s)
+
+    # 圆弧法向：M1 处的"沿弧方向" T1 = arc_normal × (M1 - center) / radius
+    # arc_normal 为 +Z 或 -Z，由 T1 与 (M1 - center) 的关系决定
+    radius_vec = m1 - center
+    # 平面 z 方向的 normal：满足 z × radius_vec = R * t1
+    # 即 sign 取决于 (radius_vec × t1) · z 的符号
+    cross_z = radius_vec.x * t1n.y - radius_vec.y * t1n.x
+    arc_normal = Vec3(0.0, 0.0, 1.0 if cross_z > 0 else -1.0)
+
+    # 求 B：两条切线 M1+k·T1 和 M2+k'·T2 的交点
+    # M2 处切向 T2 = arc_normal × (M2 - center) / radius
+    radius_vec_2 = m2 - center
+    t2 = arc_normal.cross(radius_vec_2)
+    t2_len = t2.length()
+    if t2_len < 1e-9:
+        return None
+    t2 = t2 * (1.0 / t2_len)
+
+    # 解 M1 + k * T1 = M2 + k' * T2  →  k * T1 - k' * T2 = d
+    # 在 XY 平面内是 2x2 线性方程
+    det = t1n.x * (-t2.y) - t1n.y * (-t2.x)
+    if abs(det) < 1e-9:
+        return None
+    k = (d.x * (-t2.y) - d.y * (-t2.x)) / det
+    b_point = m1 + t1n * k
+    return center, b_point, arc_normal, radius
+
+
+def is_t1_consistent_with_target(t1: Vec3, m1: Vec3, m2: Vec3) -> bool:
+    """检查 T1 是否"指向" M2 一侧（即 (M2-M1)·T1 > 0）。
+
+    若返回 False，意味着 M2 在 T1 的"背后"，按 Q2 决议应拒绝。
+    """
+    d = m2 - m1
+    if d.length() < 1e-9:
+        return False
+    return d.normalize().dot(t1.normalize()) > 1e-6
+
+
+def project_along_direction(m1: Vec3, t1: Vec3, m2: Vec3) -> Vec3:
+    """计算 M2 在 (M1, T1) 射线上的投影点。
+
+    用于"半径过大退化为直线"时确定终点：保证沿 T1 方向。
+    """
+    t1n = t1.normalize()
+    d = m2 - m1
+    proj_len = d.dot(t1n)
+    return m1 + t1n * proj_len

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from model.geom_utils import project_point_on_edge, tangent_along_edge
 from model.rail_network import RailNetwork
@@ -9,13 +9,20 @@ from model.vec3 import Vec3
 
 @dataclass
 class SnapResult:
-    """吸附系统的输出结果"""
-    snapped: bool                        # 是否发生了吸附
-    position: Vec3                       # 吸附后的世界坐标（无吸附时 = 原始光标位置）
-    tangent: Vec3 | None = None          # 该位置的切线方向（有切线约束时非 None）
-    snapped_node_id: int | None = None   # 吸附到的 Node ID（点吸附时）
-    snapped_edge_id: int | None = None   # 吸附到的 Edge ID（路径吸附时）
-    snapped_edge_t: float | None = None  # 路径吸附时沿边的参数 t ∈ [0,1]
+    """吸附系统的输出结果。
+
+    切线相关字段说明：
+    - `tangent`: 单一最佳切线方向（路径吸附时按 reference_pos 选；点吸附端点时唯一）
+    - `tangent_candidates`: 该位置所有合法切线方向集合（用于 BUILD_ACTIVE 中
+      根据 M2 动态选择最合适的方向）。空列表表示无切线约束（Case 1）。
+    """
+    snapped: bool                                       # 是否发生了吸附
+    position: Vec3                                      # 吸附后的世界坐标（无吸附时 = 原始光标位置）
+    tangent: Vec3 | None = None                         # 该位置的最佳切线方向（无切线约束时 None）
+    tangent_candidates: list[Vec3] = field(default_factory=list)  # 所有候选切线（按方向不同各算一个）
+    snapped_node_id: int | None = None                  # 吸附到的 Node ID（点吸附时）
+    snapped_edge_id: int | None = None                  # 吸附到的 Edge ID（路径吸附时）
+    snapped_edge_t: float | None = None                 # 路径吸附时沿边的参数 t ∈ [0,1]
 
 
 class PointSnapProvider:
@@ -43,48 +50,57 @@ class PointSnapProvider:
             return None
 
         node = network.nodes[best_node_id]
-        tangent = self._tangent_at_node(node, network)
+        candidates = self._tangent_candidates_at_node(node, network)
+        # 端点（仅 1 条候选）时 best 等于唯一项；道岔多候选时 best 留 None，
+        # 由后续 commit 逻辑根据 M2 选择
+        best = candidates[0] if len(candidates) == 1 else None
 
         return SnapResult(
             snapped=True,
             position=node.position,
-            tangent=tangent,
+            tangent=best,
+            tangent_candidates=candidates,
             snapped_node_id=best_node_id,
         )
 
-    def _tangent_at_node(self, node, network: RailNetwork) -> Vec3 | None:
-        """计算节点处的切线方向（仅 connection_count == 1 时有效）"""
+    def _tangent_candidates_at_node(self, node, network: RailNetwork) -> list[Vec3]:
+        """节点处的所有候选切线方向。
+
+        - 孤立节点（count==0）：返回 []，无切线约束
+        - 端点（count==1）：返回 [t]，唯一方向
+        - 道岔/交叉（count>=2）：返回 [t1, t2, ...]，每条相邻边一个外向切线
+        """
         count = node.connection_count()
-
         if count == 0:
-            return None  # 孤立节点，无切线
+            return []
 
-        if count == 1:
-            # 端点：取唯一连接边的外向切线
-            edge_id = next(iter(node.incident_edge_ids))
+        candidates: list[Vec3] = []
+        for edge_id in node.incident_edge_ids:
             edge = network.edges[edge_id]
-            return self._tangent_at_node_for_edge(node, edge, network)
-
-        # count >= 2: 暂不处理（道岔/交叉），返回 None
-        # TODO: Step 2/3 中处理多连接节点的切线选择
-        return None
+            t = self._tangent_at_node_for_edge(node, edge, network)
+            candidates.append(t)
+        return candidates
 
     def _tangent_at_node_for_edge(self, node, edge, network: RailNetwork) -> Vec3:
-        """计算节点在特定边上的外向切线方向"""
+        """计算节点处"沿这条边、远离对面 other 节点"的切线方向。
+
+        语义：T1 表示"以 M1 为起点继续延伸的方向"。新建段在 M1 处的切线必须
+        与既有边在 M1 处切向连续，且朝外延伸（不折返），所以方向是"远离 other"。
+        """
         other_id = edge.node_b_id if edge.node_a_id == node.node_id else edge.node_a_id
         other = network.nodes[other_id]
 
         if not edge.is_arc:
-            # 直线：方向指向远处
-            return (other.position - node.position).normalize()
+            # 直线：M1 处沿边、远离 other 的方向 = (node - other).normalize()
+            return (node.position - other.position).normalize()
 
-        # 圆弧：切线方向 = arc_normal × (node.position - arc_center)
+        # 圆弧：M1 处的切线方向 = arc_normal × (node - center)
+        # 调整符号使其远离 other（夹角与 (node - other) 同向）
         center = edge.arc_center
         to_node = node.position - center
         tangent = edge.arc_normal.cross(to_node)
 
-        # 确保方向指向远处（与 other 方向夹角 < 90°）
-        outward_dir = (other.position - node.position).normalize()
+        outward_dir = (node.position - other.position).normalize()
         if tangent.dot(outward_dir) < 0:
             tangent = tangent * -1.0
 
@@ -167,26 +183,26 @@ class PathSnapProvider:
         node_a = network.nodes[edge.node_a_id]
         node_b = network.nodes[edge.node_b_id]
 
-        # 切线方向选择：仅在 BUILD_ACTIVE（reference_pos 非 None）时计算
-        tangent: Vec3 | None = None
+        # 路径上一点的两个候选切线（forward / reverse）
+        forward = tangent_along_edge(edge, node_a, node_b, best_t)
+        reverse = forward * -1.0
+        candidates = [forward, reverse]
+
+        # 最佳切线选择：仅在 BUILD_ACTIVE（reference_pos 非 None）时计算
+        best: Vec3 | None = None
         if reference_pos is not None:
-            forward = tangent_along_edge(edge, node_a, node_b, best_t)
-            reverse = forward * -1.0
-            # 取与 (world_pos - reference_pos) 夹角较小的方向
             cursor_dir = world_pos - reference_pos
             if cursor_dir.length() > 1e-9:
                 cursor_dir = cursor_dir.normalize()
-                if forward.dot(cursor_dir) >= reverse.dot(cursor_dir):
-                    tangent = forward
-                else:
-                    tangent = reverse
+                best = forward if forward.dot(cursor_dir) >= reverse.dot(cursor_dir) else reverse
             else:
-                tangent = forward  # cursor 与 reference 重合，任取
+                best = forward  # cursor 与 reference 重合，任取
 
         return SnapResult(
             snapped=True,
             position=best_pos,
-            tangent=tangent,
+            tangent=best,
+            tangent_candidates=candidates,
             snapped_edge_id=best_edge_id,
             snapped_edge_t=best_t,
         )

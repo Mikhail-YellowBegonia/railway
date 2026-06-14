@@ -2,6 +2,11 @@ from __future__ import annotations
 
 from enum import Enum, auto
 
+from model.geom_utils import (
+    is_t1_consistent_with_target,
+    project_along_direction,
+    solve_case2_arc,
+)
 from model.rail_network import RailNetwork
 from model.vec3 import Vec3
 from controller.snap import SnapSystem, SnapResult
@@ -9,6 +14,7 @@ from controller.build_plan import ConstructionPlan, PreviewGeometry
 
 SNAP_THRESHOLD = 0.3
 WARNING_THRESHOLD = 0.5
+MAX_ARC_RADIUS = 500.0  # 弧半径超过此值时退化为沿 T1 的直线（Q3）
 
 
 class EditMode(Enum):
@@ -37,7 +43,7 @@ class Editor:
         self.build_state: BuildState = BuildState.IDLE
         self.build_m1: Vec3 | None = None              # M1 世界坐标
         self.build_m1_node_id: int | None = None       # M1 吸附的节点 ID（None 表示空白）
-        self.build_t1: Vec3 | None = None              # M1 处的切线方向
+        self.build_t1_candidates: list[Vec3] = []      # M1 处的所有候选切线（空 = 无切线约束 / Case 1）
 
         # 悬停状态（用于 DELETE 和视觉反馈）
         self.hovered_node_id: int | None = None
@@ -110,11 +116,7 @@ class Editor:
         """处理 Esc 键"""
         if self.mode == EditMode.BUILD and self.build_state == BuildState.ACTIVE:
             # 取消当前建造
-            self.build_state = BuildState.IDLE
-            self.build_m1 = None
-            self.build_m1_node_id = None
-            self.build_t1 = None
-            self.preview = None
+            self._reset_build_active()
         else:
             # 回到 IDLE 模式
             self.set_mode(EditMode.IDLE)
@@ -123,12 +125,16 @@ class Editor:
         """切换顶层模式"""
         self.mode = mode
         # 重置 BUILD 状态
+        self._reset_build_active()
+        self.show_warning = False
+
+    def _reset_build_active(self) -> None:
+        """清空 BUILD_ACTIVE 状态，回到 BUILD_IDLE。"""
         self.build_state = BuildState.IDLE
         self.build_m1 = None
         self.build_m1_node_id = None
-        self.build_t1 = None
+        self.build_t1_candidates = []
         self.preview = None
-        self.show_warning = False
 
     # ===== BUILD 逻辑 =====
 
@@ -146,11 +152,11 @@ class Editor:
         if snap.snapped:
             self.build_m1 = snap.position
             self.build_m1_node_id = snap.snapped_node_id
-            self.build_t1 = snap.tangent  # 可能为 None（Case 1）或有值（Case 2/3）
+            self.build_t1_candidates = list(snap.tangent_candidates)
         else:
             self.build_m1 = world_pos
             self.build_m1_node_id = None
-            self.build_t1 = None
+            self.build_t1_candidates = []
 
         # 3. 进入 BUILD_ACTIVE
         self.build_state = BuildState.ACTIVE
@@ -159,24 +165,21 @@ class Editor:
     def _commit_build(self, world_pos: Vec3, snap: SnapResult) -> None:
         """提交建造：从 M1 到 M2 建造轨道。
 
-        所有拒绝（无效几何、M1==M2 等）一律保持 BUILD_ACTIVE 状态，由用户重新选 M2 或 Esc 取消。
+        所有拒绝一律保持 BUILD_ACTIVE 状态，由用户重新选 M2 或 Esc 取消。
         """
         # 1. 确定 M2
         if snap.snapped:
             m2 = snap.position
             m2_node_id = snap.snapped_node_id
-            t2 = snap.tangent
         else:
             m2 = world_pos
             m2_node_id = None
-            t2 = None
 
-        # 2. 计算建造计划
+        # 2. 计算建造计划（注意：T2 暂忽略，等 Case 3 Biarc 实现）
         plan = self._compute_plan(
             m1=self.build_m1,
             m2=m2,
-            t1=self.build_t1,
-            t2=t2,
+            t1_candidates=self.build_t1_candidates,
             m1_node_id=self.build_m1_node_id,
             m2_node_id=m2_node_id,
         )
@@ -189,35 +192,106 @@ class Editor:
         self._apply_plan(plan)
 
         # 5. 回到 BUILD_IDLE
-        self.build_state = BuildState.IDLE
-        self.build_m1 = None
-        self.build_m1_node_id = None
-        self.build_t1 = None
-        self.preview = None
+        self._reset_build_active()
 
     def _compute_plan(
         self,
         m1: Vec3,
         m2: Vec3,
-        t1: Vec3 | None,
-        t2: Vec3 | None,
+        t1_candidates: list[Vec3],
         m1_node_id: int | None,
         m2_node_id: int | None,
     ) -> ConstructionPlan:
-        """计算建造计划（Step 1 仅实现 Case 1 直线）"""
-        # 检查 M1 == M2
+        """计算建造计划。
+
+        分支：
+        - 无 T1 候选 → Case 1（直线）
+        - 有 T1 候选 → 按 (M2-M1) 选最佳 T1 → Case 2（弧 / 退化为沿 T1 直线）
+        """
+        # M1 == M2 → 拒绝
         if m1.distance_to(m2) < 1e-6:
             return ConstructionPlan(case=1, m1=m1, m2=m2, valid=False)
 
-        # Step 1: 只实现 Case 1（无切线或忽略切线）
-        # TODO: Case 2 (单切线) 和 Case 3 (双切线) 在后续步骤实现
+        # Case 1：无切线约束
+        if not t1_candidates:
+            return ConstructionPlan(
+                case=1,
+                m1=m1,
+                m2=m2,
+                node_a_id=m1_node_id,
+                node_b_id=m2_node_id,
+                edge_geometry=[],
+                valid=True,
+            )
+
+        # Case 2：选择最佳 T1（与 M2-M1 夹角最小者）
+        d = m2 - m1
+        d_len = d.length()
+        if d_len < 1e-9:
+            return ConstructionPlan(case=2, m1=m1, m2=m2, valid=False)
+        d_hat = d * (1.0 / d_len)
+
+        best_t1: Vec3 | None = None
+        best_dot = -float("inf")
+        for cand in t1_candidates:
+            cn = cand.normalize()
+            score = cn.dot(d_hat)
+            if score > best_dot:
+                best_dot = score
+                best_t1 = cn
+
+        if best_t1 is None or best_dot < 1e-6:
+            # Q5: 所有候选与 d 钝角（或垂直）→ 拒绝
+            return ConstructionPlan(case=2, m1=m1, m2=m2, valid=False)
+
+        # Q2 决议：T1 反向（M2 在 T1 背后）→ 拒绝
+        if not is_t1_consistent_with_target(best_t1, m1, m2):
+            return ConstructionPlan(case=2, m1=m1, m2=m2, valid=False)
+
+        # 求弧
+        result = solve_case2_arc(m1, best_t1, m2)
+        if result is None:
+            # 弧不可解（M2 几乎在 T1 延长线上）→ 退化为沿 T1 的直线
+            return self._degenerate_to_straight(m1, best_t1, m2, m1_node_id)
+
+        center, b_point, arc_normal, radius = result
+
+        # Q3 决议：半径过大 → 退化为沿 T1 的直线
+        if radius > MAX_ARC_RADIUS:
+            return self._degenerate_to_straight(m1, best_t1, m2, m1_node_id)
+
         return ConstructionPlan(
-            case=1,
+            case=2,
             m1=m1,
             m2=m2,
             node_a_id=m1_node_id,
             node_b_id=m2_node_id,
-            edge_geometry=[],  # 直线
+            edge_geometry=[b_point],  # 弧用 B 点表示
+            valid=True,
+        )
+
+    def _degenerate_to_straight(
+        self,
+        m1: Vec3,
+        t1: Vec3,
+        m2: Vec3,
+        m1_node_id: int | None,
+    ) -> ConstructionPlan:
+        """Case 2 退化为沿 T1 的直线：终点是 M2 在 (M1, T1) 上的投影。
+
+        如此保证起点切线连续，避免 M1 处出现折角。
+        end_node 一律新建（不复用 m2 处的吸附节点，因为目标点已偏移）。
+        """
+        m2_eff = project_along_direction(m1, t1, m2)
+        if m1.distance_to(m2_eff) < 1e-6:
+            return ConstructionPlan(case=1, m1=m1, m2=m2_eff, valid=False)
+        return ConstructionPlan(
+            case=1,
+            m1=m1,
+            m2=m2_eff,
+            node_a_id=m1_node_id,
+            node_b_id=None,  # 退化情形：终点是新位置，不复用 M2 的节点
+            edge_geometry=[],
             valid=True,
         )
 
@@ -248,14 +322,12 @@ class Editor:
             return
 
         m2 = snap.position
-        t2 = snap.tangent
 
         # 计算预览计划（和提交时相同逻辑）
         plan = self._compute_plan(
             m1=self.build_m1,
             m2=m2,
-            t1=self.build_t1,
-            t2=t2,
+            t1_candidates=self.build_t1_candidates,
             m1_node_id=self.build_m1_node_id,
             m2_node_id=snap.snapped_node_id,
         )
