@@ -318,19 +318,29 @@ M1 → M2'，其中 `M2' = M1 + ((M2-M1)·T1*) · T1*`，即 M2 在 T1* 上的
 
 ### 4.7 截断（Edge 分割）
 
-当 M2 通过路径吸附命中一条既有 Edge 的内部点（而非节点）时触发。
+当 M1 或 M2 通过路径吸附命中一条既有 Edge 的内部点时触发。
+两端独立处理，commit 时执行。
 
 流程：
 
-1. 计算截断点在边上的世界坐标 P 和参数 t
-2. 创建新 Node（位于 P）
-3. 移除原 Edge，按类型生成两段新边：
+1. 求截断点世界坐标 P 与参数 t（来自 PathSnapProvider 的结果）
+2. 调用 `RailNetwork.split_edge_at(edge_id, t)`：
    - 直线 → 两段直线，`geometry = []`
-   - 圆弧 → 两段同心同半径的弧，分别反算各自的切线交点 B1、B2
-4. 截断点 P 的切线方向必须与原弧在 P 处一致（无损分割）；
-   两段弧合并回去（按 §4.8 规则）应能复原原弧
+   - 圆弧 → 两段同圆心同半径同向的弧，分别按"端点切线 ∩ 截断点切线"反算 B1、B2
+3. 把建造计划中对应端点的 `node_a_id` / `node_b_id` 替换为新中间节点 ID
+4. 应用计划（建造新边 / Biarc）
 
-待实现：见 §7 实施步骤。
+**无损分割保证**：
+- 弧的 `arc_center` / `arc_radius` / `arc_normal` 在分割前后完全一致
+- 两段角度之和 = 原角度
+- 通过 §4.8 规则合并回去能精确还原原 B 点（`split → merge → split → merge` 闭环稳定）
+- GeoJSON 往返保留完整元数据（已测试）
+
+**同边双截断**：M1 与 M2 路径吸附到同一条边（在边的中段建一段重叠轨道）→ 静默拒绝。
+
+实现：`model/rail_network.py::RailNetwork.split_edge_at`、
+`model/geom_utils.py::split_arc_b_points`、
+`controller/editor.py::Editor._commit_build`（截断在 plan 计算之后、apply 之前执行）。
 
 ### 4.8 删除与合并
 
@@ -389,6 +399,7 @@ Delete 模式点击一个中间节点（`connection_count == 2`）触发。
 | `solve_case2_arc(m1, t1, m2)` | Case 2 几何解：返回 `(center, B, normal, R)` 或 `None` |
 | `solve_biarc(m1, t1, m2, t2_in)` | Case 3 几何解：返回 `(M_mid, B1, B2, normal_1, normal_2, R)` 或 `None`。`t2_in` 是沿 M_mid→M2 进入方向 |
 | `is_biarc_collinear_straight(t1, t2_in, m1, m2)` | Case 3 共线退化 fast-path 判定 |
+| `split_arc_b_points(edge, na, nb, p)` | 弧在 p 处分两段，返回两段子弧的 B 点 `(B1, B2)` |
 | `is_t1_consistent_with_target(t1, m1, m2)` | T1 是否指向 M2 一侧（用于 Q2 拒绝） |
 | `project_along_direction(m1, t1, m2)` | M2 在 (M1, T1) 射线上的投影点（半径退化用） |
 | `can_merge_straight(a, mid, b)` | 两直线是否可合并（共线检查） |
@@ -445,7 +456,7 @@ class PreviewGeometry:
 | **3** | **Case 2 弧建造** | ✅ 完成 | T1 候选化重构（`build_t1_candidates`）：道岔 N 候选、路径吸附 forward/reverse 双候选、端点 1 候选。提交时按 (M2-M1) 夹角选最佳。Q2: T1 反向拒绝；Q3: R > MAX_ARC_RADIUS (500.0) 退化为沿 T1 投影的直线；Q5: 所有候选钝角时拒绝。`solve_case2_arc` 几何工具。弧预览（虚线弧 + 切线辅助线）。 |
 | **4** | **删除-合并** | ✅ 完成 | DELETE 模式悬停优先级 节点 > 边；点击 connection==2 节点尝试合并两侧边。判定：直线共线检查（cos ≥ 1-1e-6）、弧同心同半径同向且切线连续。失败静默忽略。详见 §4.8。 |
 | **5** | **Case 3 Biarc** | ✅ 完成 | 等半径双弧建造（方案 A：双 Edge + 中间 Node）。枚举 4 种手性组合，二次方程解 R，过滤"绕大圈"和半径超 MAX_ARC_RADIUS 的解，取 R 最大者。共线 fast-path 退化为直线。失败直接拒绝（按用户决议）。详见 §4.6。 |
-| **6** | **Edge 截断** | 待实现 | M2 路径吸附到既有边的内部点时，插入新节点分裂原边为两段（直线/弧）。截断后的弧需重新计算 B 点保证 GeoJSON 往返一致。 |
+| **6** | **Edge 截断** | ✅ 完成 | M1 / M2 路径吸附到边内部时 commit 阶段分裂原边为两段；同边双截断静默拒绝。直线均匀分割，弧用切线交点反算保证同心同半径同向，截断 → 合并 → GeoJSON 往返完全一致。详见 §4.7。 |
 
 ---
 

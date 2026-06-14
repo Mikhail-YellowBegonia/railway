@@ -481,3 +481,47 @@ def solve_biarc(
                     best = (m_mid, b1, b2, an1, an2, r)
 
     return best
+
+
+# ===== Edge 截断 =====
+
+
+def split_arc_b_points(
+    edge: Edge, node_a: Node, node_b: Node, p: Vec3
+) -> tuple[Vec3, Vec3] | None:
+    """计算把弧在点 p 处分成两段后，两段子弧的 B 点（切线交点）。
+
+    保证两段同心同半径，且在 p 处切线连续。
+    返回 `(B1, B2)`，其中 B1 是 node_a→p 段的 B 点，B2 是 p→node_b 段的 B 点。
+    返回 None 表示几何不可解（例如 p 与端点重合）。
+    """
+    if not edge.is_arc:
+        return None
+
+    # 端点切线（指向 b 方向）
+    t_a = tangent_at_arc_point_forward(edge, node_a.position)
+    t_p = tangent_at_arc_point_forward(edge, p)
+    t_b = tangent_at_arc_point_forward(edge, node_b.position)
+
+    # B1 = (node_a 处切线) ∩ (p 处反向切线) — 两条向 B1 汇聚的射线
+    # 用与 _biarc_arc_b_point 相同的解法：m_a + k·t_a = m_p - k'·t_p
+    b1 = _arc_split_intersect(node_a.position, t_a, p, t_p)
+    b2 = _arc_split_intersect(p, t_p, node_b.position, t_b)
+    if b1 is None or b2 is None:
+        return None
+    return b1, b2
+
+
+def _arc_split_intersect(
+    m_a: Vec3, t_a: Vec3, m_b: Vec3, t_b: Vec3
+) -> Vec3 | None:
+    """两条切线 (m_a, t_a) 和 (m_b, t_b) 在前方的交点。
+
+    解 m_a + k * t_a = m_b - k' * t_b（即 t_a 与 -t_b 在前方相交）。
+    """
+    det = t_a.x * (-t_b.y) - t_a.y * (-t_b.x)
+    if abs(det) < 1e-9:
+        return None
+    d = m_b - m_a
+    k = (d.x * (-t_b.y) - d.y * (-t_b.x)) / det
+    return m_a + t_a * k

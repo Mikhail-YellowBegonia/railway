@@ -49,6 +49,9 @@ class Editor:
         self.build_m1: Vec3 | None = None              # M1 世界坐标
         self.build_m1_node_id: int | None = None       # M1 吸附的节点 ID（None 表示空白）
         self.build_t1_candidates: list[Vec3] = []      # M1 处的所有候选切线（空 = 无切线约束 / Case 1）
+        # M1 路径吸附时记录待截断的边（commit 时执行截断，得到新中间节点）
+        self.build_m1_edge_id: int | None = None
+        self.build_m1_edge_t: float | None = None
 
         # 悬停状态（用于 DELETE 和视觉反馈）
         self.hovered_node_id: int | None = None
@@ -143,6 +146,8 @@ class Editor:
         self.build_m1 = None
         self.build_m1_node_id = None
         self.build_t1_candidates = []
+        self.build_m1_edge_id = None
+        self.build_m1_edge_t = None
         self.preview = None
 
     # ===== BUILD 逻辑 =====
@@ -162,10 +167,15 @@ class Editor:
             self.build_m1 = snap.position
             self.build_m1_node_id = snap.snapped_node_id
             self.build_t1_candidates = list(snap.tangent_candidates)
+            # 路径吸附：记下要截断的边和参数（commit 时才真正分裂）
+            self.build_m1_edge_id = snap.snapped_edge_id
+            self.build_m1_edge_t = snap.snapped_edge_t
         else:
             self.build_m1 = world_pos
             self.build_m1_node_id = None
             self.build_t1_candidates = []
+            self.build_m1_edge_id = None
+            self.build_m1_edge_t = None
 
         # 3. 进入 BUILD_ACTIVE
         self.build_state = BuildState.ACTIVE
@@ -175,16 +185,32 @@ class Editor:
         """提交建造：从 M1 到 M2 建造轨道。
 
         所有拒绝一律保持 BUILD_ACTIVE 状态，由用户重新选 M2 或 Esc 取消。
+
+        截断处理（Step 6）：
+        - M1/M2 吸附到既有边内部时，commit 时分裂原边产生新中间节点
+        - 同边双截断（M1 与 M2 在同一条边上）→ 拒绝（语义模糊，按用户决议）
         """
         # 1. 确定 M2
         if snap.snapped:
             m2 = snap.position
             m2_node_id = snap.snapped_node_id
             t2_candidates = list(snap.tangent_candidates)
+            m2_edge_id = snap.snapped_edge_id
+            m2_edge_t = snap.snapped_edge_t
         else:
             m2 = world_pos
             m2_node_id = None
             t2_candidates = []
+            m2_edge_id = None
+            m2_edge_t = None
+
+        # 同边双截断 → 拒绝
+        if (
+            self.build_m1_edge_id is not None
+            and m2_edge_id is not None
+            and self.build_m1_edge_id == m2_edge_id
+        ):
+            return
 
         # 2. 计算建造计划
         plan = self._compute_plan(
@@ -199,7 +225,21 @@ class Editor:
         if not plan.valid:
             return  # 拒绝；保持 BUILD_ACTIVE
 
-        # 3. TODO: 截断（M2 在既有边中间）
+        # 3. 截断：先 M1 端，再 M2 端（两端独立，顺序无关）
+        if self.build_m1_edge_id is not None and self.build_m1_edge_t is not None:
+            new_mid = self.network.split_edge_at(
+                self.build_m1_edge_id, self.build_m1_edge_t
+            )
+            if new_mid is None:
+                return  # 截断失败：拒绝
+            plan.node_a_id = new_mid
+
+        if m2_edge_id is not None and m2_edge_t is not None:
+            new_mid = self.network.split_edge_at(m2_edge_id, m2_edge_t)
+            if new_mid is None:
+                return
+            plan.node_b_id = new_mid
+
         # 4. 应用计划到网络
         self._apply_plan(plan)
 
