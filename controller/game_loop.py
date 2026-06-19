@@ -9,7 +9,7 @@ from model.geojson_loader import load_geojson
 from model.vec3 import Vec3
 from view.camera import Camera
 from view.renderer import Renderer
-from controller.editor import Editor, EditMode
+from controller.editor import Editor, EditMode, BuildState
 
 WINDOW_W = 1024
 WINDOW_H = 768
@@ -95,6 +95,16 @@ class GameLoop:
         # 滚轮先处理（不参与平移逻辑）
         if event.button in (4, 5):
             self.camera.handle_event(event)
+            return
+
+        # 右键在 BUILD_ACTIVE 中等同于 Esc（取消当前建造），不参与平移。
+        # 见 docs/editor.md §10.4。其它情况（IDLE 等）右键继续走平移分支。
+        if (
+            event.button == 3
+            and self.editor.mode == EditMode.BUILD
+            and self.editor.build_state == BuildState.ACTIVE
+        ):
+            self.editor.handle_cancel()
             return
 
         pan_buttons = self._pan_buttons_for_mode()

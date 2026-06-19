@@ -124,6 +124,7 @@ on load — round-trip is bit-stable for arc geometry within 1e-4.
 | `D` | any | Switch to DELETE mode |
 | `Esc` | BUILD_ACTIVE | Cancel current build, return to BUILD_IDLE |
 | `Esc` | other | Switch to IDLE |
+| Right click | BUILD_ACTIVE | Cancel current build (same as Esc) |
 | `Q` | any | Quit program |
 | `LSHIFT` (held) | BUILD_ACTIVE | Force straight along T1 |
 | Left/Right/Middle drag | IDLE | Pan camera |

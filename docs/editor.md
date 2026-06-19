@@ -494,23 +494,26 @@ class PreviewGeometry:
 > 此区收集开发过程中陆续追加的需求，等到合适的实施步骤完成后，再
 > 整理到上文相应章节并标记完成。
 
-### 10.1 视图操作的输入扩展
+### 10.1 视图操作的输入扩展 ✅ 已实现
 
-- IDLE 模式下，鼠标 **左键 或 右键 拖拽** 应能平移视角（当前仅中键支持）。
-  目的：对触控板用户更友好，避免依赖中键。
-- 在 BUILD / DELETE 模式下保持原行为：左键 = 操作，中键 = 平移；
-  右键的行为待 §10.x 进一步规划。
+- IDLE 模式下，鼠标 **左键 / 中键 / 右键 拖拽** 都能平移视角。
+- BUILD / DELETE 模式下保持原行为：左键 = 操作，中键 = 平移。
+  右键在这两个模式下的语义见 §10.4。
+- 实现：`controller/game_loop.py::_pan_buttons_for_mode`，平移触发集
+  `PAN_BUTTONS_IDLE = {1, 2, 3}`，`PAN_BUTTONS_OTHER = {2}`。
 
-### 10.2 强制直线建造（临时调试键）
+### 10.2 强制直线建造（LSHIFT） ✅ 已实现
 
-- BUILD_ACTIVE 中按住 `LSHIFT` 时，跳过弧解算、直接走"沿 T1 投影直线"
-  路径（同 Q3 退化）：终点 = M2 在 (M1, T1) 射线上的投影。
+- BUILD_ACTIVE 中按住 `LSHIFT` 时，跳过弧 / Biarc 解算、直接走"沿 T1
+  投影直线"路径（同 Q3 退化）：终点 = M2 在 (M1, T1) 射线上的投影。
   - 起点切线连续，方向受既有轨道约束，长度由鼠标控制
   - Q2/Q5 的拒绝条件仍适用
   - 无 T1 候选（孤立起点）时无效，仍走 Case 1 自由直线
-- 用途：测试期手动绕过 Case 2 / Case 3 的几何分支。
-- 后续会作为正式 UX 设计的一部分重新规划，键位与触发方式都可能变。
+- 用途：测试期手动绕过 Case 2 / Case 3 的几何分支，长直线场景实用。
+- 后续会作为正式 UX 设计的一部分重新规划，键位可能调整。
 - 状态显示：BUILD 模式下激活时左上角追加 `[STRAIGHT]` 提示。
+- 实现：`controller/editor.py::Editor.force_straight` +
+  `controller/game_loop.py::_sync_modifiers` 每帧轮询。
 
 ### 10.3 弧半径超限的复合输出（替代 §4.5 的退化方案）
 
@@ -522,11 +525,15 @@ class PreviewGeometry:
 - 这涉及 ConstructionPlan 支持多段输出，复杂度较高，等基础工作齐备
   再回头处理。
 
-### 10.4 BUILD_ACTIVE 中右键的语义
+### 10.4 BUILD_ACTIVE 中右键的语义 ✅ 已实现
 
-- 当前仅左键确认 M2、Esc 取消。
-- Transport Fever 中右键有"撤销最近一段 / 退回上一步"的语义，
-  需结合 §10.1 的视图操作冲突一并设计。
+- BUILD_ACTIVE 中右键 → 取消当前建造，回到 BUILD_IDLE（等同 Esc）。
+- 其它模式（IDLE / BUILD_IDLE / DELETE）中右键行为不变：
+  - IDLE 中右键拖拽 = 平移（见 §10.1）
+  - BUILD_IDLE / DELETE 中右键拖拽 = 无效（仅中键平移）
+- 设计决策：优先简洁直观的"右键 = 取消"语义，而非"撤销最近一段"
+  （后者需要建造历史栈，当前单段建造模式下意义有限）。
+- 实现：`controller/game_loop.py::_handle_mouse_down` 中右键分支。
 
 ### 10.5 单切线弧（Case 2T，备选方案，需手动触发）
 

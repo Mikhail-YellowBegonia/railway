@@ -2,3 +2,6 @@
 __pycache__/
 *.pyc
 .uv/
+
+# PhotoRec recovery artifacts (not part of this project)
+photorec.*
