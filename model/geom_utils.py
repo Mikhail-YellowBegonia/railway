@@ -205,6 +205,130 @@ def project_along_direction(m1: Vec3, t1: Vec3, m2: Vec3) -> Vec3:
     return m1 + t1n * proj_len
 
 
+def solve_case2_composite(
+    m1: Vec3, t1: Vec3, m2: Vec3, max_radius: float
+) -> tuple[Vec3, Vec3, Vec3, Vec3, float] | None:
+    """Case 2 半径超限时的复合解：固定半径 max_radius 的弧 + 直线收尾。
+
+    返回 (P_mid, B, arc_normal, tail_dir, radius) 或 None（不可解）。
+
+    - 弧从 M1 切于 T1 出发，半径恰为 max_radius，弯到中间点 P_mid
+    - 直线段从 P_mid 切线连续地延伸到 M2（M2 必须在 P_mid 处切线的"前方"）
+    - B 是弧的切线交点（geometry = [B] 写入 Edge）
+    - tail_dir 是直线段的单位方向（从 P_mid 指向 M2）
+
+    几何推导：
+    - 选圆心方向 σ ∈ {+1, -1}：使 M2 落在弧的"凹侧"（与 perp(T1) · (M2-M1) 同号）
+    - O = M1 + σ · R · perp(T1)
+    - P 在圆上 → P = O + R · u（|u|=1）
+    - P 处切线 t_P = arc_normal × u 必须沿 (M2 - P) 方向
+      ⇔ (M2 - P) ⊥ (P - O)
+      ⇔ (M2 - O) · u - R = 0
+    - 设 v = M2 - O，|v|² = vx² + vy²，方程 v·u = R
+    - 与 |u|=1 联立两个解；选弧角 θ = atan2(...) 最小（且 > 0、且 M2 在切线前方）者
+
+    退化条件：
+    - |M2 - O| < R → M2 在圆内 → 直线段不存在 → 返回 None（让上层降级到纯直线）
+    - 弧角 ≥ π → 拒绝（"绕大圈"，不合直觉）
+    """
+    t1n = t1.normalize()
+    if t1n.length() < 1e-9:
+        return None
+    if max_radius <= 0:
+        return None
+
+    n = perp_xy(t1n)  # M1 处法线（圆心方向）
+    d = m2 - m1
+    if d.length() < 1e-9:
+        return None
+
+    # 选择圆心侧 σ：M2 在哪一侧 perp(T1) 就往那一侧弯
+    nd = n.dot(d)
+    sigma = 1.0 if nd >= 0 else -1.0
+    n_signed = n * sigma
+
+    O = m1 + n_signed * max_radius
+    R = max_radius
+
+    v = m2 - O
+    v_len_sq = v.length_squared()
+    if v_len_sq < R * R + 1e-12:
+        # M2 在圆上或圆内 → 不存在外切线 → 复合无解
+        return None
+
+    # 求 u 满足 v·u = R, |u|=1 → 在以 v_hat 为参考的坐标系下
+    # u = (R/|v|) · v_hat ± sqrt(1 - R²/|v|²) · perp(v_hat)
+    v_len = math.sqrt(v_len_sq)
+    v_hat = v * (1.0 / v_len)
+    cos_a = R / v_len
+    sin_a = math.sqrt(max(0.0, 1.0 - cos_a * cos_a))
+    perp_v = perp_xy(v_hat)
+
+    # M1 处径向（从 O 指向 M1）：起始 u₀
+    u_start = (m1 - O) * (1.0 / R)
+
+    candidates: list[tuple[float, Vec3, Vec3]] = []  # (theta, P, tail_dir_unit)
+    for s in (+1.0, -1.0):
+        u = v_hat * cos_a + perp_v * (sin_a * s)
+        P = O + u * R
+
+        # 弧角 θ：从 u_start 转到 u 的有向角度（按 arc_normal 旋转方向）
+        # arc_normal 同 solve_case2_arc：sign 取决于 (m1 - O) × t1 的 z 分量
+        cross_z = (m1 - O).x * t1n.y - (m1 - O).y * t1n.x
+        arc_normal_z = 1.0 if cross_z > 0 else -1.0
+        # 有向角：u_start → u 沿 arc_normal_z 方向旋转
+        cos_t = u_start.dot(u)
+        cross_u = u_start.x * u.y - u_start.y * u.x  # z 分量
+        sin_t = cross_u * arc_normal_z
+        theta = math.atan2(sin_t, cos_t)
+        if theta <= 1e-9:
+            continue  # 0 度或反向 → 无效弧
+        if theta >= math.pi - 1e-9:
+            continue  # 绕大圈
+
+        # P 处切线 t_P = arc_normal × (P - O) / R，必须指向 M2 一侧
+        radius_vec = P - O
+        # arc_normal × radius_vec：z=1 时是 (-ry, rx)；z=-1 时反号
+        if arc_normal_z > 0:
+            t_p = Vec3(-radius_vec.y, radius_vec.x, 0.0) * (1.0 / R)
+        else:
+            t_p = Vec3(radius_vec.y, -radius_vec.x, 0.0) * (1.0 / R)
+
+        m2_minus_p = m2 - P
+        if t_p.dot(m2_minus_p) < 1e-9:
+            continue  # 切线方向与 (M2 - P) 不同向 → 直线段会反向
+
+        # tail_dir：P → M2 单位方向，应与 t_p 同向
+        tail_len = m2_minus_p.length()
+        if tail_len < 1e-9:
+            continue  # P 与 M2 重合 → 不存在直线段
+        tail_dir = m2_minus_p * (1.0 / tail_len)
+
+        candidates.append((theta, P, tail_dir))
+
+    if not candidates:
+        return None
+
+    # 选弧角最小者（曲率方向与 σ 配合下，最自然的接入路径）
+    candidates.sort(key=lambda x: x[0])
+    theta, P, tail_dir = candidates[0]
+
+    # 确定 arc_normal（同 solve_case2_arc 规则）
+    cross_z = (m1 - O).x * t1n.y - (m1 - O).y * t1n.x
+    arc_normal = Vec3(0.0, 0.0, 1.0 if cross_z > 0 else -1.0)
+
+    # 求 B：M1 处切线 (M1 + k·T1) 与 P 处切线 (P + k'·tail_dir) 的交点
+    # 解 k·T1 - k'·tail_dir = P - M1
+    rhs = P - m1
+    det = t1n.x * (-tail_dir.y) - t1n.y * (-tail_dir.x)
+    if abs(det) < 1e-9:
+        return None
+    k = (rhs.x * (-tail_dir.y) - rhs.y * (-tail_dir.x)) / det
+    b_point = m1 + t1n * k
+
+    return P, b_point, arc_normal, tail_dir, R
+
+
 # ===== 合并判定（DELETE 中间节点）=====
 
 # 合并几何严格阈值。距离/位置类用绝对阈值；方向类用 cos(夹角) 接近 1。

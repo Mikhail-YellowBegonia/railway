@@ -144,6 +144,9 @@ class Renderer:
             x1, y1 = cam.world_to_screen(preview.m1.x, preview.m1.y, w, h)
             x2, y2 = cam.world_to_screen(preview.m2.x, preview.m2.y, w, h)
             _draw_dashed_line(self.surface, color, (x1, y1), (x2, y2), dash_len=10, gap_len=5)
+        elif preview.case == 4 and preview.valid:
+            # Case 4 弧+直线复合（§10.3）：弧段 + 直线段 + 中间锚点
+            self._draw_composite_preview(preview, color, cam, w, h)
 
         # 绘制 M1 锚点
         if editor.build_m1 is not None:
@@ -232,6 +235,38 @@ class Renderer:
         # 中间节点锚点（小圆点）
         mx, my = cam.world_to_screen(m_mid.x, m_mid.y, w, h)
         pygame.draw.circle(self.surface, COLOR_M1_ANCHOR, (int(mx), int(my)), 4)
+
+    def _draw_composite_preview(
+        self,
+        preview,
+        color: tuple[int, int, int],
+        cam: Camera,
+        w: int,
+        h: int,
+    ) -> None:
+        """绘制 Case 4 弧+直线复合预览（§10.3）：弧段 + 直线段 + 中间锚点。"""
+        if (
+            preview.composite_mid is None
+            or preview.composite_arc_geom is None
+            or preview.composite_tail_geom is None
+        ):
+            return
+        if not preview.composite_arc_geom:
+            return
+
+        p_mid = preview.composite_mid
+        b = preview.composite_arc_geom[0]
+
+        # 弧段：M1 → B → P_mid
+        self._draw_arc_preview(preview.m1, b, p_mid, color, cam, w, h)
+
+        # 直线段：P_mid → M2
+        x1, y1 = cam.world_to_screen(p_mid.x, p_mid.y, w, h)
+        x2, y2 = cam.world_to_screen(preview.m2.x, preview.m2.y, w, h)
+        _draw_dashed_line(self.surface, color, (x1, y1), (x2, y2), dash_len=10, gap_len=5)
+
+        # 中间节点锚点（小圆点，与 Biarc 同风格）
+        pygame.draw.circle(self.surface, COLOR_M1_ANCHOR, (int(x1), int(y1)), 4)
 
     def _draw_warning(self, mouse_world: Vec3, cam: Camera, w: int, h: int) -> None:
         """绘制警告光标（红色圆环）"""

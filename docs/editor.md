@@ -260,6 +260,10 @@ M1 → M2'，其中 `M2' = M1 + ((M2-M1)·T1*) · T1*`，即 M2 在 T1* 上的
 > 后续计划：当弧半径超限时，应改为"圆弧+直线"的复合结果（先按
 > MAX_ARC_RADIUS 画一段弧，再接直线到 M2）。当前简化为单一直线，
 > 是临时退化方案。
+>
+> **更新（§10.3 已实现）**：半径超限时优先尝试 `case=4` 复合输出
+> （`solve_case2_composite`）。仅当复合也无解（M2 在固定半径圆内 / 弧角
+> 超 π）时才回退到上述沿 T1 直线方案。
 
 **几何解算（圆心、半径、B 点）：**
 
@@ -397,6 +401,7 @@ Delete 模式点击一个中间节点（`connection_count == 2`）触发。
 | `rotate_around_axis(v, axis, angle)` | Rodrigues 旋转 |
 | `perp_xy(v)` | XY 平面内逆时针 90° |
 | `solve_case2_arc(m1, t1, m2)` | Case 2 几何解：返回 `(center, B, normal, R)` 或 `None` |
+| `solve_case2_composite(m1, t1, m2, max_r)` | Case 2 半径超限复合解（§10.3）：返回 `(P_mid, B, normal, tail_dir, R)` 或 `None` |
 | `solve_biarc(m1, t1, m2, t2_in)` | Case 3 几何解：返回 `(M_mid, B1, B2, normal_1, normal_2, R)` 或 `None`。`t2_in` 是沿 M_mid→M2 进入方向 |
 | `is_biarc_collinear_straight(t1, t2_in, m1, m2)` | Case 3 共线退化 fast-path 判定 |
 | `split_arc_b_points(edge, na, nb, p)` | 弧在 p 处分两段，返回两段子弧的 B 点 `(B1, B2)` |
@@ -515,15 +520,24 @@ class PreviewGeometry:
 - 实现：`controller/editor.py::Editor.force_straight` +
   `controller/game_loop.py::_sync_modifiers` 每帧轮询。
 
-### 10.3 弧半径超限的复合输出（替代 §4.5 的退化方案）
+### 10.3 弧半径超限的复合输出（替代 §4.5 的退化方案） ✅ 已实现
 
-- 当 Case 2 解算的弧半径超过 `MAX_ARC_RADIUS` 时，当前简化为
-  "沿 T1 单段直线"。
-- 目标改为：输出 **圆弧 + 直线**（或反序）的复合结果——前段以
-  `MAX_ARC_RADIUS` 为半径作弧到某中间点，后段直线到 M2，
-  保证整体光滑、且终点严格落在 M2。
-- 这涉及 ConstructionPlan 支持多段输出，复杂度较高，等基础工作齐备
-  再回头处理。
+- 当 Case 2 解算的弧半径超过 `MAX_ARC_RADIUS` 时，输出 **圆弧 + 直线**
+  复合结果：前段以 `MAX_ARC_RADIUS` 为半径作弧到中间点 P_mid，
+  后段直线从 P_mid 切线连续延伸到 M2。
+- 数据模型上扩展为 `case=4`：`ConstructionPlan` 携带 `composite_mid` /
+  `composite_arc_geom`（[B]）/ `composite_tail_geom`（[]）。应用时拆为
+  两条 Edge + 一个中间 Node（与 Biarc 方案 A 同构）。
+- **几何**：圆心 `O = M1 + σ·R·perp(T1)`（σ 选 M2 所在侧），
+  P_mid 是从 M2 向圆作外切线的切点。两个候选切点取弧角较小者，
+  且要求 P_mid 处切线与 (M2-P_mid) 同向、弧角 ∈ (0, π)。
+- **退化兜底**：M2 在固定半径圆内 / 弧角超 π → 复合无解 →
+  回退到 §4.5 旧的"沿 T1 投影直线"方案。
+- **优先级**：`force_straight`（§10.2）> 复合 > 纯直线退化。
+- 实现：`model/geom_utils.py::solve_case2_composite` +
+  `controller/editor.py::_try_case2_composite`。
+- 切线连续性已验证（弧切线 · 直线方向 = ±1 至 1e-6）；GeoJSON 往返保持
+  弧元数据。
 
 ### 10.4 BUILD_ACTIVE 中右键的语义 ✅ 已实现
 

@@ -11,6 +11,7 @@ from model.geom_utils import (
     project_along_direction,
     solve_biarc,
     solve_case2_arc,
+    solve_case2_composite,
 )
 from model.rail_network import RailNetwork
 from model.vec3 import Vec3
@@ -328,8 +329,12 @@ class Editor:
 
         center, b_point, arc_normal, radius = result
 
-        # Q3: 半径过大 → 退化为沿 T1 的直线
+        # Q3: 半径过大 → 尝试"弧+直线"复合（§10.3）
+        # 失败时回退到沿 T1 的纯直线（保留 §4.5 旧行为作为兜底）
         if radius > MAX_ARC_RADIUS:
+            composite = self._try_case2_composite(m1, best_t1, m2, m1_node_id, m2_node_id)
+            if composite is not None:
+                return composite
             return self._degenerate_to_straight(m1, best_t1, m2, m1_node_id)
 
         return ConstructionPlan(
@@ -401,6 +406,39 @@ class Editor:
 
         return best_plan
 
+    def _try_case2_composite(
+        self,
+        m1: Vec3,
+        t1: Vec3,
+        m2: Vec3,
+        m1_node_id: int | None,
+        m2_node_id: int | None,
+    ) -> ConstructionPlan | None:
+        """Case 2 半径超限时尝试"弧+直线"复合（§10.3）。
+
+        - 弧段：固定半径 = MAX_ARC_RADIUS，从 M1 切于 T1
+        - 直线段：从弧终点切线连续地延伸到 M2
+        - 输出 case=4，应用时拆为两条 Edge + 中间 Node
+
+        无解（M2 在固定半径圆内 / 弧角超 π / 退化）→ 返回 None，由调用方降级。
+        """
+        result = solve_case2_composite(m1, t1, m2, MAX_ARC_RADIUS)
+        if result is None:
+            return None
+        p_mid, b_point, _arc_normal, _tail_dir, _radius = result
+        return ConstructionPlan(
+            case=4,
+            m1=m1,
+            m2=m2,
+            node_a_id=m1_node_id,
+            node_b_id=m2_node_id,
+            edge_geometry=[],
+            composite_mid=p_mid,
+            composite_arc_geom=[b_point],
+            composite_tail_geom=[],
+            valid=True,
+        )
+
     def _degenerate_to_straight(
         self,
         m1: Vec3,
@@ -456,6 +494,22 @@ class Editor:
                 self.network.remove_node(mid_node.node_id)
             return
 
+        if plan.case == 4:
+            # 弧 + 直线复合（§10.3）：两条 Edge + 中间 Node
+            if (
+                plan.composite_mid is None
+                or plan.composite_arc_geom is None
+                or plan.composite_tail_geom is None
+            ):
+                return
+            mid_node = self.network.add_node(plan.composite_mid)
+            try:
+                self.network.add_edge(node_a, mid_node, plan.composite_arc_geom)
+                self.network.add_edge(mid_node, node_b, plan.composite_tail_geom)
+            except ValueError:
+                self.network.remove_node(mid_node.node_id)
+            return
+
         # Case 1 / Case 2：单条 Edge
         self.network.add_edge(node_a, node_b, plan.edge_geometry)
 
@@ -487,6 +541,9 @@ class Editor:
             biarc_mid=plan.biarc_mid,
             biarc_geom_1=plan.biarc_geom_1,
             biarc_geom_2=plan.biarc_geom_2,
+            composite_mid=plan.composite_mid,
+            composite_arc_geom=plan.composite_arc_geom,
+            composite_tail_geom=plan.composite_tail_geom,
         )
 
     # ===== DELETE 逻辑 =====
