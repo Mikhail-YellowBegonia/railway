@@ -402,6 +402,7 @@ Delete 模式点击一个中间节点（`connection_count == 2`）触发。
 | `perp_xy(v)` | XY 平面内逆时针 90° |
 | `solve_case2_arc(m1, t1, m2)` | Case 2 几何解：返回 `(center, B, normal, R)` 或 `None` |
 | `solve_case2_composite(m1, t1, m2, max_r)` | Case 2 半径超限复合解（§10.3）：返回 `(P_mid, B, normal, tail_dir, R)` 或 `None` |
+| `solve_case2t(m1, t1, m2_mouse, p0, t2_dir, max_r)` | Case 2T 单切线弧（§10.5）：返回 `(P, B, normal, R)` 或 `None` |
 | `solve_biarc(m1, t1, m2, t2_in)` | Case 3 几何解：返回 `(M_mid, B1, B2, normal_1, normal_2, R)` 或 `None`。`t2_in` 是沿 M_mid→M2 进入方向 |
 | `is_biarc_collinear_straight(t1, t2_in, m1, m2)` | Case 3 共线退化 fast-path 判定 |
 | `split_arc_b_points(edge, na, nb, p)` | 弧在 p 处分两段，返回两段子弧的 B 点 `(B1, B2)` |
@@ -549,38 +550,46 @@ class PreviewGeometry:
   （后者需要建造历史栈，当前单段建造模式下意义有限）。
 - 实现：`controller/game_loop.py::_handle_mouse_down` 中右键分支。
 
-### 10.5 单切线弧（Case 2T，备选方案，需手动触发）
+### 10.5 单切线弧（Case 2T，手动触发） ✅ 已实现
 
-**触发场景：** 用户从某既有端点 / 道岔（M1，有 T1）出发，想"接入"
-另一条既有边的中段（M2 通过路径吸附确定）。当前算法判定为 Case 3 Biarc，
-但用户的实际诉求只是"修一段说得过去的弧连过去"，不在乎接入点的精确位置。
+**触发**：BUILD_ACTIVE + 按住 **LALT** + M2 路径吸附到**直边**（弧边不适用）。
 
-**算法构想：** 舍弃精确 M2，改用 M2 所在边的方向线 L = (P0, T2) 作为约束，
-求一段弧 *切于 (M1, T1)* 且 *切于直线 L*。新 M2 = 弧与 L 的切点（由算法决定）。
+**几何**：求一段弧 *切于 (M1, T1)* 且 *切于直线 L*（L = M2 所在边的方向线）。
 
-**数学：** 设 `α = T1 · T2_hat`，`β = m · (M1 - P0)`，其中 `m = perp(T2_hat)`。
-方程 `(α² - 1)·s² + 2αβ·s + β² = 0`，判别式 `4β²` 永非负，**始终有解**。
-两根 `s = -β / (α ± 1)` 对应"两侧切圆"。
+- 设 `α = T1·T2_hat`，`β = perp(T2_hat)·(M1 - P0)`，`P0 = edge.node_a`
+- 方程 `(α²-1)·s² + 2αβ·s + β² = 0`，两根 `s = -β/(α ± 1)` 对应 L 两侧的切圆
+- 圆心 `O = M1 + s·perp(T1)`，半径 `R = |s|`，切点 `P = O - ((O-P0)·perp(T2))·perp(T2)`
 
-**解选择：** 切点离用户原始鼠标 M2 最近者；附加 Q2 检查与 `MAX_ARC_RADIUS` 过滤。
+**M2 鼠标位置**仅作"二选一"偏好信号（两个候选切点选离鼠标近者），
+**精确接入点由算法决定**。
 
-**为什么需手动触发：**
+**数据模型**：`case=5`，`m2_split_edge_id` + `m2_split_t` 记录接入点截断信息。
+应用时单弧 Edge（`geometry=[B]`），中间节点由截断产生。
 
-- 算出的切点位置 ≠ 用户鼠标位置，会和默认 biarc 行为产生混淆
-- 不是常见操作（多数场景下用户希望精确控制接入点）
-- 切线约束的物理意义（轨道连续性）在默认路径下应当保留
+**截断**：M2 端不用 snap 的 t，而用 plan 回算的 `m2_split_t`（在 `_commit_build` 中
+特判 case=5）。
 
-**触发方式（待定）：** 拟用专属修饰键（如 `LCTRL`）在 BUILD_ACTIVE 期间临时
-切换到这个分支。键位与 §10.2 的 `LSHIFT force_straight` 同类，互斥不冲突。
+**预览**：弧 M1→B→entry 用普通虚线，接入点用**品红色方框**标记，强调
+"算法回算的精确位置 ≠ 鼠标位置"。
 
-**实施依赖：**
+**退化与拒绝**：
+- α=±1（T1 与边平行/反平行）→ 必为半圆，不符合建造逻辑 → None
+- R > MAX_ARC_RADIUS → None
+- 接入点越界（t ∉ (0, 1) 开区间）→ None
+- Q2: T1·(P-M1) < 0（严格反向）→ 拒绝；允许 90° 转弯
 
-- ConstructionPlan 增加 case=4 或保留 case=2 + 新字段标记
-- 路径吸附信息需传递到 `_compute_plan`（M2 所在边的方向线）
-- 截断 t 由算法回算，而非用户鼠标位置
-- 预览渲染：算出的新 M2 用独立颜色标记，提示用户算法选定的接入位置
+**优先级**：LSHIFT (`force_straight`, §10.2) > LALT (`force_case2t`, §10.5)
+> 常规 Case 2/3。LALT 跳过 Q2/Q5 的 m2 方向检查（m2 仅作偏好）。
 
-**优先级：** 低。等正式 UX 设计阶段再统一规划修饰键体系。
+**切线连续性**：
+- M1 处 = T1（继承既有轨道切线）
+- 接入点处 = ±边方向（与目标直边切线连续）
+
+**实现**：`model/geom_utils.py::solve_case2t` +
+`controller/editor.py::_try_case2t` + `controller/snap.py::SnapResult.edge_direction`。
+
+**用途**：远端路径吸附场景下精确接入既有直边，避免 Biarc 强行解算的
+笨拙曲率分布。尤其垂直/斜向接入。
 
 ---
 

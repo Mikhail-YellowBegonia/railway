@@ -329,6 +329,113 @@ def solve_case2_composite(
     return P, b_point, arc_normal, tail_dir, R
 
 
+def solve_case2t(
+    m1: Vec3,
+    t1: Vec3,
+    m2_mouse: Vec3,
+    p0: Vec3,
+    t2_dir: Vec3,
+    max_radius: float,
+) -> tuple[Vec3, Vec3, Vec3, float] | None:
+    """单切线弧 Case 2T（§10.5）：求一段弧 *切于 (M1, T1)* 且 *切于直线 L=(P0, T2_dir)*。
+
+    与 solve_case2_arc 的区别：精确接入点由算法决定，不强制等于 m2_mouse。
+    用户的 m2_mouse 仅用作"二选一"的偏好信号（哪个解更接近鼠标）。
+
+    返回 (m2_actual, B, arc_normal, radius) 或 None（不可解 / 半径超限 / Q2 不通过）。
+
+    几何：
+    - 圆心 O = M1 + s · perp(T1)，半径 R = |s|
+    - O 到 L 的距离 = R → 二次方程 (α²-1)·s² + 2αβ·s + β² = 0
+      其中 α = T1·T2_hat,  β = perp(T2_hat)·(M1 - P0)
+    - 两根 s = -β/(α+1) 或 s = -β/(α-1)，分别对应 L 两侧的切圆
+    - 切点 P = O - ((O - P0)·perp(T2_hat)) · perp(T2_hat)（圆心到 L 的垂足）
+
+    退化：
+    - α=±1（T1 与 L 平行 / 反平行）→ 切点处弧角必为 π（半圆），不符合
+      建造逻辑 → 直接拒绝（None）
+    - R > max_radius → 拒绝
+    - Q2: T1·(P - M1) < 0（严格反向）→ 拒绝；允许 90° 转弯（dot=0）
+    """
+    t1n = t1.normalize()
+    t2n = t2_dir.normalize()
+    if t1n.length() < 1e-9 or t2n.length() < 1e-9:
+        return None
+    if max_radius <= 0:
+        return None
+
+    m_perp = perp_xy(t2n)  # L 的法线方向
+    alpha = t1n.dot(t2n)
+    beta = m_perp.dot(m1 - p0)
+
+    # α=±1：T1 与 L 共线 → 切点处弧角为 π（半圆），无法用单弧 [B] 表示，
+    # 且修建半圆不符合建造逻辑 → 直接拒绝。
+    if abs(abs(alpha) - 1.0) < 1e-9:
+        return None
+
+    candidates_s: list[float] = [
+        -beta / (alpha + 1.0),
+        -beta / (alpha - 1.0),
+    ]
+
+    n1 = perp_xy(t1n)
+
+    # 在所有合法解里挑离 m2_mouse 最近的切点
+    best: tuple[float, Vec3, Vec3, float] | None = None  # (s, O, P, R)
+    best_dist = float("inf")
+
+    for s in candidates_s:
+        if abs(s) < 1e-9:
+            continue  # 退化为零半径
+        radius = abs(s)
+        if radius > max_radius:
+            continue
+
+        O = m1 + n1 * s
+        # 切点 P：O 到 L 的垂足 = O - ((O - P0)·m_perp) · m_perp
+        d_signed = (O - p0).dot(m_perp)
+        P = O - m_perp * d_signed
+
+        # Q2 检查：T1 · (P - M1) >= 0（允许 90° 转弯，仅拒绝严格反向）
+        dir_to_p = P - m1
+        if dir_to_p.length() < 1e-9:
+            continue
+        if t1n.dot(dir_to_p) < -1e-6:
+            continue
+
+        dist = P.distance_to(m2_mouse)
+        if dist < best_dist:
+            best_dist = dist
+            best = (s, O, P, radius)
+
+    if best is None:
+        return None
+
+    _, O, P, radius = best
+
+    # arc_normal：与 solve_case2_arc 同规则
+    radius_vec_m1 = m1 - O
+    cross_z = radius_vec_m1.x * t1n.y - radius_vec_m1.y * t1n.x
+    arc_normal = Vec3(0.0, 0.0, 1.0 if cross_z > 0 else -1.0)
+
+    # P 处切线 t_P = arc_normal × (P - O) / R
+    radius_vec_p = P - O
+    if arc_normal.z > 0:
+        t_p = Vec3(-radius_vec_p.y, radius_vec_p.x, 0.0) * (1.0 / radius)
+    else:
+        t_p = Vec3(radius_vec_p.y, -radius_vec_p.x, 0.0) * (1.0 / radius)
+
+    # 求 B：M1 处切线与 P 处切线的交点
+    rhs = P - m1
+    det = t1n.x * (-t_p.y) - t1n.y * (-t_p.x)
+    if abs(det) < 1e-9:
+        return None
+    k = (rhs.x * (-t_p.y) - rhs.y * (-t_p.x)) / det
+    b_point = m1 + t1n * k
+
+    return P, b_point, arc_normal, radius
+
+
 # ===== 合并判定（DELETE 中间节点）=====
 
 # 合并几何严格阈值。距离/位置类用绝对阈值；方向类用 cos(夹角) 接近 1。

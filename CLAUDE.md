@@ -127,6 +127,7 @@ on load — round-trip is bit-stable for arc geometry within 1e-4.
 | Right click | BUILD_ACTIVE | Cancel current build (same as Esc) |
 | `Q` | any | Quit program |
 | `LSHIFT` (held) | BUILD_ACTIVE | Force straight along T1 |
+| `LALT` (held) | BUILD_ACTIVE | Force Case 2T single-tangent arc (M2 path-snap to straight edge) |
 | Left/Right/Middle drag | IDLE | Pan camera |
 | Middle drag | BUILD/DELETE | Pan camera |
 | Scroll | any | Zoom |

@@ -151,6 +151,9 @@ class GameLoop:
         keys = pygame.key.get_pressed()
         # 强制直线：按住 LSHIFT 时，Case 2 改走 Case 1
         self.editor.force_straight = bool(keys[pygame.K_LSHIFT])
+        # 强制 Case 2T（§10.5）：按住 LALT 时，M2 路径吸附直边 → 单切线弧
+        # LSHIFT 优先（force_straight 的判定在 _compute_plan 中早于 case2t）
+        self.editor.force_case2t = bool(keys[pygame.K_LALT])
 
     def _mouse_world_pos(self) -> Vec3:
         mx, my = pygame.mouse.get_pos()

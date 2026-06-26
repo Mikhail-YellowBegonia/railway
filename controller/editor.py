@@ -9,9 +9,11 @@ from model.geom_utils import (
     is_t1_consistent_with_target,
     merged_arc_b_point,
     project_along_direction,
+    project_on_segment,
     solve_biarc,
     solve_case2_arc,
     solve_case2_composite,
+    solve_case2t,
 )
 from model.rail_network import RailNetwork
 from model.vec3 import Vec3
@@ -67,6 +69,10 @@ class Editor:
         # 修饰键标志：由 GameLoop 每帧同步
         # force_straight=True 时强制走 Case 1 直线（即便 T1 有候选）。临时调试用，参见 docs §10.2
         self.force_straight: bool = False
+        # force_case2t=True 时（§10.5）：M2 路径吸附直边 + 有 T1 → 调用 Case 2T，
+        # 接入点由算法决定（舍弃精确 M2，改为从 M2 所在边的方向线求切圆）。
+        # 触发键：LALT（与 LSHIFT 互斥），按住期间临时启用。
+        self.force_case2t: bool = False
 
     def update_hover(self, world_pos: Vec3) -> None:
         """每帧更新：处理鼠标悬停 + 预览 + 警告"""
@@ -198,12 +204,14 @@ class Editor:
             t2_candidates = list(snap.tangent_candidates)
             m2_edge_id = snap.snapped_edge_id
             m2_edge_t = snap.snapped_edge_t
+            m2_edge_dir = snap.edge_direction  # 直边方向（Case 2T 用）
         else:
             m2 = world_pos
             m2_node_id = None
             t2_candidates = []
             m2_edge_id = None
             m2_edge_t = None
+            m2_edge_dir = None
 
         # 同边双截断 → 拒绝
         if (
@@ -221,6 +229,8 @@ class Editor:
             t2_candidates=t2_candidates,
             m1_node_id=self.build_m1_node_id,
             m2_node_id=m2_node_id,
+            m2_edge_id=m2_edge_id,
+            m2_edge_dir=m2_edge_dir,
         )
 
         if not plan.valid:
@@ -235,7 +245,13 @@ class Editor:
                 return  # 截断失败：拒绝
             plan.node_a_id = new_mid
 
-        if m2_edge_id is not None and m2_edge_t is not None:
+        # M2 端截断：Case 2T（case=5）用 plan 回算的 t；其余用 snap 的 t
+        if plan.case == 5 and plan.m2_split_edge_id is not None and plan.m2_split_t is not None:
+            new_mid = self.network.split_edge_at(plan.m2_split_edge_id, plan.m2_split_t)
+            if new_mid is None:
+                return
+            plan.node_b_id = new_mid
+        elif m2_edge_id is not None and m2_edge_t is not None:
             new_mid = self.network.split_edge_at(m2_edge_id, m2_edge_t)
             if new_mid is None:
                 return
@@ -255,17 +271,18 @@ class Editor:
         t2_candidates: list[Vec3],
         m1_node_id: int | None,
         m2_node_id: int | None,
+        m2_edge_id: int | None = None,
+        m2_edge_dir: Vec3 | None = None,
     ) -> ConstructionPlan:
         """计算建造计划。
 
-        分支：
+        分支（按优先级）：
         - 无 T1 候选 → Case 1（直接连 M1→M2）
-        - 有 T1 候选无 T2 候选 → 选最佳 T1，求 Case 2 单弧（半径过大或 force_straight 退化为沿 T1 直线）
-        - T1 + T2 都有候选 → 选各自最佳（按 (M2-M1) / (M1-M2) 内积），尝试 Case 3 Biarc
-            - 共线退化 fast-path → Case 1
-            - force_straight=True → 仍走 T1 退化直线（Case 3 是后续约束，强制直线优先级更高）
-            - 其他失败 → 直接拒绝（按用户决议；不向 Case 2 降级）
-        - Q2/Q5 拒绝条件适用于所有有 T1 的分支（含强制直线），保证既有轨道方向连续
+        - force_straight=True → 沿 T1 投影直线（§10.2）
+        - force_case2t=True + M2 路径吸附直边 → Case 5（§10.5 单切线弧）
+        - 有 T1 候选无 T2 候选 → 选最佳 T1，求 Case 2 单弧（半径过大退化/复合）
+        - T1 + T2 都有候选 → Case 3 Biarc（失败拒绝）
+        - Q2/Q5 拒绝条件适用于所有有 T1 的分支
         """
         # M1 == M2 → 拒绝
         if m1.distance_to(m2) < 1e-6:
@@ -300,16 +317,39 @@ class Editor:
                 best_t1 = cn
 
         if best_t1 is None or best_dot < 1e-6:
-            # Q5: 所有候选与 d 钝角（或垂直）→ 拒绝
+            # Q5 检查推迟到 Case 2T 之后（Case 2T 不依赖 m2 方向）
+            pass
+
+        # 强制直线（LSHIFT，§10.2）：优先级最高，跳过所有弧 / Biarc / Case 2T 分支
+        # （但仍需 best_t1 有效）
+        if self.force_straight and best_t1 is not None and best_dot >= 1e-6:
+            # Q2 也对 force_straight 适用
+            if is_t1_consistent_with_target(best_t1, m1, m2):
+                return self._degenerate_to_straight(m1, best_t1, m2, m1_node_id)
             return ConstructionPlan(case=2, m1=m1, m2=m2, valid=False)
 
-        # Q2: T1 反向（M2 在 T1 背后）→ 拒绝
+        # Case 2T（§10.5）：force_case2t + M2 路径吸附到直边 → 单切线弧
+        # 接入点由算法决定，m2 仅作"二选一"的偏好；跳过 Q2/Q5 的 m2 方向检查
+        if (
+            self.force_case2t
+            and m2_edge_id is not None
+            and m2_edge_dir is not None
+            and m2_node_id is None
+            and best_t1 is not None
+        ):
+            plan_2t = self._try_case2t(
+                m1, best_t1, m2, m2_edge_id, m2_edge_dir, m1_node_id
+            )
+            if plan_2t is not None:
+                return plan_2t
+            return ConstructionPlan(case=5, m1=m1, m2=m2, valid=False)
+
+        # 正常分支前的 Q5 / Q2 检查
+        if best_t1 is None or best_dot < 1e-6:
+            return ConstructionPlan(case=2, m1=m1, m2=m2, valid=False)
+
         if not is_t1_consistent_with_target(best_t1, m1, m2):
             return ConstructionPlan(case=2, m1=m1, m2=m2, valid=False)
-
-        # 强制直线：跳过弧 / Biarc，直接沿 T1 退化（优先级高于 Case 3）
-        if self.force_straight:
-            return self._degenerate_to_straight(m1, best_t1, m2, m1_node_id)
 
         if t2_candidates:
             # Case 3 候选路径：枚举所有 T2 候选，挑能解出且 R 最大者
@@ -405,6 +445,56 @@ class Editor:
                 )
 
         return best_plan
+
+    def _try_case2t(
+        self,
+        m1: Vec3,
+        t1: Vec3,
+        m2_mouse: Vec3,
+        m2_edge_id: int,
+        edge_dir: Vec3,
+        m1_node_id: int | None,
+    ) -> ConstructionPlan | None:
+        """Case 2T 单切线弧（§10.5）：求一段弧 *切于 (M1, T1)* 且 *切于直线 L*。
+
+        - L 是 M2_mouse 所在直边的方向线（P0 = edge.node_a, T2_dir = edge_dir）
+        - M2 的精确接入点由算法决定（舍弃 m2_mouse），存入 plan.m2_split_t
+        - 接入点必须落在边的有效范围内（t ∈ [0,1]），否则 None
+
+        返回 case=5 的 ConstructionPlan，或 None（不可解 / 接入点越界）。
+        """
+        edge = self.network.edges.get(m2_edge_id)
+        if edge is None or edge.is_arc:
+            return None  # 仅直边适用
+
+        node_a = self.network.nodes[edge.node_a_id]
+        node_b = self.network.nodes[edge.node_b_id]
+        p0 = node_a.position
+
+        result = solve_case2t(m1, t1, m2_mouse, p0, edge_dir, MAX_ARC_RADIUS)
+        if result is None:
+            return None
+
+        m2_actual, b_point, _arc_normal, _radius = result
+
+        # 接入点必须在边的有效范围内：回算 t
+        t_actual, _proj, _dist = project_on_segment(m2_actual, p0, node_b.position)
+        # t 必须严格在 (0, 1) 开区间内（端点由点吸附处理）
+        if t_actual < 1e-6 or t_actual > 1.0 - 1e-6:
+            return None  # 切点在端点上或越界
+
+        # m2_node_id 保持 None（接入点由 split 产生）
+        return ConstructionPlan(
+            case=5,
+            m1=m1,
+            m2=m2_actual,
+            node_a_id=m1_node_id,
+            node_b_id=None,
+            edge_geometry=[b_point],
+            m2_split_edge_id=m2_edge_id,
+            m2_split_t=t_actual,
+            valid=True,
+        )
 
     def _try_case2_composite(
         self,
@@ -530,7 +620,12 @@ class Editor:
             t2_candidates=t2_candidates,
             m1_node_id=self.build_m1_node_id,
             m2_node_id=snap.snapped_node_id,
+            m2_edge_id=snap.snapped_edge_id,
+            m2_edge_dir=snap.edge_direction,
         )
+
+        # Case 5（Case 2T）的预览：plan.m2 已经是算法回算的接入点
+        case2t_entry = plan.m2 if plan.case == 5 and plan.valid else None
 
         self.preview = PreviewGeometry(
             m1=plan.m1,
@@ -544,6 +639,7 @@ class Editor:
             composite_mid=plan.composite_mid,
             composite_arc_geom=plan.composite_arc_geom,
             composite_tail_geom=plan.composite_tail_geom,
+            case2t_entry=case2t_entry,
         )
 
     # ===== DELETE 逻辑 =====

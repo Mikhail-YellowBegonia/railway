@@ -15,6 +15,8 @@ class SnapResult:
     - `tangent`: 单一最佳切线方向（路径吸附时按 reference_pos 选；点吸附端点时唯一）
     - `tangent_candidates`: 该位置所有合法切线方向集合（用于 BUILD_ACTIVE 中
       根据 M2 动态选择最合适的方向）。空列表表示无切线约束（Case 1）。
+    - `edge_direction`: 路径吸附到直边时的边方向向量（归一化）；用于 Case 2T
+      （§10.5）算法输入。弧边或点吸附时 = None。
     """
     snapped: bool                                       # 是否发生了吸附
     position: Vec3                                      # 吸附后的世界坐标（无吸附时 = 原始光标位置）
@@ -23,6 +25,7 @@ class SnapResult:
     snapped_node_id: int | None = None                  # 吸附到的 Node ID（点吸附时）
     snapped_edge_id: int | None = None                  # 吸附到的 Edge ID（路径吸附时）
     snapped_edge_t: float | None = None                 # 路径吸附时沿边的参数 t ∈ [0,1]
+    edge_direction: Vec3 | None = None                  # 路径吸附到直边时的边方向（归一化），弧边/点吸附=None
 
 
 class PointSnapProvider:
@@ -198,6 +201,11 @@ class PathSnapProvider:
             else:
                 best = forward  # cursor 与 reference 重合，任取
 
+        # edge_direction：仅直边有意义（用于 Case 2T §10.5）
+        edge_dir = None
+        if not edge.is_arc:
+            edge_dir = (node_b.position - node_a.position).normalize()
+
         return SnapResult(
             snapped=True,
             position=best_pos,
@@ -205,4 +213,5 @@ class PathSnapProvider:
             tangent_candidates=candidates,
             snapped_edge_id=best_edge_id,
             snapped_edge_t=best_t,
+            edge_direction=edge_dir,
         )

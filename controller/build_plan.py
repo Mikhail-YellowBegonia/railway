@@ -8,7 +8,7 @@ from model.vec3 import Vec3
 @dataclass
 class ConstructionPlan:
     """建造计划：从 M1 到 M2 的一次完整建造操作的描述"""
-    case: int                                  # 1=直线, 2=单弧, 3=Biarc, 4=弧+直线复合
+    case: int                                  # 1=直线, 2=单弧, 3=Biarc, 4=弧+直线复合, 5=Case 2T 单切线弧
     m1: Vec3
     m2: Vec3
     node_a_id: int | None = None               # M1 端的 Node ID（None 则需新建）
@@ -25,6 +25,9 @@ class ConstructionPlan:
     composite_mid: Vec3 | None = None          # 中间节点（弧的终点 = 直线的起点）
     composite_arc_geom: list[Vec3] | None = None    # 弧段 geometry [B]
     composite_tail_geom: list[Vec3] | None = None   # 直线段 geometry []
+    # Case 5 (Case 2T 单切线弧，§10.5) 专用：M2 接入点由算法回算
+    m2_split_edge_id: int | None = None        # M2 端要截断的边 ID（接入点所在边）
+    m2_split_t: float | None = None            # M2 接入点在边上的参数 t（算法回算）
 
 
 @dataclass
@@ -32,7 +35,7 @@ class PreviewGeometry:
     """预览几何：BUILD_ACTIVE 状态下渲染待建轨道的描述"""
     m1: Vec3
     m2: Vec3
-    case: int                                  # 1, 2, 3, or 4
+    case: int                                  # 1, 2, 3, 4, or 5
     edge_geometry: list[Vec3] = field(default_factory=list)
     valid: bool = True
     # Case 3 预览
@@ -43,3 +46,5 @@ class PreviewGeometry:
     composite_mid: Vec3 | None = None
     composite_arc_geom: list[Vec3] | None = None
     composite_tail_geom: list[Vec3] | None = None
+    # Case 5 (Case 2T) 预览：算法选定的接入点用独立颜色标记
+    case2t_entry: Vec3 | None = None           # 算法回算的接入点（= 弧的终点）

@@ -28,6 +28,7 @@ COLOR_PREVIEW = (120, 220, 255)
 COLOR_PREVIEW_INVALID = (255, 80, 80)
 COLOR_M1_ANCHOR = (100, 255, 100)
 COLOR_WARNING = (255, 60, 60)
+COLOR_CASE2T_ENTRY = (255, 100, 255)  # §10.5 算法回算的接入点标记（品红）
 
 MODE_NAMES: dict[EditMode, str] = {
     EditMode.IDLE: "IDLE",
@@ -147,6 +148,22 @@ class Renderer:
         elif preview.case == 4 and preview.valid:
             # Case 4 弧+直线复合（§10.3）：弧段 + 直线段 + 中间锚点
             self._draw_composite_preview(preview, color, cam, w, h)
+        elif preview.case == 5 and preview.valid and len(preview.edge_geometry) == 1:
+            # Case 5 单切线弧（§10.5）：弧 M1→B→entry + 接入点独立标记
+            self._draw_arc_preview(
+                preview.m1, preview.edge_geometry[0], preview.m2, color, cam, w, h
+            )
+            if preview.case2t_entry is not None:
+                ex, ey = cam.world_to_screen(
+                    preview.case2t_entry.x, preview.case2t_entry.y, w, h
+                )
+                # 接入点用品红色方框标记（区别于普通节点/锚点）
+                pygame.draw.circle(self.surface, COLOR_CASE2T_ENTRY, (int(ex), int(ey)), 6, 2)
+        elif preview.case == 5 and not preview.valid:
+            # Case 2T 不可解：红色直线占位
+            x1, y1 = cam.world_to_screen(preview.m1.x, preview.m1.y, w, h)
+            x2, y2 = cam.world_to_screen(preview.m2.x, preview.m2.y, w, h)
+            _draw_dashed_line(self.surface, color, (x1, y1), (x2, y2), dash_len=10, gap_len=5)
 
         # 绘制 M1 锚点
         if editor.build_m1 is not None:
