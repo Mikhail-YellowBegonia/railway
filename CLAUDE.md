@@ -136,12 +136,13 @@ Modifier keys are polled per frame in `GameLoop._sync_modifiers`, not edge-trigg
 
 ## Working with `docs/editor.md`
 
-The editor design doc is the source of truth for behavior. Step status table
-at §7 tracks completion (Steps 0–6 ✅ as of the latest commit). §10 collects
-deferred / pending UX items — most aren't started; consult before adding new
-features. **Pseudocode blocks in the doc are non-normative — implement to the
-behavior description, not the code samples.** When changing editor behavior,
-update the relevant §4 / §5 sections and the §7 table.
+The editor design doc is the source of truth for behavior. §7 lists the
+completed scope (Steps 0–6 and §10.1–§10.5, all ✅). §11 records the current
+project stance: editor stays the focus, Z-axis is deferred until visual
+debugging catches up. **Pseudocode blocks in the doc are non-normative —
+implement to the behavior description, not the code samples.** When changing
+editor behavior, update the relevant §4 / §5 sections; when adding new
+follow-up requirements, append them as §12+ items.
 
 ## Conventions used in this codebase
 

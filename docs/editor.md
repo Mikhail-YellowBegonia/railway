@@ -207,7 +207,7 @@ PathSnapProvider 在每个 Edge 上计算最短投影距离，取全局最小。
 1. 确定 M2：同 §4.1 的 M1 处理（含吸附）
 2. 调用 `_compute_plan` 产生 `ConstructionPlan`
 3. 若 `plan.valid == False` → 拒绝（按 §4.0，保持 BUILD_ACTIVE）
-4. 若 `plan.split_edge_id` 非 None → 先截断（见 §4.7，待实现）
+4. 若 M1 / M2 通过路径吸附命中既有边内部 → 先截断（见 §4.7）
 5. 应用 plan 到网络
 6. 回到 BUILD_IDLE
 
@@ -218,19 +218,24 @@ PathSnapProvider 在每个 Edge 上计算最短投影距离，取全局最小。
 ```python
 @dataclass
 class ConstructionPlan:
-    case: int                        # 1, 2, or 3
+    case: int                        # 1=直线, 2=单弧, 3=Biarc, 4=弧+直线复合, 5=Case 2T
     m1: Vec3
     m2: Vec3
     node_a_id: int | None            # M1 端的 Node ID（None 则需新建）
     node_b_id: int | None            # M2 端的 Node ID（None 则需新建）
-    edge_geometry: list[Vec3]        # [] 直线, [B] 弧（Case 3 不用此字段）
-    split_edge_id: int | None        # 需要截断的 Edge ID（待实现）
-    split_at_t: float | None         # 截断参数 t ∈ [0,1]
+    edge_geometry: list[Vec3]        # [] 直线, [B] 弧（Case 3/4 不用此字段）
     valid: bool                      # 几何是否合法
-    # Case 3 Biarc 专用（方案 A）
-    biarc_mid: Vec3 | None           # 中间节点位置 M_mid
-    biarc_geom_1: list[Vec3] | None  # 弧 1 几何（[B1]）
-    biarc_geom_2: list[Vec3] | None  # 弧 2 几何（[B2]）
+    # Case 3 Biarc 专用（方案 A：双 Edge + 中间 Node）
+    biarc_mid: Vec3 | None
+    biarc_geom_1: list[Vec3] | None
+    biarc_geom_2: list[Vec3] | None
+    # Case 4 弧+直线复合（§10.3）：双 Edge + 中间 Node
+    composite_mid: Vec3 | None
+    composite_arc_geom: list[Vec3] | None
+    composite_tail_geom: list[Vec3] | None
+    # Case 5 Case 2T（§10.5）：接入点由算法回算，截断信息随 plan 携带
+    m2_split_edge_id: int | None
+    m2_split_t: float | None
 ```
 
 ### 4.4 Case 1: 无切线约束 → 自由直线
@@ -252,18 +257,14 @@ class ConstructionPlan:
   6. 输出弧 Edge，geometry = [B]
 ```
 
-**退化为直线的处理**：当 Case 2 计算结果半径过大或几何不可解时，
-为保持起点切线连续（避免 M1 处折角），不直接连 M1→M2，而是建造
-M1 → M2'，其中 `M2' = M1 + ((M2-M1)·T1*) · T1*`，即 M2 在 T1* 上的
-投影。这样肉眼看上去就是沿 T1* 方向画一条直线"画到鼠标横向位置"。
+**退化处理层级**（半径超限或几何不可解时）：
 
-> 后续计划：当弧半径超限时，应改为"圆弧+直线"的复合结果（先按
-> MAX_ARC_RADIUS 画一段弧，再接直线到 M2）。当前简化为单一直线，
-> 是临时退化方案。
->
-> **更新（§10.3 已实现）**：半径超限时优先尝试 `case=4` 复合输出
-> （`solve_case2_composite`）。仅当复合也无解（M2 在固定半径圆内 / 弧角
-> 超 π）时才回退到上述沿 T1 直线方案。
+1. 优先尝试 §10.3 的"弧 + 直线"复合输出（`case=4`）
+2. 复合也无解（M2 在固定半径圆内 / 弧角超 π）→ 退化为沿 T1 的纯直线：
+   `M2' = M1 + ((M2-M1)·T1*) · T1*`（M2 在 T1* 射线上的投影）
+
+纯直线退化保证起点切线连续（不出现 M1 处折角），肉眼观感为"沿既有
+方向画到鼠标横向位置"。
 
 **几何解算（圆心、半径、B 点）：**
 
@@ -310,8 +311,7 @@ M1 → M2'，其中 `M2' = M1 + ((M2-M1)·T1*) · T1*`，即 M2 在 T1* 上的
 **失败处理：**
 
 - 4 组手性组合全部不可解 → 直接拒绝（保持 BUILD_ACTIVE，按 §4.0 静默）
-- 半径超过 `MAX_ARC_RADIUS` → 直接拒绝（按用户决议，不向 Case 2 降级；
-  待后续观察实际失败率，必要时再考虑退化策略）
+- 半径超过 `MAX_ARC_RADIUS` → 直接拒绝，不向 Case 2 降级
 
 实现：`controller/editor.py::Editor._try_case3_biarc`、
 `model/geom_utils.py::solve_biarc / is_biarc_collinear_straight`。
@@ -428,13 +428,19 @@ Delete 模式点击一个中间节点（`connection_count == 2`）触发。
 class PreviewGeometry:
     m1: Vec3
     m2: Vec3
-    case: int                       # 1, 2, or 3
-    edge_geometry: list[Vec3]       # Case 1/2 的 geometry
-    valid: bool                     # 当前计算是否合法
+    case: int                       # 1..5，与 ConstructionPlan 同义
+    edge_geometry: list[Vec3]       # Case 1/2/5 的 geometry
+    valid: bool
     # Case 3 预览
     biarc_mid: Vec3 | None
     biarc_geom_1: list[Vec3] | None
     biarc_geom_2: list[Vec3] | None
+    # Case 4 弧+直线复合
+    composite_mid: Vec3 | None
+    composite_arc_geom: list[Vec3] | None
+    composite_tail_geom: list[Vec3] | None
+    # Case 5 Case 2T：算法回算的接入点（用独立颜色标记）
+    case2t_entry: Vec3 | None
 ```
 
 渲染方式：
@@ -452,17 +458,26 @@ class PreviewGeometry:
 
 ---
 
-## 7. 实施步骤
+## 7. 已完成范围一览
 
-| 步 | 内容 | 状态 | 说明 |
-|----|------|------|------|
-| **0** | **清理遗留代码** | ✅ 完成 | 删除 `model/geometry.py` 重复定义 |
-| **1** | **Editor 模式重构 + 点吸附 + Case 1 + 预览 + 警告** | ✅ 完成 | 三模式（IDLE/BUILD/DELETE）+ BUILD 子状态机（IDLE/ACTIVE）。点吸附（PointSnapProvider）。Case 1 直线建造（四种端点组合）。实时预览（虚线+M1锚点）。警告指示器（红色十字+圆环）。拒绝处理统一为保持当前状态。 |
-| **2** | **路径吸附 + DELETE 边导向** | ✅ 完成 | PathSnapProvider（直线+弧投影，`model/geom_utils.py` 几何工具集）。切线方向按 BUILD_ACTIVE 时 `(cursor - M1)` 夹角选择。DELETE 模式操作单位改为 Edge，自动清理孤立节点。优先级：点吸附 > 路径吸附。 |
-| **3** | **Case 2 弧建造** | ✅ 完成 | T1 候选化重构（`build_t1_candidates`）：道岔 N 候选、路径吸附 forward/reverse 双候选、端点 1 候选。提交时按 (M2-M1) 夹角选最佳。Q2: T1 反向拒绝；Q3: R > MAX_ARC_RADIUS (500.0) 退化为沿 T1 投影的直线；Q5: 所有候选钝角时拒绝。`solve_case2_arc` 几何工具。弧预览（虚线弧 + 切线辅助线）。 |
-| **4** | **删除-合并** | ✅ 完成 | DELETE 模式悬停优先级 节点 > 边；点击 connection==2 节点尝试合并两侧边。判定：直线共线检查（cos ≥ 1-1e-6）、弧同心同半径同向且切线连续。失败静默忽略。详见 §4.8。 |
-| **5** | **Case 3 Biarc** | ✅ 完成 | 等半径双弧建造（方案 A：双 Edge + 中间 Node）。枚举 4 种手性组合，二次方程解 R，过滤"绕大圈"和半径超 MAX_ARC_RADIUS 的解，取 R 最大者。共线 fast-path 退化为直线。失败直接拒绝（按用户决议）。详见 §4.6。 |
-| **6** | **Edge 截断** | ✅ 完成 | M1 / M2 路径吸附到边内部时 commit 阶段分裂原边为两段；同边双截断静默拒绝。直线均匀分割，弧用切线交点反算保证同心同半径同向，截断 → 合并 → GeoJSON 往返完全一致。详见 §4.7。 |
+编辑器主干（Step 0–6）与追加需求（§10.1–§10.5）均已落地。
+
+| 范围 | 关联章节 |
+|------|----------|
+| ✅ 三模式状态机（IDLE / BUILD / DELETE）+ BUILD 子状态机 | §1 |
+| ✅ 点吸附 + 路径吸附（优先级：点 > 路径） | §3.2 / §3.3 |
+| ✅ Case 1 自由直线 | §4.4 |
+| ✅ Case 2 单切线弧 + 半径超限退化 | §4.5 |
+| ✅ Case 3 等半径 Biarc（方案 A：双 Edge + 中间 Node） | §4.6 |
+| ✅ Edge 截断（M1/M2 路径吸附到边内部） | §4.7 |
+| ✅ DELETE 边删除 + 中间节点合并（直线共线 / 弧同心同半径同向） | §4.8 |
+| ✅ 预览渲染（虚线 + M1 锚点 + 无效红色 + 警告光标） | §6 |
+| ✅ 视图三键平移（IDLE 左/中/右键） | §10.1 |
+| ✅ LSHIFT 强制直线（`force_straight`） | §10.2 |
+| ✅ 弧+直线复合输出（`case=4`） | §10.3 |
+| ✅ BUILD_ACTIVE 右键 = 取消 | §10.4 |
+| ✅ LALT 单切线弧 Case 2T（`case=5`） | §10.5 |
+| ✅ GeoJSON 双向往返（直线 / 弧 / 截断后弧元数据保持） | §9 |
 
 ---
 
@@ -479,9 +494,9 @@ class PreviewGeometry:
 
 ### 曲率限制
 
-开发初期不实施最小/最大曲率半径限制。当前仅在 Case 2 中以
-`MAX_ARC_RADIUS = 500.0`（位于 `controller/editor.py`）作为退化阈值。
-后续可扩展 ConstructionPlan 携带最小半径约束。
+当前唯一的曲率约束是 `MAX_ARC_RADIUS = 500.0`（`controller/editor.py`），
+作为 Case 2 半径超限退化的阈值。ConstructionPlan 未携带最小半径约束，
+如需最小曲率半径的物理约束（列车曲线通过限制等），后续可在 plan 层扩展。
 
 ---
 
@@ -495,10 +510,9 @@ class PreviewGeometry:
 
 ---
 
-## 10. 追加需求（待整理 / 落实）
+## 10. 追加需求
 
-> 此区收集开发过程中陆续追加的需求，等到合适的实施步骤完成后，再
-> 整理到上文相应章节并标记完成。
+主干功能之外的 UX / 几何补充。均已完成，本节作为对应特性的规格说明。
 
 ### 10.1 视图操作的输入扩展 ✅ 已实现
 
@@ -515,8 +529,7 @@ class PreviewGeometry:
   - 起点切线连续，方向受既有轨道约束，长度由鼠标控制
   - Q2/Q5 的拒绝条件仍适用
   - 无 T1 候选（孤立起点）时无效，仍走 Case 1 自由直线
-- 用途：测试期手动绕过 Case 2 / Case 3 的几何分支，长直线场景实用。
-- 后续会作为正式 UX 设计的一部分重新规划，键位可能调整。
+- 用途：绕过 Case 2 / Case 3 的几何分支，长直线场景实用。
 - 状态显示：BUILD 模式下激活时左上角追加 `[STRAIGHT]` 提示。
 - 实现：`controller/editor.py::Editor.force_straight` +
   `controller/game_loop.py::_sync_modifiers` 每帧轮询。
@@ -546,8 +559,8 @@ class PreviewGeometry:
 - 其它模式（IDLE / BUILD_IDLE / DELETE）中右键行为不变：
   - IDLE 中右键拖拽 = 平移（见 §10.1）
   - BUILD_IDLE / DELETE 中右键拖拽 = 无效（仅中键平移）
-- 设计决策：优先简洁直观的"右键 = 取消"语义，而非"撤销最近一段"
-  （后者需要建造历史栈，当前单段建造模式下意义有限）。
+- 采用简洁的"右键 = 取消"语义，而非"撤销最近一段"（后者需要建造历史栈，
+  在当前单段建造模式下意义有限）。
 - 实现：`controller/game_loop.py::_handle_mouse_down` 中右键分支。
 
 ### 10.5 单切线弧（Case 2T，手动触发） ✅ 已实现
@@ -593,5 +606,19 @@ class PreviewGeometry:
 
 ---
 
-### 合并后的 GeoJSON
-合并两条直线为一个直线、合并两条等半径弧为一个弧 → GeoJSON 自然对应。
+## 11. 当前阶段与近期方向
+
+**编辑器基本功能已稳固**。主干（Step 0–6）与追加需求（§10.1–§10.5）
+均已落地，几何算法通过单元测试与端到端测试，用户手感亦经人工验证。
+距离理想中的编辑体验仍有差距，具体的补强项待后续按需追加为 §12 及
+之后的条目。
+
+**近期开发重点仍是编辑器**：车辆、地形、经济等其它模块暂不启动。
+
+**Z 轴（高程）暂缓引入**：
+- 底层数据（`Vec3` / `arc_normal ∈ {±Z}` / `PLANE_NORMAL`）已保留 Z 分量，
+  预留了未来扩展空间
+- 但视觉层仍为平面渲染，缺乏可靠的高程调试与预览手段
+- 在渲染 / 交互能提供合理反馈之前，不引入实际的 Z 数据变化
+- 相关代码假定"所有几何在 XY 平面"这一约定短期不变
+
