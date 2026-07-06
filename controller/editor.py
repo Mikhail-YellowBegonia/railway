@@ -502,9 +502,11 @@ class Editor:
 
         - L 是 M2_mouse 所在直边的方向线（P0 = edge.node_a, T2_dir = edge_dir）
         - M2 的精确接入点由算法决定（舍弃 m2_mouse），存入 plan.m2_split_t
-        - 接入点必须落在边的有效范围内（t ∈ [0,1]），否则 None
+        - 接入点必须落在边的有效范围内（t ∈ [0,1]），返回纯弧 case=5
+        - **接入点越界**(t < 0 或 t > 1)时,输出"弧+直线"复合 case=4:
+          弧(M1→切点P)+ 直线(P→M2_mouse投影),补齐延长线段
 
-        返回 case=5 的 ConstructionPlan，或 None（不可解 / 接入点越界）。
+        返回 case=5(纯弧)或 case=4(弧+直线复合)，或 None（不可解）。
         """
         edge = self.network.edges.get(m2_edge_id)
         if edge is None or edge.is_arc:
@@ -520,22 +522,46 @@ class Editor:
 
         m2_actual, b_point, _arc_normal, _radius = result
 
-        # 接入点必须在边的有效范围内：回算 t
+        # 接入点在边上的参数 t
         t_actual, _proj, _dist = project_on_segment(m2_actual, p0, node_b.position)
-        # t 必须严格在 (0, 1) 开区间内（端点由点吸附处理）
-        if t_actual < 1e-6 or t_actual > 1.0 - 1e-6:
-            return None  # 切点在端点上或越界
 
-        # m2_node_id 保持 None（接入点由 split 产生）
+        # 情况1:切点在边的有效范围内(0 < t < 1) → 纯弧 case=5
+        if 1e-6 < t_actual < 1.0 - 1e-6:
+            return ConstructionPlan(
+                case=5,
+                m1=m1,
+                m2=m2_actual,
+                node_a_id=m1_node_id,
+                node_b_id=None,
+                edge_geometry=[b_point],
+                m2_split_edge_id=m2_edge_id,
+                m2_split_t=t_actual,
+                valid=True,
+            )
+
+        # 情况2:切点越界(在延长线上) → 弧+直线复合 case=4
+        # M2 取原始鼠标在边上的投影(用户期望的接入点)
+        t_mouse, m2_proj, _dist_mouse = project_on_segment(m2_mouse, p0, node_b.position)
+        # 若投影也越界(鼠标远离边),取最近端点
+        if t_mouse < 0.0:
+            m2_final = p0
+        elif t_mouse > 1.0:
+            m2_final = node_b.position
+        else:
+            m2_final = m2_proj
+
         return ConstructionPlan(
-            case=5,
+            case=4,
             m1=m1,
-            m2=m2_actual,
+            m2=m2_final,
             node_a_id=m1_node_id,
-            node_b_id=None,
-            edge_geometry=[b_point],
-            m2_split_edge_id=m2_edge_id,
-            m2_split_t=t_actual,
+            node_b_id=None,  # M2 在边内部,需截断产生新节点
+            edge_geometry=[],
+            composite_mid=m2_actual,  # 切点P(中间点)
+            composite_arc_geom=[b_point],  # 弧 M1→P
+            composite_tail_geom=[],  # 直线 P→M2
+            m2_split_edge_id=m2_edge_id,  # M2 需截断边
+            m2_split_t=max(0.0, min(1.0, t_mouse)),  # 截断参数
             valid=True,
         )
 
