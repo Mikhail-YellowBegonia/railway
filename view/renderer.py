@@ -351,6 +351,12 @@ class Renderer:
         label = MODE_NAMES.get(editor.mode, "")
         if editor.force_straight and editor.mode == EditMode.BUILD:
             label = label + "  [STRAIGHT]"
+        if editor.grid_snap_enabled:
+            label = label + "  [GRID]"
+        if editor.length_snap_enabled:
+            label = label + "  [LENGTH]"
+        if editor.angle_snap_enabled:
+            label = label + "  [ANGLE]"
         surf = self._font.render(label, True, COLOR_TEXT)
         self.surface.blit(surf, (10, 10))
 

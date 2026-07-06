@@ -110,17 +110,58 @@ class PointSnapProvider:
         return tangent.normalize()
 
 
+class GridSnapProvider:
+    """格点吸附提供器:吸附到网格交点,粒度随缩放档位变化。
+
+    优先级:点 > 格点 > 路径(见 SnapSystem)。格点无切线约束。
+    """
+
+    def __init__(self, pixel_scale: float = 40.0) -> None:
+        self.enabled = True
+        self.pixel_scale = pixel_scale  # 由上层每帧同步
+
+    def snap(self, world_pos: Vec3, network: RailNetwork) -> SnapResult | None:
+        """尝试吸附到最近的网格交点。threshold 隐含在档位粒度中(无需显式阈值)。"""
+        if not self.enabled or self.pixel_scale <= 0.0:
+            return None
+
+        # 当前网格档位(米) — 复用 view/grid.py 的档位算法
+        from view.grid import _pick_minor_spacing
+        spacing = _pick_minor_spacing(self.pixel_scale)
+
+        # 四舍五入到最近的网格交点
+        gx = round(world_pos.x / spacing) * spacing
+        gy = round(world_pos.y / spacing) * spacing
+        grid_point = Vec3(gx, gy, 0.0)
+
+        # 屏幕像素距离判定:若光标距网格点 > SNAP_THRESHOLD_PX,不吸附
+        # (避免远距离误吸,与点/路径吸附的像素阈值对齐)
+        SNAP_THRESHOLD_PX = 12.0
+        world_dist = world_pos.distance_to(grid_point)
+        screen_dist_px = world_dist * self.pixel_scale
+        if screen_dist_px > SNAP_THRESHOLD_PX:
+            return None
+
+        return SnapResult(
+            snapped=True,
+            position=grid_point,
+            tangent=None,  # 格点无切线约束
+            tangent_candidates=[],
+        )
+
+
 class SnapSystem:
     """吸附系统：管理多个吸附提供器，按优先级返回结果"""
 
     def __init__(self) -> None:
         self.point_snap = PointSnapProvider(threshold=0.3)
+        self.grid_snap = GridSnapProvider(pixel_scale=40.0)
         self.path_snap = PathSnapProvider(threshold=0.3)
         # TODO: 后续添加 ParallelPointProvider, ParallelPathProvider
 
     def any_enabled(self) -> bool:
         """是否有至少一个 Provider 启用"""
-        return self.point_snap.enabled or self.path_snap.enabled
+        return self.point_snap.enabled or self.grid_snap.enabled or self.path_snap.enabled
 
     def snap(
         self,
@@ -147,7 +188,12 @@ class SnapSystem:
         if result is not None:
             return result
 
-        # 优先级 2: 路径吸附
+        # 优先级 2: 格点吸附
+        result = self.grid_snap.snap(world_pos, network)
+        if result is not None:
+            return result
+
+        # 优先级 3: 路径吸附
         result = self.path_snap.snap(world_pos, network, reference_pos)
         if result is not None:
             return result

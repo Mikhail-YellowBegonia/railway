@@ -24,7 +24,9 @@ from controller.build_plan import ConstructionPlan, PreviewGeometry
 # 实际吸附改用下方像素基准 + 每帧换算，不再直接使用这两个常量。
 SNAP_THRESHOLD = 0.3
 WARNING_THRESHOLD = 0.5
-# 吸附/警告阈值以"屏幕像素"为基准（随缩放跟随，保证手感稳定）。
+# 进阶吸附参数(snapping.md):长度增量 100m,角度增量 30°,固定常量
+LENGTH_SNAP_INCREMENT = 100.0  # 米
+ANGLE_SNAP_INCREMENT = 30.0    # 度
 # 每帧按 camera.scale 换算成世界阈值：world = px / scale。
 # 选值使默认缩放 scale=40 下换算结果 = 上面的世界常量（12/40=0.3, 20/40=0.5），
 # 从而默认手感与旧实现一致，仅在缩放时正确跟随。
@@ -87,6 +89,11 @@ class Editor:
         # 触发键：LALT（与 LSHIFT 互斥），按住期间临时启用。
         self.force_case2t: bool = False
 
+        # 进阶吸附开关：由 GameLoop 每帧同步（功能键切换，见 docs/snapping.md）
+        self.grid_snap_enabled: bool = False  # G 键切换格点吸附
+        self.length_snap_enabled: bool = False  # L 键切换长度吸附(仅直线建造)
+        self.angle_snap_enabled: bool = False  # A 键切换角度吸附(仅单弧建造)
+
     def update_hover(self, world_pos: Vec3) -> None:
         """每帧更新：处理鼠标悬停 + 预览 + 警告"""
         # 吸附检测
@@ -139,7 +146,12 @@ class Editor:
         """统一的吸附入口：BUILD_ACTIVE 时传入 M1 作为切线方向参考。
 
         吸附阈值以屏幕像素为基准，按当前缩放换算为世界阈值传入吸附系统。
+        格点吸附的 enabled 状态由外部功能键控制。
         """
+        # 同步格点吸附状态与缩放
+        self.snap_system.grid_snap.enabled = self.grid_snap_enabled
+        self.snap_system.grid_snap.pixel_scale = self.pixel_scale
+
         reference = (
             self.build_m1
             if (self.mode == EditMode.BUILD and self.build_state == BuildState.ACTIVE)
@@ -240,6 +252,9 @@ class Editor:
             m2_edge_id = None
             m2_edge_t = None
             m2_edge_dir = None
+
+        # 进阶吸附:在 snap 之后、compute_plan 之前调整 M2(长度/角度吸附)
+        m2 = self._adjust_m2_for_snapping(m2, self.build_m1, self.build_t1_candidates)
 
         # 同边双截断 → 拒绝
         if (
@@ -640,6 +655,9 @@ class Editor:
         m2 = snap.position
         t2_candidates = list(snap.tangent_candidates) if snap.snapped else []
 
+        # 进阶吸附:在 snap 之后、compute_plan 之前调整 M2(长度/角度吸附)
+        m2 = self._adjust_m2_for_snapping(m2, self.build_m1, self.build_t1_candidates)
+
         # 计算预览计划（和提交时相同逻辑）
         plan = self._compute_plan(
             m1=self.build_m1,
@@ -784,3 +802,126 @@ class Editor:
         if self.network.edge_id_at(pos, warn) is not None:
             return True
         return False
+
+    # ===== 进阶吸附:M2 调整器(snapping.md) =====
+
+    def _adjust_m2_for_snapping(
+        self, m2: Vec3, m1: Vec3, t1_candidates: list[Vec3]
+    ) -> Vec3:
+        """在 snap 之后、compute_plan 之前调整 M2,应用长度/角度吸附。
+
+        长度吸附(L 键):所有直线建造,吸附路径总长为 100m 倍数。
+        角度吸附(A 键):仅 Case 2 单弧,吸附 angle(T1, M2-M1) 为 30° 倍数。
+        L+A 同时开启时互斥,后开的生效(实际由 game_loop 保证互斥,这里仅防御)。
+        """
+        # L+A 互斥判定(防御性,正常由外层保证)
+        if self.length_snap_enabled and self.angle_snap_enabled:
+            # 两个都开了,只用长度(或可记录最后按的键,这里简化为长度优先)
+            return self._adjust_m2_length(m2, m1, t1_candidates)
+
+        if self.length_snap_enabled:
+            return self._adjust_m2_length(m2, m1, t1_candidates)
+
+        if self.angle_snap_enabled:
+            return self._adjust_m2_angle(m2, m1, t1_candidates)
+
+        return m2  # 无吸附,原样返回
+
+    def _adjust_m2_length(
+        self, m2: Vec3, m1: Vec3, t1_candidates: list[Vec3]
+    ) -> Vec3:
+        """长度吸附:调整 M2 使路径长度≈LENGTH_SNAP_INCREMENT 倍数。
+
+        - 无切线(Case 1):调整 |M2-M1| 到最近 100m 倍数,保持方向
+        - 有切线(force_straight / Case 2 退化):调整 M2 在 (M1, T1) 射线上的投影
+        """
+        d = m2 - m1
+        dist = d.length()
+        if dist < 1e-9:
+            return m2  # M1==M2,无法调整
+
+        if not t1_candidates:
+            # Case 1 自由直线:量化 |M2-M1| 到最近 100m 倍数
+            target = round(dist / LENGTH_SNAP_INCREMENT) * LENGTH_SNAP_INCREMENT
+            if target < 1e-6:
+                target = LENGTH_SNAP_INCREMENT  # 避免量化到 0
+            return m1 + d.normalize() * target
+
+        # 有切线:沿 T1 射线量化投影长度(选最佳 T1,同 _compute_plan)
+        best_t1 = self._select_best_t1(t1_candidates, m1, m2)
+        if best_t1 is None:
+            return m2
+
+        proj_len = d.dot(best_t1)
+        if proj_len < 1e-6:
+            # 投影长度≤0,M2 在 T1 反向,不调整(或强制到最小正值?)
+            return m2
+
+        target_len = round(proj_len / LENGTH_SNAP_INCREMENT) * LENGTH_SNAP_INCREMENT
+        if target_len < 1e-6:
+            target_len = LENGTH_SNAP_INCREMENT
+        return m1 + best_t1 * target_len
+
+    def _adjust_m2_angle(
+        self, m2: Vec3, m1: Vec3, t1_candidates: list[Vec3]
+    ) -> Vec3:
+        """角度吸附:调整 M2 使 angle(T1, M2-M1) ≈ ANGLE_SNAP_INCREMENT 倍数。
+
+        仅 Case 2(有 T1 无 T2)时有意义。M2 在以 M1 为中心、当前半径的圆上旋转,
+        量化到 30° 档位。
+        """
+        if not t1_candidates:
+            return m2  # 无切线,角度吸附无意义
+
+        best_t1 = self._select_best_t1(t1_candidates, m1, m2)
+        if best_t1 is None:
+            return m2
+
+        d = m2 - m1
+        radius = d.length()
+        if radius < 1e-9:
+            return m2
+
+        # 当前角度(T1 到 d 的有符号角度,XY 平面)
+        import math
+        cos_a = best_t1.dot(d) / radius
+        cos_a = max(-1.0, min(1.0, cos_a))
+        # 用叉积 z 分量判定符号
+        cross_z = best_t1.x * d.y - best_t1.y * d.x
+        sin_a = cross_z / radius
+        current_deg = math.degrees(math.atan2(sin_a, cos_a))
+
+        # 量化到最近的 30° 倍数
+        target_deg = round(current_deg / ANGLE_SNAP_INCREMENT) * ANGLE_SNAP_INCREMENT
+        target_rad = math.radians(target_deg)
+
+        # 绕 M1 旋转 best_t1 到目标角度
+        cos_t = math.cos(target_rad)
+        sin_t = math.sin(target_rad)
+        # 2D 旋转矩阵
+        new_x = best_t1.x * cos_t - best_t1.y * sin_t
+        new_y = best_t1.x * sin_t + best_t1.y * cos_t
+        return m1 + Vec3(new_x, new_y, 0.0) * radius
+
+    def _select_best_t1(
+        self, t1_candidates: list[Vec3], m1: Vec3, m2: Vec3
+    ) -> Vec3 | None:
+        """从 T1 候选中选与 (M2-M1) 夹角最小者,复用 _compute_plan 的逻辑。"""
+        d = m2 - m1
+        d_len = d.length()
+        if d_len < 1e-9:
+            return None
+        d_hat = d.normalize()
+
+        best_t1: Vec3 | None = None
+        best_dot = -float("inf")
+        for cand in t1_candidates:
+            cn = cand.normalize()
+            score = cn.dot(d_hat)
+            if score > best_dot:
+                best_dot = score
+                best_t1 = cn
+
+        if best_t1 is None or best_dot < 1e-6:
+            return None
+        return best_t1

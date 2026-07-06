@@ -91,6 +91,19 @@ class GameLoop:
             self.editor.set_mode(EditMode.DELETE)
         elif event.key == pygame.K_q:
             self.running = False
+        elif event.key == pygame.K_g:
+            # G 键切换格点吸附（见 docs/snapping.md）
+            self.editor.grid_snap_enabled = not self.editor.grid_snap_enabled
+        elif event.key == pygame.K_l:
+            # L 键切换长度吸附(所有直线建造)；与 A 互斥
+            self.editor.length_snap_enabled = not self.editor.length_snap_enabled
+            if self.editor.length_snap_enabled:
+                self.editor.angle_snap_enabled = False
+        elif event.key == pygame.K_a:
+            # A 键切换角度吸附(仅单弧建造)；与 L 互斥
+            self.editor.angle_snap_enabled = not self.editor.angle_snap_enabled
+            if self.editor.angle_snap_enabled:
+                self.editor.length_snap_enabled = False
 
     def _handle_mouse_down(self, event: pygame.event.Event) -> None:
         # 滚轮先处理（不参与平移逻辑）
