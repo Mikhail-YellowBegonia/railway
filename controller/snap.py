@@ -161,12 +161,16 @@ class ParallelSnapProvider:
         self.enabled = False  # 默认关闭,由上层键盘切换
         self.spacing = spacing  # 平行间距(米),固定 5m
         self.pixel_scale = 40.0  # 由上层每帧同步
-        # 缓存的参考点列表:(position, tangent, parent_node_id)
-        self._reference_points: list[tuple[Vec3, Vec3, int]] = []
+        # 缓存的参考点列表:(position, tangent, parent_node_id, is_complex)
+        # is_complex: True=Complex Case(投射交点), False=Simple Case(固定点)
+        self._reference_points: list[tuple[Vec3, Vec3, int, bool]] = []
+        # 调试可视化:投射线段列表 [(seg_start, seg_end, parent_node_id)]
+        self._projection_segments: list[tuple[Vec3, Vec3, int]] = []
 
     def update_reference_points(self, network: RailNetwork) -> None:
-        """重新生成所有平行参考点(Simple Case)。每帧或网络变化时调用。"""
+        """重新生成所有平行参考点(Simple + Complex Case)。每帧或网络变化时调用。"""
         self._reference_points.clear()
+        self._projection_segments.clear()
 
         for node_id, node in network.nodes.items():
             if node.connection_count() == 0:
@@ -176,11 +180,12 @@ class ParallelSnapProvider:
             tangents = self._get_node_tangents(node, network)
 
             for tangent in tangents:
-                # 沿切线垂线生成两侧参考点
+                # 两侧各生成一个参考点
                 perp = self._perp_xy(tangent)
                 for side in (1.0, -1.0):
-                    ref_pos = node.position + perp * (self.spacing * side)
-                    self._reference_points.append((ref_pos, tangent, node_id))
+                    self._try_generate_reference_point(
+                        node, tangent, perp, side, network
+                    )
 
     def snap(self, world_pos: Vec3, network: RailNetwork) -> SnapResult | None:
         """尝试吸附到最近的平行参考点(屏幕像素阈值)。"""
@@ -189,25 +194,80 @@ class ParallelSnapProvider:
 
         SNAP_THRESHOLD_PX = 12.0
         best_dist = float('inf')
-        best_ref: tuple[Vec3, Vec3, int] | None = None
+        best_ref: tuple[Vec3, Vec3, int, bool] | None = None
 
-        for ref_pos, ref_tangent, parent_id in self._reference_points:
+        for ref_pos, ref_tangent, parent_id, _is_complex in self._reference_points:
             world_dist = world_pos.distance_to(ref_pos)
             screen_dist_px = world_dist * self.pixel_scale
             if screen_dist_px < SNAP_THRESHOLD_PX and world_dist < best_dist:
                 best_dist = world_dist
-                best_ref = (ref_pos, ref_tangent, parent_id)
+                best_ref = (ref_pos, ref_tangent, parent_id, _is_complex)
 
         if best_ref is None:
             return None
 
-        ref_pos, ref_tangent, _parent_id = best_ref
+        ref_pos, ref_tangent, _parent_id, _is_complex = best_ref
         return SnapResult(
             snapped=True,
             position=ref_pos,
-            tangent=ref_tangent,  # 继承父节点切线
+            tangent=ref_tangent,  # 继承父节点切线(Simple)或边切线(Complex)
             tangent_candidates=[ref_tangent],
         )
+
+    def _try_generate_reference_point(
+        self,
+        node: Node,
+        tangent: Vec3,
+        perp: Vec3,
+        side: float,
+        network: RailNetwork,
+    ) -> None:
+        """尝试生成单个参考点:优先 Complex Case,失败则 Simple Case。
+
+        Complex Case:在 [R-δ, R+δ] 范围投射线段,求与其它边的唯一交点。
+        Simple Case:固定位置 R。
+        """
+        R = self.spacing
+        delta = R * 0.2  # δ = 1m
+
+        # 投射线段:[R-δ, R+δ]
+        seg_start = node.position + perp * (side * (R - delta))
+        seg_end = node.position + perp * (side * (R + delta))
+
+        # 记录投射线段(调试可视化)
+        self._projection_segments.append((seg_start, seg_end, node.node_id))
+
+        # 遍历所有边求交点
+        from model.geom_utils import line_segment_intersect_edge
+
+        intersections: list[tuple[Vec3, Vec3]] = []  # [(交点, 边切线)]
+        parent_edges = node.incident_edge_ids  # 父节点关联边,需排除
+
+        for edge_id, edge in network.edges.items():
+            if edge_id in parent_edges:
+                continue  # 排除父节点关联边
+
+            node_a = network.nodes[edge.node_a_id]
+            node_b = network.nodes[edge.node_b_id]
+
+            inter = line_segment_intersect_edge(seg_start, seg_end, edge, node_a, node_b)
+            if inter is not None:
+                # 计算边在交点处的切线
+                from model.geom_utils import tangent_along_edge, project_on_segment
+                t_inter, _proj, _dist = project_on_segment(inter, node_a.position, node_b.position)
+                edge_tangent = tangent_along_edge(edge, node_a, node_b, t=t_inter)
+                if edge_tangent.length() > 1e-9:
+                    intersections.append((inter, edge_tangent.normalize()))
+
+        # Complex Case:唯一交点
+        if len(intersections) == 1:
+            inter_pos, inter_tangent = intersections[0]
+            self._reference_points.append((inter_pos, inter_tangent, node.node_id, True))
+            return
+
+        # 退化到 Simple Case:固定位置
+        ref_pos = node.position + perp * (side * R)
+        self._reference_points.append((ref_pos, tangent, node.node_id, False))
 
     def _get_node_tangents(self, node: Node, network: RailNetwork) -> list[Vec3]:
         """获取节点的所有出射切线(每条关联边一个)。"""

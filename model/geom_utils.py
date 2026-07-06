@@ -23,6 +23,90 @@ def project_point_on_edge(
 
 
 def project_on_segment(p: Vec3, a: Vec3, b: Vec3) -> tuple[float, Vec3, float]:
+    """将点 p 投影到线段 [a, b] 上，返回 (t, proj, dist)。
+
+    t ∈ [0,1] 时 proj 在线段内；否则是延长线上的投影。
+    """
+    d = b - a
+    len_sq = d.length_squared()
+    if len_sq < 1e-12:
+        return 0.0, a, p.distance_to(a)
+    t_raw = (p - a).dot(d) / len_sq
+    t = max(0.0, min(1.0, t_raw))
+    proj = a + d * t
+    return t, proj, p.distance_to(proj)
+
+
+def line_segment_intersect_edge(
+    seg_start: Vec3, seg_end: Vec3, edge: Edge, node_a: Node, node_b: Node
+) -> Vec3 | None:
+    """线段与边求交点(XY 平面)。
+
+    返回交点 Vec3 或 None(无交点或多个交点)。
+    - 直边:线段-线段求交
+    - 弧边:线段-弧求交,若有多个交点返回 None(不唯一)
+    """
+    if not edge.is_arc:
+        # 直边:线段-线段求交
+        return _segment_segment_intersect(seg_start, seg_end, node_a.position, node_b.position)
+    else:
+        # 弧边:线段-弧求交
+        return _segment_arc_intersect(seg_start, seg_end, edge, node_a, node_b)
+
+
+def _segment_segment_intersect(p1: Vec3, p2: Vec3, q1: Vec3, q2: Vec3) -> Vec3 | None:
+    """两线段求交点(XY 平面),返回交点或 None。
+
+    使用参数方程 P = p1 + t*(p2-p1), Q = q1 + s*(q2-q1),
+    求解 t, s ∈ [0,1] 使 P == Q。
+    """
+    d1 = p2 - p1
+    d2 = q2 - q1
+
+    # 2D 叉积判定平行
+    cross = d1.x * d2.y - d1.y * d2.x
+    if abs(cross) < 1e-9:
+        return None  # 平行或共线
+
+    delta = q1 - p1
+    t = (delta.x * d2.y - delta.y * d2.x) / cross
+    s = (delta.x * d1.y - delta.y * d1.x) / cross
+
+    # 检查参数在 [0,1] 内
+    if 0 <= t <= 1 and 0 <= s <= 1:
+        return p1 + d1 * t
+    return None
+
+
+def _segment_arc_intersect(
+    seg_start: Vec3, seg_end: Vec3, edge: Edge, node_a: Node, node_b: Node
+) -> Vec3 | None:
+    """线段与弧求交点,返回唯一交点或 None(无交点/多个交点)。
+
+    简化算法:对弧采样点,逐段检测线段-线段交点。
+    精确解需求解圆-直线交点后过滤弧段,此处采用采样近似。
+    """
+    # 采样弧为折线段
+    arc_points = edge.sample_arc_points(segments=50)
+    if not arc_points or len(arc_points) < 2:
+        return None
+
+    intersections = []
+    for i in range(len(arc_points) - 1):
+        inter = _segment_segment_intersect(seg_start, seg_end, arc_points[i], arc_points[i+1])
+        if inter is not None:
+            # 去重:与已有交点距离 > 阈值才算新交点
+            is_new = all(inter.distance_to(existing) > 0.1 for existing in intersections)
+            if is_new:
+                intersections.append(inter)
+
+    # 唯一交点
+    if len(intersections) == 1:
+        return intersections[0]
+    return None
+
+
+def project_on_segment(p: Vec3, a: Vec3, b: Vec3) -> tuple[float, Vec3, float]:
     """点到线段的投影（夹紧到端点之间）。"""
     ab = b - a
     ab_len_sq = ab.length_squared()
