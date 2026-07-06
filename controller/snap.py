@@ -150,6 +150,97 @@ class GridSnapProvider:
         )
 
 
+class ParallelSnapProvider:
+    """平行吸附提供器:生成既有轨道的平行参考点(Simple/Complex Case)。
+
+    Simple Case:每个节点沿切线垂线在固定间距 R 处生成参考点,携带父节点切线。
+    Complex Case:在 (R-δ, R+δ) 区间投射线段,与其它边求交点作为参考点。
+    """
+
+    def __init__(self, spacing: float = 5.0) -> None:
+        self.enabled = False  # 默认关闭,由上层键盘切换
+        self.spacing = spacing  # 平行间距(米),固定 5m
+        self.pixel_scale = 40.0  # 由上层每帧同步
+        # 缓存的参考点列表:(position, tangent, parent_node_id)
+        self._reference_points: list[tuple[Vec3, Vec3, int]] = []
+
+    def update_reference_points(self, network: RailNetwork) -> None:
+        """重新生成所有平行参考点(Simple Case)。每帧或网络变化时调用。"""
+        self._reference_points.clear()
+
+        for node_id, node in network.nodes.items():
+            if node.connection_count() == 0:
+                continue  # 孤立节点无切线,跳过
+
+            # 获取该节点的所有切线候选
+            tangents = self._get_node_tangents(node, network)
+
+            for tangent in tangents:
+                # 沿切线垂线生成两侧参考点
+                perp = self._perp_xy(tangent)
+                for side in (1.0, -1.0):
+                    ref_pos = node.position + perp * (self.spacing * side)
+                    self._reference_points.append((ref_pos, tangent, node_id))
+
+    def snap(self, world_pos: Vec3, network: RailNetwork) -> SnapResult | None:
+        """尝试吸附到最近的平行参考点(屏幕像素阈值)。"""
+        if not self.enabled or not self._reference_points:
+            return None
+
+        SNAP_THRESHOLD_PX = 12.0
+        best_dist = float('inf')
+        best_ref: tuple[Vec3, Vec3, int] | None = None
+
+        for ref_pos, ref_tangent, parent_id in self._reference_points:
+            world_dist = world_pos.distance_to(ref_pos)
+            screen_dist_px = world_dist * self.pixel_scale
+            if screen_dist_px < SNAP_THRESHOLD_PX and world_dist < best_dist:
+                best_dist = world_dist
+                best_ref = (ref_pos, ref_tangent, parent_id)
+
+        if best_ref is None:
+            return None
+
+        ref_pos, ref_tangent, _parent_id = best_ref
+        return SnapResult(
+            snapped=True,
+            position=ref_pos,
+            tangent=ref_tangent,  # 继承父节点切线
+            tangent_candidates=[ref_tangent],
+        )
+
+    def _get_node_tangents(self, node: Node, network: RailNetwork) -> list[Vec3]:
+        """获取节点的所有出射切线(每条关联边一个)。"""
+        from model.geom_utils import tangent_along_edge
+
+        tangents = []
+        for edge_id in node.incident_edge_ids:
+            edge = network.edges.get(edge_id)
+            if edge is None:
+                continue
+
+            node_a = network.nodes[edge.node_a_id]
+            node_b = network.nodes[edge.node_b_id]
+
+            # 判断当前节点是 A 还是 B
+            if edge.node_a_id == node.node_id:
+                # 节点是 A 端,切线从 A 指向 B
+                tangent = tangent_along_edge(edge, node_a, node_b, t=0.0)
+            else:
+                # 节点是 B 端,切线从 B 指向 A(反向)
+                tangent = tangent_along_edge(edge, node_a, node_b, t=1.0) * -1.0
+
+            if tangent.length() > 1e-9:
+                tangents.append(tangent.normalize())
+
+        return tangents
+
+    @staticmethod
+    def _perp_xy(v: Vec3) -> Vec3:
+        """XY 平面垂直向量(逆时针 90°)"""
+        return Vec3(-v.y, v.x, 0.0)
+
+
 class SnapSystem:
     """吸附系统：管理多个吸附提供器，按优先级返回结果"""
 
@@ -157,11 +248,16 @@ class SnapSystem:
         self.point_snap = PointSnapProvider(threshold=0.3)
         self.grid_snap = GridSnapProvider(pixel_scale=40.0)
         self.path_snap = PathSnapProvider(threshold=0.3)
-        # TODO: 后续添加 ParallelPointProvider, ParallelPathProvider
+        self.parallel_snap = ParallelSnapProvider(spacing=5.0)
 
     def any_enabled(self) -> bool:
         """是否有至少一个 Provider 启用"""
-        return self.point_snap.enabled or self.grid_snap.enabled or self.path_snap.enabled
+        return (
+            self.point_snap.enabled
+            or self.grid_snap.enabled
+            or self.path_snap.enabled
+            or self.parallel_snap.enabled
+        )
 
     def snap(
         self,
@@ -193,7 +289,12 @@ class SnapSystem:
         if result is not None:
             return result
 
-        # 优先级 3: 路径吸附
+        # 优先级 3: 平行吸附
+        result = self.parallel_snap.snap(world_pos, network)
+        if result is not None:
+            return result
+
+        # 优先级 4: 路径吸附
         result = self.path_snap.snap(world_pos, network, reference_pos)
         if result is not None:
             return result

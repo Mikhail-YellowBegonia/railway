@@ -51,7 +51,7 @@ class GameLoop:
 
             self.renderer.clear()
             self.renderer.draw_grid()
-            self.renderer.draw_network(self.network)
+            self.renderer.draw_network(self.network, self.editor)
             self.renderer.draw_overlay(self.network, self.editor, mouse_world)
             pygame.display.flip()
             self.clock.tick(60)
@@ -110,6 +110,9 @@ class GameLoop:
             if self.editor.angle_snap_enabled:
                 self.editor.length_snap_enabled = False
                 self.editor.grid_snap_enabled = False
+        elif event.key == pygame.K_p:
+            # P 键切换平行吸附(Simple/Complex Case)；独立开关
+            self.editor.parallel_snap_enabled = not self.editor.parallel_snap_enabled
 
     def _handle_mouse_down(self, event: pygame.event.Event) -> None:
         # 滚轮先处理（不参与平移逻辑）

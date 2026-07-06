@@ -93,6 +93,7 @@ class Editor:
         self.grid_snap_enabled: bool = False  # G 键切换格点吸附
         self.length_snap_enabled: bool = False  # L 键切换长度吸附(仅直线建造)
         self.angle_snap_enabled: bool = False  # A 键切换角度吸附(仅单弧建造)
+        self.parallel_snap_enabled: bool = False  # P 键切换平行吸附
 
     def update_hover(self, world_pos: Vec3) -> None:
         """每帧更新：处理鼠标悬停 + 预览 + 警告"""
@@ -147,10 +148,17 @@ class Editor:
 
         吸附阈值以屏幕像素为基准，按当前缩放换算为世界阈值传入吸附系统。
         格点吸附的 enabled 状态由外部功能键控制。
+        平行吸附每帧更新参考点(网络变化或开关切换时)。
         """
         # 同步格点吸附状态与缩放
         self.snap_system.grid_snap.enabled = self.grid_snap_enabled
         self.snap_system.grid_snap.pixel_scale = self.pixel_scale
+
+        # 同步平行吸附状态与缩放,并更新参考点
+        self.snap_system.parallel_snap.enabled = self.parallel_snap_enabled
+        self.snap_system.parallel_snap.pixel_scale = self.pixel_scale
+        if self.parallel_snap_enabled:
+            self.snap_system.parallel_snap.update_reference_points(self.network)
 
         reference = (
             self.build_m1

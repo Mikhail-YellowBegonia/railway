@@ -63,13 +63,49 @@ class Renderer:
             if len(screen_pts) >= 3:
                 pygame.draw.polygon(self.surface, COLOR_BALLAST, screen_pts)
 
-    def draw_network(self, network: RailNetwork) -> None:
+    def _draw_parallel_reference_points(self, editor, cam: Camera, w: int, h: int) -> None:
+        """绘制平行吸附参考点(Simple Case 调试可视化)。
+
+        每个参考点:小圆圈(橙色) + 虚线连接到父节点(灰色)。
+        """
+        ref_points = editor.snap_system.parallel_snap._reference_points
+        if not ref_points:
+            return
+
+        COLOR_REF_POINT = (255, 150, 0)  # 橙色
+        COLOR_REF_LINE = (128, 128, 128)  # 灰色
+        RADIUS_PX = 3
+
+        for ref_pos, _ref_tangent, parent_id in ref_points:
+            # 参考点屏幕坐标
+            sx, sy = cam.world_to_screen(ref_pos.x, ref_pos.y, w, h)
+
+            # 简单视口剔除
+            if sx < -50 or sx > w + 50 or sy < -50 or sy > h + 50:
+                continue
+
+            # 绘制小圆圈
+            pygame.draw.circle(self.surface, COLOR_REF_POINT, (int(sx), int(sy)), RADIUS_PX)
+
+            # 虚线连接到父节点(绘制为两段短线,模拟虚线效果)
+            parent_node = editor.network.nodes.get(parent_id)
+            if parent_node:
+                px, py = cam.world_to_screen(parent_node.position.x, parent_node.position.y, w, h)
+                mid_x, mid_y = (sx + px) / 2, (sy + py) / 2
+                pygame.draw.line(self.surface, COLOR_REF_LINE, (int(sx), int(sy)), (int(mid_x), int(mid_y)), 1)
+                # 中点到父节点的段跳过,形成虚线效果
+
+    def draw_network(self, network: RailNetwork, editor: Editor | None = None) -> None:
         w = self.surface.get_width()
         h = self.surface.get_height()
         cam = self.camera
 
         # Ballast 道床带：铺在逻辑细线之下，提供尺寸感（§12.1）
         self._draw_ballast(network, cam, w, h)
+
+        # 平行参考点可视化(调试,需要 editor)
+        if editor and editor.parallel_snap_enabled:
+            self._draw_parallel_reference_points(editor, cam, w, h)
 
         for edge in network.edges.values():
             node_a = network.nodes[edge.node_a_id]
@@ -357,6 +393,8 @@ class Renderer:
             label = label + "  [LENGTH]"
         if editor.angle_snap_enabled:
             label = label + "  [ANGLE]"
+        if editor.parallel_snap_enabled:
+            label = label + "  [PARALLEL]"
         surf = self._font.render(label, True, COLOR_TEXT)
         self.surface.blit(surf, (10, 10))
 
