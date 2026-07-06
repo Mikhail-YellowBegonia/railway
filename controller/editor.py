@@ -618,6 +618,19 @@ class Editor:
             # Biarc 方案 A：两条 Edge + 中间 Node
             if plan.biarc_mid is None or plan.biarc_geom_1 is None or plan.biarc_geom_2 is None:
                 return
+
+            # 零长度弧退化检测(环线闭合等场景):中间点与某端点重合 → 退化为单边
+            # 零长度段:用另一段的几何;若两段都零长度(M1==M2),直接拒绝(已被自环检查阻止)
+            if plan.biarc_mid.distance_to(plan.m1) < 1e-6:
+                # 弧1退化,仅添加弧2(mid→M2,实际 M1→M2)
+                self.network.add_edge(node_a, node_b, plan.biarc_geom_2)
+                return
+            if plan.biarc_mid.distance_to(plan.m2) < 1e-6:
+                # 弧2退化,仅添加弧1(M1→mid,实际 M1→M2)
+                self.network.add_edge(node_a, node_b, plan.biarc_geom_1)
+                return
+
+            # 正常 Biarc:两段非零长度
             mid_node = self.network.add_node(plan.biarc_mid)
             try:
                 self.network.add_edge(node_a, mid_node, plan.biarc_geom_1)

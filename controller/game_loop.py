@@ -93,17 +93,23 @@ class GameLoop:
             self.running = False
         elif event.key == pygame.K_g:
             # G 键切换格点吸附（见 docs/snapping.md）
+            # 与 L/A 互斥:开启格点时关闭长度/角度
             self.editor.grid_snap_enabled = not self.editor.grid_snap_enabled
+            if self.editor.grid_snap_enabled:
+                self.editor.length_snap_enabled = False
+                self.editor.angle_snap_enabled = False
         elif event.key == pygame.K_l:
-            # L 键切换长度吸附(所有直线建造)；与 A 互斥
+            # L 键切换长度吸附(所有直线建造)；与 A/G 互斥
             self.editor.length_snap_enabled = not self.editor.length_snap_enabled
             if self.editor.length_snap_enabled:
                 self.editor.angle_snap_enabled = False
+                self.editor.grid_snap_enabled = False
         elif event.key == pygame.K_a:
-            # A 键切换角度吸附(仅单弧建造)；与 L 互斥
+            # A 键切换角度吸附(仅单弧建造)；与 L/G 互斥
             self.editor.angle_snap_enabled = not self.editor.angle_snap_enabled
             if self.editor.angle_snap_enabled:
                 self.editor.length_snap_enabled = False
+                self.editor.grid_snap_enabled = False
 
     def _handle_mouse_down(self, event: pygame.event.Event) -> None:
         # 滚轮先处理（不参与平移逻辑）

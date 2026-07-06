@@ -553,7 +553,14 @@ def _biarc_arc_b_point(
     """两条切线 (m_a, t_a) 和 (m_b, t_b) 的交点；用于反算弧的 B 点。
 
     解：m_a + k * t_a = m_b - k' * t_b（即 t_a 与 -t_b 在前方相交）
+
+    特殊情况:若 m_a ≈ m_b(零长度弧),返回 m_a 作为退化 B 点,避免阻塞 Biarc。
+    这发生在环线闭合时,某段弧退化为单点。
     """
+    # 零长度弧检测:起终点重合 → B 点就是端点本身
+    if m_a.distance_to(m_b) < 1e-6:
+        return m_a
+
     det = t_a.x * (-t_b.y) - t_a.y * (-t_b.x)
     if abs(det) < 1e-9:
         return None
@@ -572,7 +579,14 @@ def _biarc_arc_normal(center: Vec3, m_start: Vec3, t_start: Vec3) -> Vec3:
 def _biarc_arc_sweep_angle(
     center: Vec3, m_start: Vec3, m_end: Vec3, arc_normal: Vec3
 ) -> float:
-    """弧从 m_start 到 m_end 的扫角（沿 arc_normal 决定的方向，0 ≤ θ ≤ 2π）。"""
+    """弧从 m_start 到 m_end 的扫角（沿 arc_normal 决定的方向，0 ≤ θ ≤ 2π）。
+
+    零长度弧(起终点重合)返回 0.0,避免退化计算导致异常结果(如 360°)。
+    """
+    # 零长度弧检测:起终点重合 → 扫角为 0
+    if m_start.distance_to(m_end) < 1e-9:
+        return 0.0
+
     v_start = m_start - center
     v_end = m_end - center
     # 平面内带符号角：normal·(v_start × v_end)
