@@ -7,6 +7,9 @@ import pygame
 from model.rail_network import RailNetwork
 from model.vec3 import Vec3
 from view.camera import Camera
+from view.grid import draw_grid
+from view.ballast import iter_ballast_polygons
+from view.build_metrics import compute_metrics, format_lines
 from controller.editor import EditMode, BuildState, Editor
 
 COLOR_BG = (30, 30, 30)
@@ -29,6 +32,9 @@ COLOR_PREVIEW_INVALID = (255, 80, 80)
 COLOR_M1_ANCHOR = (100, 255, 100)
 COLOR_WARNING = (255, 60, 60)
 COLOR_CASE2T_ENTRY = (255, 100, 255)  # §10.5 算法回算的接入点标记（品红）
+COLOR_HUD_BG = (20, 20, 20)           # 建造 HUD tooltip 背景
+COLOR_HUD_TEXT = (210, 220, 230)      # 建造 HUD 文本
+COLOR_BALLAST = (72, 66, 58)          # 道床带填充（暖灰，衬于逻辑细线之下）
 
 MODE_NAMES: dict[EditMode, str] = {
     EditMode.IDLE: "IDLE",
@@ -46,10 +52,24 @@ class Renderer:
     def clear(self) -> None:
         self.surface.fill(COLOR_BG)
 
+    def draw_grid(self) -> None:
+        """绘制自适应档位网格背景（在 clear 之后、draw_network 之前）。"""
+        draw_grid(self.surface, self.camera)
+
+    def _draw_ballast(self, network: RailNetwork, cam: Camera, w: int, h: int) -> None:
+        """绘制 Ballast 道床带（4 m 宽填充多边形）。道岔处允许重叠。"""
+        for _edge, poly in iter_ballast_polygons(network):
+            screen_pts = [cam.world_to_screen(p.x, p.y, w, h) for p in poly]
+            if len(screen_pts) >= 3:
+                pygame.draw.polygon(self.surface, COLOR_BALLAST, screen_pts)
+
     def draw_network(self, network: RailNetwork) -> None:
         w = self.surface.get_width()
         h = self.surface.get_height()
         cam = self.camera
+
+        # Ballast 道床带：铺在逻辑细线之下，提供尺寸感（§12.1）
+        self._draw_ballast(network, cam, w, h)
 
         for edge in network.edges.values():
             node_a = network.nodes[edge.node_a_id]
@@ -111,6 +131,7 @@ class Renderer:
         # BUILD_ACTIVE: 预览几何 + M1 锚点
         if editor.mode == EditMode.BUILD and editor.build_state == BuildState.ACTIVE:
             self._draw_preview(editor, cam, w, h)
+            self._draw_build_hud(editor, mouse_world, cam, w, h)
 
         # 警告指示器
         if editor.show_warning:
@@ -284,6 +305,39 @@ class Renderer:
 
         # 中间节点锚点（小圆点，与 Biarc 同风格）
         pygame.draw.circle(self.surface, COLOR_M1_ANCHOR, (int(x1), int(y1)), 4)
+
+    def _draw_build_hud(
+        self, editor: Editor, mouse_world: Vec3, cam: Camera, w: int, h: int
+    ) -> None:
+        """绘制建造 HUD tooltip（跟随光标），显示分段长度/半径/圆心角。"""
+        lines = format_lines(compute_metrics(editor.preview))
+        if not lines:
+            return
+
+        surfs = [self._font.render(line, True, COLOR_HUD_TEXT) for line in lines]
+        line_h = self._font.get_linesize()
+        pad = 6
+        box_w = max(s.get_width() for s in surfs) + pad * 2
+        box_h = line_h * len(surfs) + pad * 2
+
+        # 跟随光标，默认放在光标右下；越界则翻转到另一侧，避免超出窗口
+        mx, my = cam.world_to_screen(mouse_world.x, mouse_world.y, w, h)
+        ox, oy = 16, 16
+        bx = mx + ox
+        by = my + oy
+        if bx + box_w > w:
+            bx = mx - ox - box_w
+        if by + box_h > h:
+            by = my - oy - box_h
+        bx = max(0, bx)
+        by = max(0, by)
+
+        bg = pygame.Surface((box_w, box_h))
+        bg.set_alpha(210)
+        bg.fill(COLOR_HUD_BG)
+        self.surface.blit(bg, (bx, by))
+        for i, s in enumerate(surfs):
+            self.surface.blit(s, (bx + pad, by + pad + i * line_h))
 
     def _draw_warning(self, mouse_world: Vec3, cam: Camera, w: int, h: int) -> None:
         """绘制警告光标（红色圆环）"""

@@ -50,6 +50,7 @@ class GameLoop:
             self.editor.update_hover(mouse_world)
 
             self.renderer.clear()
+            self.renderer.draw_grid()
             self.renderer.draw_network(self.network)
             self.renderer.draw_overlay(self.network, self.editor, mouse_world)
             pygame.display.flip()
@@ -154,6 +155,8 @@ class GameLoop:
         # 强制 Case 2T（§10.5）：按住 LALT 时，M2 路径吸附直边 → 单切线弧
         # LSHIFT 优先（force_straight 的判定在 _compute_plan 中早于 case2t）
         self.editor.force_case2t = bool(keys[pygame.K_LALT])
+        # 同步缩放：吸附阈值以屏幕像素为基准，需按当前 scale 换算世界阈值
+        self.editor.pixel_scale = self.camera.scale
 
     def _mouse_world_pos(self) -> Vec3:
         mx, my = pygame.mouse.get_pos()

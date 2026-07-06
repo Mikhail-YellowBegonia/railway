@@ -7,7 +7,7 @@ class Camera:
     def __init__(self) -> None:
         self.pan_x: float = 0.0
         self.pan_y: float = 0.0
-        self.scale: float = 40.0  # pixels per world unit
+        self.scale: float = 40.0  # 像素/世界单位；约定 1 世界单位 = 1 米（公制，见 docs/editor.md §12.1）
         self._dragging = False
         self._last_mouse = pygame.Vector2(0, 0)
 

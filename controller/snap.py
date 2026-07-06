@@ -127,12 +127,21 @@ class SnapSystem:
         world_pos: Vec3,
         network: RailNetwork,
         reference_pos: Vec3 | None = None,
+        world_threshold: float | None = None,
     ) -> SnapResult:
         """按优先级依次尝试吸附。
 
         reference_pos：用于路径吸附时选择切线正反方向（一般传 BUILD_ACTIVE 的 M1）。
         BUILD_IDLE 状态传 None，此时路径吸附不产生切线。
+
+        world_threshold：本次吸附使用的世界阈值（米）。由上层按 camera.scale 从
+        屏幕像素阈值换算而来，使吸附半径以"屏幕视觉距离"为基准、随缩放跟随。
+        为 None 时沿用各 Provider 的默认阈值。
         """
+        if world_threshold is not None:
+            self.point_snap.threshold = world_threshold
+            self.path_snap.threshold = world_threshold
+
         # 优先级 1: 点吸附
         result = self.point_snap.snap(world_pos, network)
         if result is not None:

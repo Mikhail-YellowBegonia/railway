@@ -20,8 +20,17 @@ from model.vec3 import Vec3
 from controller.snap import SnapSystem, SnapResult
 from controller.build_plan import ConstructionPlan, PreviewGeometry
 
+# 世界阈值基准值（米）：等于默认缩放下的像素阈值换算结果，保留作文档/参考语义。
+# 实际吸附改用下方像素基准 + 每帧换算，不再直接使用这两个常量。
 SNAP_THRESHOLD = 0.3
 WARNING_THRESHOLD = 0.5
+# 吸附/警告阈值以"屏幕像素"为基准（随缩放跟随，保证手感稳定）。
+# 每帧按 camera.scale 换算成世界阈值：world = px / scale。
+# 选值使默认缩放 scale=40 下换算结果 = 上面的世界常量（12/40=0.3, 20/40=0.5），
+# 从而默认手感与旧实现一致，仅在缩放时正确跟随。
+SNAP_THRESHOLD_PX = 12.0
+WARNING_THRESHOLD_PX = 20.0
+DEFAULT_PIXEL_SCALE = 40.0  # 像素/世界单位；与 Camera 初始 scale 对齐
 MAX_ARC_RADIUS = 500.0  # 弧半径超过此值时退化为沿 T1 的直线（Q3）
 
 
@@ -46,6 +55,10 @@ class Editor:
         self.network = network
         self.mode: EditMode = EditMode.IDLE
         self.snap_system = SnapSystem()
+
+        # 当前像素/世界缩放（由 GameLoop 每帧从 camera.scale 同步）。
+        # 用于把屏幕像素阈值换算为世界阈值，使吸附半径随缩放跟随。
+        self.pixel_scale: float = DEFAULT_PIXEL_SCALE
 
         # BUILD 模式状态
         self.build_state: BuildState = BuildState.IDLE
@@ -123,13 +136,28 @@ class Editor:
             self._delete()
 
     def _snap(self, world_pos: Vec3) -> SnapResult:
-        """统一的吸附入口：BUILD_ACTIVE 时传入 M1 作为切线方向参考。"""
+        """统一的吸附入口：BUILD_ACTIVE 时传入 M1 作为切线方向参考。
+
+        吸附阈值以屏幕像素为基准，按当前缩放换算为世界阈值传入吸附系统。
+        """
         reference = (
             self.build_m1
             if (self.mode == EditMode.BUILD and self.build_state == BuildState.ACTIVE)
             else None
         )
-        return self.snap_system.snap(world_pos, self.network, reference)
+        return self.snap_system.snap(
+            world_pos, self.network, reference, self._world_snap_threshold()
+        )
+
+    def _world_snap_threshold(self) -> float:
+        """屏幕像素吸附阈值换算成当前世界阈值（米）。"""
+        scale = self.pixel_scale if self.pixel_scale > 1e-6 else DEFAULT_PIXEL_SCALE
+        return SNAP_THRESHOLD_PX / scale
+
+    def _world_warning_threshold(self) -> float:
+        """屏幕像素警告阈值换算成当前世界阈值（米）。"""
+        scale = self.pixel_scale if self.pixel_scale > 1e-6 else DEFAULT_PIXEL_SCALE
+        return WARNING_THRESHOLD_PX / scale
 
     def handle_cancel(self) -> None:
         """处理 Esc 键"""
@@ -750,8 +778,9 @@ class Editor:
 
     def _has_nearby_element(self, pos: Vec3) -> bool:
         """检查位置附近是否有节点或边（用于警告）"""
-        if self.network.node_id_at(pos, WARNING_THRESHOLD) is not None:
+        warn = self._world_warning_threshold()
+        if self.network.node_id_at(pos, warn) is not None:
             return True
-        if self.network.edge_id_at(pos, WARNING_THRESHOLD) is not None:
+        if self.network.edge_id_at(pos, warn) is not None:
             return True
         return False
