@@ -133,37 +133,87 @@ Edge 在 Node 处的"远离 other"切向计算：
 
 ### 3.1 架构
 
-吸附系统由多个独立的 `SnapProvider` 组成，按优先级依次执行：
+吸附系统由多个独立的 `SnapProvider` 组成，按优先级依次执行
+（实现：`controller/snap.py::SnapSystem.snap`）：
 
 ```
 SnapSystem
-  ├── PointSnapProvider      (优先级 1)
-  ├── PathSnapProvider       (优先级 2)
-  ├── ParallelPointProvider  (优先级 3, 留后)
-  └── ParallelPathProvider   (优先级 4, 留后)
+  ├── PointSnapProvider      (优先级 1) 端点/节点
+  ├── GridSnapProvider       (优先级 2) 格点
+  ├── ParallelSnapProvider   (优先级 3) 平行参考点（Simple + lazy Complex）
+  └── PathSnapProvider       (优先级 4) 既有边投影
 ```
 
-每个 Provider 有一个独立的 `enabled: bool` 开关。
+每个 Provider 有独立的 `enabled: bool` 开关。每帧调用：按优先级遍历已启用的
+Provider，取第一个命中结果直接返回，不再检查低优先级。全未命中则返回
+`snapped=False` 的原始位置。
 
-每帧调用：遍历所有已启用的 Provider，按优先级取第一个命中结果。高优先级的命中直接返回，不检查低优先级。
+**阈值基准**：Point/Path 的吸附阈值以**屏幕像素**为基准（上层按
+`camera.scale` 换算成世界米数后经 `world_threshold` 传入），使吸附半径的
+视觉距离随缩放稳定。Parallel 用固定 `SNAP_THRESHOLD_PX = 12`。
 
-### 3.2 PointSnapProvider（点吸附）
+**互斥约定**（键盘层，`controller/game_loop.py`）：G（格点）/ L（长度）/
+A（角度）三者互斥，开一个自动关其余两个；P（平行）、LSHIFT（强制直线）、
+LALT（Case 2T）独立切换。
 
-- 阈值 `threshold = 0.3` 世界单位
+### 3.2 PointSnapProvider（点吸附，优先级 1）
+
 - 在所有节点中找距 cursor 最近且小于阈值者；命中则覆盖位置为该节点坐标
 - 切线候选见 §2.2（端点 1 个，道岔 N 个，孤立 0 个）
-- 实现：`controller/snap.py::PointSnapProvider`
+- 默认 `enabled = True`
 
-### 3.3 PathSnapProvider（路径吸附）
+### 3.3 GridSnapProvider（格点吸附，优先级 2）
 
-- 阈值 `threshold = 0.3` 世界单位
-- 对每条边计算 cursor 的投影点（直线段 / 圆弧分别处理，见 `model/geom_utils.project_point_on_edge`），取距 cursor 最近且小于阈值的边
+- 把 cursor 吸附到最近格点；格点粒度与视角缩放挂钩（不涉及建造解算调整，
+  只改 M1/M2 落点）
+- G 键切换，与 L/A 互斥
+
+### 3.4 ParallelSnapProvider（平行吸附，优先级 3）
+
+生成既有轨道的平行参考点，让用户沿参考点建造得到平行轨道。间距固定
+`spacing = 5 m`，P 键切换，默认 `enabled = False`。
+
+**Simple Case**：每个非孤立节点、每条出射切线、沿切线垂线两侧各生成一个
+参考点（固定间距 `spacing`），参考点继承父节点切线方向。所有 Simple 参考点
+由 `update_reference_points` 预生成缓存；`snap` 时按屏幕像素阈值找最近者。
+
+**Complex Case（lazy 后处理拦截，非独立判定）**：Simple 参考点被命中后，
+`_try_lazy_complex` 检测该参考点是否恰好落在**某条既有边**上：
+- 仅对度数 ≥3 的**道岔节点**派生的参考点触发（普通端点跳过）
+- 用"参考点到边的最近点"距离 < `δ = spacing * 0.2 = 1 m` 判定命中
+  （非原始设想的"垂线段求交"，落地时简化为最近点+容差）
+- 命中则改用**边上最近点 + 该边切线**返回（携带 `snapped_edge_id` / `t`，
+  供截断），语义上是"接入这条基本平行、间距约 R 的既有边"
+- 未命中则退化回 Simple 参考点
+
+Complex 只在参考点被光标命中的那一帧才计算（lazy），并带 `edge_aabb` 粗筛。
+commit 29ae808 的 60× 优化即把 Complex 从"预计算全部"改成这套 lazy 拦截。
+
+**进阶特例（未实现，暂缓）**：若建造起点与终点都是同侧参考点，且两父节点
+间存在唯一最短路径，用户期望沿整条路径一次性建造多段平行轨道。这需要轨道
+拓扑的最短路径查找，实现困难，暂时逃避。相关空间/拓扑加速见 `docs/tiling.md`。
+
+### 3.5 PathSnapProvider（路径吸附，优先级 4）
+
+- 对每条边计算 cursor 的投影点（直线段 / 圆弧分别处理，见
+  `model/geom_utils.project_point_on_edge`），取距 cursor 最近且小于阈值的边
 - 切线候选始终为 `[forward, reverse]`；最佳值在 BUILD_ACTIVE 时按 §2.2 规则选
-- 实现：`controller/snap.py::PathSnapProvider`
+- `edge_direction` 仅直边有值（供 Case 2T §10.5 用）
+- 默认 `enabled = True`
 
-### 3.4 多边命中
+### 3.6 长度 / 角度吸附（建造解算内吸附）
 
-PathSnapProvider 在每个 Edge 上计算最短投影距离，取全局最小。多条边同时被命中时，返回距离最近的那条边。用户要吸附另一条边，需将鼠标移开以脱离当前边的吸附范围。
+不同于上述四个空间 Provider，这两项在**建造解算阶段**生效，会调整几何输出：
+
+- **长度吸附**（L 键，仅直线建造）：把路径长度吸附到增量档位（如 100 m）
+- **角度吸附**（A 键，仅单弧建造）：把弧的圆心角吸附到增量档位（如 ±30°）
+
+L/A 与 G 三者互斥。
+
+### 3.7 多边命中
+
+PathSnapProvider 在每个 Edge 上计算最短投影距离，取全局最小。多条边同时被
+命中时返回最近的那条。用户要吸附另一条边，需移开鼠标脱离当前边的吸附范围。
 
 ---
 
@@ -478,6 +528,14 @@ class PreviewGeometry:
 | ✅ BUILD_ACTIVE 右键 = 取消 | §10.4 |
 | ✅ LALT 单切线弧 Case 2T（`case=5`） | §10.5 |
 | ✅ GeoJSON 双向往返（直线 / 弧 / 截断后弧元数据保持） | §9 |
+| ✅ §12.1 公制约定 / 网格背景 / 建造 HUD / Ballast 占位 | §12.1 |
+| ✅ 格点吸附（`GridSnapProvider`，G 键） | §3.3 |
+| ✅ 长度吸附（L 键，仅直线）/ 角度吸附（A 键，仅单弧），G/L/A 互斥 | §3.6 |
+| ✅ 平行吸附 Simple + Complex Case（`ParallelSnapProvider`，P 键） | §3.4 |
+
+吸附功能的完整规格与分类见 §3。**唯一明确未实现**的是平行吸附 Simple Case
+的进阶情况（同侧两参考点间沿最短路径一次性建造整条多段平行轨道），§3.4
+标注为"暂时逃避"，需轨道拓扑最短路径查找。
 
 ---
 
@@ -608,10 +666,16 @@ class PreviewGeometry:
 
 ## 11. 当前阶段与近期方向
 
-**编辑器基本功能已稳固**。主干（Step 0–6）与追加需求（§10.1–§10.5）
-均已落地，几何算法通过单元测试与端到端测试，用户手感亦经人工验证。
-距离理想中的编辑体验仍有差距，具体的补强项待后续按需追加为 §12 及
-之后的条目。
+**编辑器基本功能已稳固**。主干（Step 0–6）、追加需求（§10.1–§10.5）、
+§12.1 定稿的四项（公制/网格/HUD/Ballast），以及 §3 五类吸附中
+的前四类 + 平行吸附 Simple/Complex Case 均已落地，几何算法通过端到端测试，
+用户手感亦经人工验证。
+
+**已知的下一步方向**：
+- **瓦片化空间索引**（研讨定稿见 `docs/tiling.md`）：把 snap 每帧的 O(N)
+  全扫描降为邻近瓦片 O(k) 查询，并为进阶平行吸附的空间查询铺路。
+- **进阶平行吸附**：沿两 Node 间最短路径一次性建造多段平行轨道
+  （§3.4 平行吸附的进阶特例，需拓扑最短路径查找），排在瓦片化之后。
 
 **近期开发重点仍是编辑器**：车辆、地形、经济等其它模块暂不启动。
 
@@ -622,7 +686,13 @@ class PreviewGeometry:
 - 在渲染 / 交互能提供合理反馈之前，不引入实际的 Z 数据变化
 - 相关代码假定"所有几何在 XY 平面"这一约定短期不变
 
-## 12. （临时）新一轮需求探讨
+## 12. 新一轮需求探讨（已收敛）
+
+> 本节记录的探讨已落地或已转入专项文档，保留作为背景。当前状态：
+> - **建立坐标系与尺寸参考**（公制/网格/HUD/Ballast）→ 已实现，规格见 §12.1
+> - **进阶吸附**（格点/长度角度/平行）→ 已实现，完整规格见 §3
+> - **瓦片化数据结构** → 设计研讨稿见 `docs/tiling.md`（未实施）
+> - **测试图像 Ballast** → 已实现底层 Ballast 占位（半宽 2 m）
 
 **建立坐标系与尺寸参考**
 1. 数据结构上，应当绑定到公制单位。

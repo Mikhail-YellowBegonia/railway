@@ -136,13 +136,22 @@ Modifier keys are polled per frame in `GameLoop._sync_modifiers`, not edge-trigg
 
 ## Working with `docs/editor.md`
 
-The editor design doc is the source of truth for behavior. §7 lists the
-completed scope (Steps 0–6 and §10.1–§10.5, all ✅). §11 records the current
-project stance: editor stays the focus, Z-axis is deferred until visual
-debugging catches up. **Pseudocode blocks in the doc are non-normative —
-implement to the behavior description, not the code samples.** When changing
-editor behavior, update the relevant §4 / §5 sections; when adding new
-follow-up requirements, append them as §12+ items.
+The editor design doc is the source of truth for behavior. §3 covers the full
+snap system (Point/Grid/Parallel/Path + length/angle), §7 lists the completed
+scope (Steps 0–6, §10.1–§10.5, §12.1, and the snap features, all ✅). §11 records
+the current stance: editor stays the focus, next directions are the tiling
+spatial index (`docs/tiling.md`) then advanced parallel snap; Z-axis deferred
+until visual debugging catches up. **Pseudocode blocks in the doc are
+non-normative — implement to the behavior description, not the code samples.**
+When changing editor behavior, update the relevant §3 / §4 / §5 sections; when
+adding new follow-up requirements, append them as §12+ items.
+
+**Keep docs in sync with code (learned the hard way).** Docs have drifted behind
+the code before — snap features shipped while editor.md still marked them
+"待研讨". Rule: when a feature is finalized (functionality frozen), update the
+docs in the SAME change. Backfilling / reorganizing older sections is optional
+and can be deferred, but at minimum the doc MUST point out the latest progress
+(mark it ✅ in §7 and note it in §11) so editor.md never lies about what exists.
 
 ## Conventions used in this codebase
 
