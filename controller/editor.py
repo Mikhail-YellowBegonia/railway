@@ -296,8 +296,8 @@ class Editor:
                 return  # 截断失败：拒绝
             plan.node_a_id = new_mid
 
-        # M2 端截断：Case 2T（case=5）用 plan 回算的 t；其余用 snap 的 t
-        if plan.case == 5 and plan.m2_split_edge_id is not None and plan.m2_split_t is not None:
+        # M2 端截断：Case 2T（case=5）和 Case 4(复合)用 plan 回算的 t；其余用 snap 的 t
+        if plan.case in (4, 5) and plan.m2_split_edge_id is not None and plan.m2_split_t is not None:
             new_mid = self.network.split_edge_at(plan.m2_split_edge_id, plan.m2_split_t)
             if new_mid is None:
                 return
