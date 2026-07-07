@@ -161,16 +161,16 @@ class ParallelSnapProvider:
         self.enabled = False  # 默认关闭,由上层键盘切换
         self.spacing = spacing  # 平行间距(米),固定 5m
         self.pixel_scale = 40.0  # 由上层每帧同步
-        # 缓存的参考点列表:(position, tangent, parent_node_id, is_complex)
-        # is_complex: True=Complex Case(投射交点), False=Simple Case(固定点)
-        self._reference_points: list[tuple[Vec3, Vec3, int, bool]] = []
-        # 调试可视化:投射线段列表 [(seg_start, seg_end, parent_node_id)]
-        self._projection_segments: list[tuple[Vec3, Vec3, int]] = []
+        # 缓存的参考点列表:(position, tangent, parent_node_id)
+        # 全部为 Simple Case,Complex 改为 lazy 按需计算
+        self._reference_points: list[tuple[Vec3, Vec3, int]] = []
 
     def update_reference_points(self, network: RailNetwork) -> None:
-        """重新生成所有平行参考点(Simple + Complex Case)。每帧或网络变化时调用。"""
+        """重新生成所有平行参考点(Simple Case only)。
+
+        所有节点统一生成固定间距参考点,Complex Case 改为吸附时 lazy 计算。
+        """
         self._reference_points.clear()
-        self._projection_segments.clear()
 
         for node_id, node in network.nodes.items():
             if node.connection_count() == 0:
@@ -180,127 +180,110 @@ class ParallelSnapProvider:
             tangents = self._get_node_tangents(node, network)
 
             for tangent in tangents:
-                # 两侧各生成一个参考点
+                # 两侧各生成固定间距参考点(Simple Case)
                 perp = self._perp_xy(tangent)
                 for side in (1.0, -1.0):
-                    self._try_generate_reference_point(
-                        node, tangent, perp, side, network
-                    )
+                    ref_pos = node.position + perp * (side * self.spacing)
+                    self._reference_points.append((ref_pos, tangent, node_id))
 
     def snap(self, world_pos: Vec3, network: RailNetwork) -> SnapResult | None:
-        """尝试吸附到最近的平行参考点(屏幕像素阈值)。"""
+        """尝试吸附到最近的平行参考点,并执行 lazy Complex 后处理。
+
+        1. 找到最近的 Simple 参考点(屏幕像素阈值)
+        2. 后处理:检测参考点是否在既有边上(容差内) → Complex Case
+        3. 返回修正后的结果(位置+切线)
+        """
         if not self.enabled or not self._reference_points:
             return None
 
         SNAP_THRESHOLD_PX = 12.0
         best_dist = float('inf')
-        best_ref: tuple[Vec3, Vec3, int, bool] | None = None
+        best_ref: tuple[Vec3, Vec3, int] | None = None
 
-        for ref_pos, ref_tangent, parent_id, _is_complex in self._reference_points:
+        for ref_pos, ref_tangent, parent_id in self._reference_points:
             world_dist = world_pos.distance_to(ref_pos)
             screen_dist_px = world_dist * self.pixel_scale
             if screen_dist_px < SNAP_THRESHOLD_PX and world_dist < best_dist:
                 best_dist = world_dist
-                best_ref = (ref_pos, ref_tangent, parent_id, _is_complex)
+                best_ref = (ref_pos, ref_tangent, parent_id)
 
         if best_ref is None:
             return None
 
-        ref_pos, ref_tangent, _parent_id, _is_complex = best_ref
+        ref_pos, ref_tangent, parent_id = best_ref
+
+        # Lazy Complex 后处理:检测参考点是否在既有边上
+        complex_result = self._try_lazy_complex(ref_pos, parent_id, network)
+        if complex_result is not None:
+            # Complex Case 命中:用边上的点和边切线
+            complex_pos, complex_tangent = complex_result
+            return SnapResult(
+                snapped=True,
+                position=complex_pos,
+                tangent=complex_tangent,
+                tangent_candidates=[complex_tangent, complex_tangent * -1.0],
+            )
+
+        # Simple Case:保持原参考点
         return SnapResult(
             snapped=True,
             position=ref_pos,
-            tangent=ref_tangent,  # 继承父节点切线(Simple)或边切线(Complex)
-            tangent_candidates=[ref_tangent],
+            tangent=ref_tangent,
+            tangent_candidates=[ref_tangent, ref_tangent * -1.0],
         )
 
-    def _try_generate_reference_point(
-        self,
-        node: Node,
-        tangent: Vec3,
-        perp: Vec3,
-        side: float,
-        network: RailNetwork,
-    ) -> None:
-        """尝试生成单个参考点:优先 Complex Case,失败则 Simple Case。
+    def _try_lazy_complex(
+        self, ref_pos: Vec3, parent_node_id: int, network: RailNetwork
+    ) -> tuple[Vec3, Vec3] | None:
+        """Lazy Complex Case:检测参考点是否在既有边上。
 
-        **入口条件**:仅道岔(度数≥3)尝试 Complex,端点/直通节点直接 Simple。
-
-        **Complex Case(优化)**:
-        - 在预期位置 R 投射中心点
-        - AABB 粗筛:只检测距离 < 10m 的边
-        - 找最近点,距离 < δ → 取该点作为参考点,切线继承边方向
-        - 否则退化 Simple
-
-        **Simple Case**:固定位置 R。
+        返回 (边上最近点, 边切线) 或 None(无匹配)。
+        仅检测道岔(度数≥3)的参考点,且距离 < δ 容差。
         """
-        R = self.spacing
-        delta = R * 0.2  # δ = 1m 容差
+        parent_node = network.nodes.get(parent_node_id)
+        if parent_node is None or parent_node.connection_count() < 3:
+            return None  # 非道岔,跳过 Complex
 
-        # 入口条件:仅道岔尝试 Complex
-        if node.connection_count() < 3:
-            # 端点或直通节点,直接 Simple
-            ref_pos = node.position + perp * (side * R)
-            self._reference_points.append((ref_pos, tangent, node.node_id, False))
-            return
-
-        # 预期参考点位置(投射中心)
-        expected_pos = node.position + perp * (side * R)
-
-        # 记录投射线段(调试可视化,缩短为单点附近小段)
-        seg_vis_start = expected_pos + perp * (-delta)
-        seg_vis_end = expected_pos + perp * delta
-        self._projection_segments.append((seg_vis_start, seg_vis_end, node.node_id))
-
-        # AABB 粗筛 + 最近点查找
+        delta = self.spacing * 0.2  # δ = 1m 容差
         from model.geom_utils import closest_point_on_edge, edge_aabb
 
-        parent_edges = node.incident_edge_ids  # 排除父节点关联边
+        parent_edges = parent_node.incident_edge_ids
         candidates: list[tuple[Vec3, Vec3, float]] = []  # (最近点, 边切线, 距离)
 
         for edge_id, edge in network.edges.items():
             if edge_id in parent_edges:
-                continue
+                continue  # 排除父节点关联边
 
             # AABB 粗筛
             node_a = network.nodes[edge.node_a_id]
             node_b = network.nodes[edge.node_b_id]
             aabb_min, aabb_max = edge_aabb(edge, node_a, node_b)
 
-            # 点到 AABB 的最短距离
-            dx = max(aabb_min.x - expected_pos.x, 0, expected_pos.x - aabb_max.x)
-            dy = max(aabb_min.y - expected_pos.y, 0, expected_pos.y - aabb_max.y)
+            dx = max(aabb_min.x - ref_pos.x, 0, ref_pos.x - aabb_max.x)
+            dy = max(aabb_min.y - ref_pos.y, 0, ref_pos.y - aabb_max.y)
             aabb_dist = (dx*dx + dy*dy) ** 0.5
 
-            if aabb_dist > R + delta + 1.0:  # +1m 安全边界
-                continue  # 太远,跳过
+            if aabb_dist > self.spacing + delta + 1.0:
+                continue
 
             # 精确最近点
-            closest_pt, dist = closest_point_on_edge(expected_pos, edge, node_a, node_b)
+            closest_pt, dist = closest_point_on_edge(ref_pos, edge, node_a, node_b)
 
-            if dist < delta:  # 在容差内
-                # 计算边在最近点处的切线
+            if dist < delta:
+                # 计算边切线
                 from model.geom_utils import tangent_along_edge, project_on_segment
                 t_closest, _proj, _d = project_on_segment(closest_pt, node_a.position, node_b.position)
                 edge_tangent = tangent_along_edge(edge, node_a, node_b, t=t_closest)
                 if edge_tangent.length() > 1e-9:
                     candidates.append((closest_pt, edge_tangent.normalize(), dist))
 
-        # Complex Case:唯一候选(最近的那个)
-        if len(candidates) == 1:
-            closest_pt, edge_tangent, _dist = candidates[0]
-            self._reference_points.append((closest_pt, edge_tangent, node.node_id, True))
-            return
-        elif len(candidates) > 1:
-            # 多个候选,取最近的
+        # 取最近的候选
+        if candidates:
             candidates.sort(key=lambda x: x[2])
             closest_pt, edge_tangent, _dist = candidates[0]
-            self._reference_points.append((closest_pt, edge_tangent, node.node_id, True))
-            return
+            return closest_pt, edge_tangent
 
-        # 退化到 Simple Case:无候选或距离超限
-        ref_pos = node.position + perp * (side * R)
-        self._reference_points.append((ref_pos, tangent, node.node_id, False))
+        return None
 
     def _get_node_tangents(self, node: Node, network: RailNetwork) -> list[Vec3]:
         """获取节点的所有出射切线(每条关联边一个)。"""

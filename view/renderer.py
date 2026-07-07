@@ -64,50 +64,34 @@ class Renderer:
                 pygame.draw.polygon(self.surface, COLOR_BALLAST, screen_pts)
 
     def _draw_parallel_reference_points(self, editor, cam: Camera, w: int, h: int) -> None:
-        """绘制平行吸附参考点(Simple/Complex Case 调试可视化)。
+        """绘制平行吸附参考点(Simple Case,全部橙色圆圈)。
 
-        Simple Case(橙色圆圈):固定间距参考点
-        Complex Case(绿色圆圈):投射交点参考点
-        投射线段(灰色虚线):调试用
+        Complex Case 已改为 lazy 按需计算,不再预计算/可视化。
         """
         provider = editor.snap_system.parallel_snap
         ref_points = provider._reference_points
-        proj_segments = provider._projection_segments
 
-        COLOR_SIMPLE = (255, 150, 0)  # 橙色
-        COLOR_COMPLEX = (0, 200, 100)  # 绿色
-        COLOR_SEGMENT = (128, 128, 128)  # 灰色
+        COLOR_REF = (255, 150, 0)  # 橙色
+        COLOR_LINE = (128, 128, 128)  # 灰色
         RADIUS_PX = 3
 
-        # 绘制投射线段(调试)
-        for seg_start, seg_end, _parent_id in proj_segments:
-            sx1, sy1 = cam.world_to_screen(seg_start.x, seg_start.y, w, h)
-            sx2, sy2 = cam.world_to_screen(seg_end.x, seg_end.y, w, h)
-            # 简单视口剔除
-            if abs(sx1) < 5000 and abs(sy1) < 5000:
-                pygame.draw.line(self.surface, COLOR_SEGMENT, (int(sx1), int(sy1)), (int(sx2), int(sy2)), 1)
-
         # 绘制参考点
-        for ref_pos, _ref_tangent, parent_id, is_complex in ref_points:
+        for ref_pos, _ref_tangent, parent_id in ref_points:
             sx, sy = cam.world_to_screen(ref_pos.x, ref_pos.y, w, h)
 
             # 简单视口剔除
             if sx < -50 or sx > w + 50 or sy < -50 or sy > h + 50:
                 continue
 
-            # 颜色区分
-            color = COLOR_COMPLEX if is_complex else COLOR_SIMPLE
-
             # 绘制圆圈
-            pygame.draw.circle(self.surface, color, (int(sx), int(sy)), RADIUS_PX)
+            pygame.draw.circle(self.surface, COLOR_REF, (int(sx), int(sy)), RADIUS_PX)
 
-            # 连线到父节点(仅 Simple Case,Complex 不连线避免混乱)
-            if not is_complex:
-                parent_node = editor.network.nodes.get(parent_id)
-                if parent_node:
-                    px, py = cam.world_to_screen(parent_node.position.x, parent_node.position.y, w, h)
-                    mid_x, mid_y = (sx + px) / 2, (sy + py) / 2
-                    pygame.draw.line(self.surface, COLOR_SEGMENT, (int(sx), int(sy)), (int(mid_x), int(mid_y)), 1)
+            # 连线到父节点(虚线效果)
+            parent_node = editor.network.nodes.get(parent_id)
+            if parent_node:
+                px, py = cam.world_to_screen(parent_node.position.x, parent_node.position.y, w, h)
+                mid_x, mid_y = (sx + px) / 2, (sy + py) / 2
+                pygame.draw.line(self.surface, COLOR_LINE, (int(sx), int(sy)), (int(mid_x), int(mid_y)), 1)
 
     def draw_network(self, network: RailNetwork, editor: Editor | None = None) -> None:
         w = self.surface.get_width()
