@@ -224,48 +224,81 @@ class ParallelSnapProvider:
     ) -> None:
         """尝试生成单个参考点:优先 Complex Case,失败则 Simple Case。
 
-        Complex Case:在 [R-δ, R+δ] 范围投射线段,求与其它边的唯一交点。
-        Simple Case:固定位置 R。
+        **入口条件**:仅道岔(度数≥3)尝试 Complex,端点/直通节点直接 Simple。
+
+        **Complex Case(优化)**:
+        - 在预期位置 R 投射中心点
+        - AABB 粗筛:只检测距离 < 10m 的边
+        - 找最近点,距离 < δ → 取该点作为参考点,切线继承边方向
+        - 否则退化 Simple
+
+        **Simple Case**:固定位置 R。
         """
         R = self.spacing
-        delta = R * 0.2  # δ = 1m
+        delta = R * 0.2  # δ = 1m 容差
 
-        # 投射线段:[R-δ, R+δ]
-        seg_start = node.position + perp * (side * (R - delta))
-        seg_end = node.position + perp * (side * (R + delta))
+        # 入口条件:仅道岔尝试 Complex
+        if node.connection_count() < 3:
+            # 端点或直通节点,直接 Simple
+            ref_pos = node.position + perp * (side * R)
+            self._reference_points.append((ref_pos, tangent, node.node_id, False))
+            return
 
-        # 记录投射线段(调试可视化)
-        self._projection_segments.append((seg_start, seg_end, node.node_id))
+        # 预期参考点位置(投射中心)
+        expected_pos = node.position + perp * (side * R)
 
-        # 遍历所有边求交点
-        from model.geom_utils import line_segment_intersect_edge
+        # 记录投射线段(调试可视化,缩短为单点附近小段)
+        seg_vis_start = expected_pos + perp * (-delta)
+        seg_vis_end = expected_pos + perp * delta
+        self._projection_segments.append((seg_vis_start, seg_vis_end, node.node_id))
 
-        intersections: list[tuple[Vec3, Vec3]] = []  # [(交点, 边切线)]
-        parent_edges = node.incident_edge_ids  # 父节点关联边,需排除
+        # AABB 粗筛 + 最近点查找
+        from model.geom_utils import closest_point_on_edge, edge_aabb
+
+        parent_edges = node.incident_edge_ids  # 排除父节点关联边
+        candidates: list[tuple[Vec3, Vec3, float]] = []  # (最近点, 边切线, 距离)
 
         for edge_id, edge in network.edges.items():
             if edge_id in parent_edges:
-                continue  # 排除父节点关联边
+                continue
 
+            # AABB 粗筛
             node_a = network.nodes[edge.node_a_id]
             node_b = network.nodes[edge.node_b_id]
+            aabb_min, aabb_max = edge_aabb(edge, node_a, node_b)
 
-            inter = line_segment_intersect_edge(seg_start, seg_end, edge, node_a, node_b)
-            if inter is not None:
-                # 计算边在交点处的切线
+            # 点到 AABB 的最短距离
+            dx = max(aabb_min.x - expected_pos.x, 0, expected_pos.x - aabb_max.x)
+            dy = max(aabb_min.y - expected_pos.y, 0, expected_pos.y - aabb_max.y)
+            aabb_dist = (dx*dx + dy*dy) ** 0.5
+
+            if aabb_dist > R + delta + 1.0:  # +1m 安全边界
+                continue  # 太远,跳过
+
+            # 精确最近点
+            closest_pt, dist = closest_point_on_edge(expected_pos, edge, node_a, node_b)
+
+            if dist < delta:  # 在容差内
+                # 计算边在最近点处的切线
                 from model.geom_utils import tangent_along_edge, project_on_segment
-                t_inter, _proj, _dist = project_on_segment(inter, node_a.position, node_b.position)
-                edge_tangent = tangent_along_edge(edge, node_a, node_b, t=t_inter)
+                t_closest, _proj, _d = project_on_segment(closest_pt, node_a.position, node_b.position)
+                edge_tangent = tangent_along_edge(edge, node_a, node_b, t=t_closest)
                 if edge_tangent.length() > 1e-9:
-                    intersections.append((inter, edge_tangent.normalize()))
+                    candidates.append((closest_pt, edge_tangent.normalize(), dist))
 
-        # Complex Case:唯一交点
-        if len(intersections) == 1:
-            inter_pos, inter_tangent = intersections[0]
-            self._reference_points.append((inter_pos, inter_tangent, node.node_id, True))
+        # Complex Case:唯一候选(最近的那个)
+        if len(candidates) == 1:
+            closest_pt, edge_tangent, _dist = candidates[0]
+            self._reference_points.append((closest_pt, edge_tangent, node.node_id, True))
+            return
+        elif len(candidates) > 1:
+            # 多个候选,取最近的
+            candidates.sort(key=lambda x: x[2])
+            closest_pt, edge_tangent, _dist = candidates[0]
+            self._reference_points.append((closest_pt, edge_tangent, node.node_id, True))
             return
 
-        # 退化到 Simple Case:固定位置
+        # 退化到 Simple Case:无候选或距离超限
         ref_pos = node.position + perp * (side * R)
         self._reference_points.append((ref_pos, tangent, node.node_id, False))
 

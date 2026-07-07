@@ -37,6 +37,58 @@ def project_on_segment(p: Vec3, a: Vec3, b: Vec3) -> tuple[float, Vec3, float]:
     return t, proj, p.distance_to(proj)
 
 
+def closest_point_on_edge(p: Vec3, edge: Edge, node_a: Node, node_b: Node) -> tuple[Vec3, float]:
+    """计算点 p 到边的最近点,返回 (最近点, 距离)。
+
+    直边:投影到线段
+    弧边:采样点找最近(精度适中,12 段足够 5m 场景)
+    """
+    if not edge.is_arc:
+        # 直边:投影
+        _t, proj, dist = project_on_segment(p, node_a.position, node_b.position)
+        return proj, dist
+    else:
+        # 弧边:采样找最近
+        arc_points = edge.sample_arc_points(segments=12)
+        if not arc_points:
+            return node_a.position, p.distance_to(node_a.position)
+
+        best_point = arc_points[0]
+        best_dist = p.distance_to(arc_points[0])
+
+        for pt in arc_points[1:]:
+            dist = p.distance_to(pt)
+            if dist < best_dist:
+                best_dist = dist
+                best_point = pt
+
+        return best_point, best_dist
+
+
+def edge_aabb(edge: Edge, node_a: Node, node_b: Node) -> tuple[Vec3, Vec3]:
+    """计算边的轴对齐包围盒(AABB),返回 (min_corner, max_corner)。
+
+    直边:两端点包围盒
+    弧边:采样点包围盒
+    """
+    if not edge.is_arc:
+        min_x = min(node_a.position.x, node_b.position.x)
+        max_x = max(node_a.position.x, node_b.position.x)
+        min_y = min(node_a.position.y, node_b.position.y)
+        max_y = max(node_a.position.y, node_b.position.y)
+        return Vec3(min_x, min_y, 0), Vec3(max_x, max_y, 0)
+    else:
+        arc_points = edge.sample_arc_points(segments=12)
+        if not arc_points:
+            return node_a.position, node_a.position
+
+        min_x = min(p.x for p in arc_points)
+        max_x = max(p.x for p in arc_points)
+        min_y = min(p.y for p in arc_points)
+        max_y = max(p.y for p in arc_points)
+        return Vec3(min_x, min_y, 0), Vec3(max_x, max_y, 0)
+
+
 def line_segment_intersect_edge(
     seg_start: Vec3, seg_end: Vec3, edge: Edge, node_a: Node, node_b: Node
 ) -> Vec3 | None:
