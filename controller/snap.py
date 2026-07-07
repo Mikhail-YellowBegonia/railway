@@ -216,12 +216,16 @@ class ParallelSnapProvider:
         complex_result = self._try_lazy_complex(ref_pos, parent_id, network)
         if complex_result is not None:
             # Complex Case 命中:用边上的点和边切线
-            complex_pos, complex_tangent = complex_result
+            complex_pos, complex_tangent, edge_id, edge_t = complex_result
             return SnapResult(
                 snapped=True,
                 position=complex_pos,
                 tangent=complex_tangent,
                 tangent_candidates=[complex_tangent, complex_tangent * -1.0],
+                snapped_node_id=None,  # 不是节点,是边上的点
+                snapped_edge_id=edge_id,  # 吸附到边上
+                snapped_edge_t=edge_t,  # 边上的参数位置
+                edge_direction=complex_tangent,  # 边方向
             )
 
         # Simple Case:保持原参考点
@@ -234,10 +238,10 @@ class ParallelSnapProvider:
 
     def _try_lazy_complex(
         self, ref_pos: Vec3, parent_node_id: int, network: RailNetwork
-    ) -> tuple[Vec3, Vec3] | None:
+    ) -> tuple[Vec3, Vec3, int, float] | None:
         """Lazy Complex Case:检测参考点是否在既有边上。
 
-        返回 (边上最近点, 边切线) 或 None(无匹配)。
+        返回 (边上最近点, 边切线, edge_id, t) 或 None(无匹配)。
         仅检测道岔(度数≥3)的参考点,且距离 < δ 容差。
         """
         parent_node = network.nodes.get(parent_node_id)
@@ -248,7 +252,7 @@ class ParallelSnapProvider:
         from model.geom_utils import closest_point_on_edge, edge_aabb
 
         parent_edges = parent_node.incident_edge_ids
-        candidates: list[tuple[Vec3, Vec3, float]] = []  # (最近点, 边切线, 距离)
+        candidates: list[tuple[Vec3, Vec3, int, float, float]] = []  # (最近点, 边切线, edge_id, t, 距离)
 
         for edge_id, edge in network.edges.items():
             if edge_id in parent_edges:
@@ -270,18 +274,18 @@ class ParallelSnapProvider:
             closest_pt, dist = closest_point_on_edge(ref_pos, edge, node_a, node_b)
 
             if dist < delta:
-                # 计算边切线
+                # 计算边切线和参数 t
                 from model.geom_utils import tangent_along_edge, project_on_segment
                 t_closest, _proj, _d = project_on_segment(closest_pt, node_a.position, node_b.position)
                 edge_tangent = tangent_along_edge(edge, node_a, node_b, t=t_closest)
                 if edge_tangent.length() > 1e-9:
-                    candidates.append((closest_pt, edge_tangent.normalize(), dist))
+                    candidates.append((closest_pt, edge_tangent.normalize(), edge_id, t_closest, dist))
 
         # 取最近的候选
         if candidates:
-            candidates.sort(key=lambda x: x[2])
-            closest_pt, edge_tangent, _dist = candidates[0]
-            return closest_pt, edge_tangent
+            candidates.sort(key=lambda x: x[4])
+            closest_pt, edge_tangent, edge_id, t_closest, _dist = candidates[0]
+            return closest_pt, edge_tangent, edge_id, t_closest
 
         return None
 
