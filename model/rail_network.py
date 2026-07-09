@@ -4,6 +4,7 @@ import math
 from dataclasses import dataclass, field
 
 from model.vec3 import Vec3
+from model.spatial_index import SpatialIndex
 
 
 @dataclass
@@ -65,12 +66,16 @@ class RailNetwork:
         self._next_node_id: int = 0
         self._next_edge_id: int = 0
         self._connectivity: dict[int, list[set[int]]] = {}
+        # 空间索引（旁挂，见 docs/tiling.md §5）
+        self._spatial_index = SpatialIndex()
 
     def add_node(self, position: Vec3) -> Node:
         nid = self._next_node_id
         self._next_node_id += 1
         node = Node(node_id=nid, position=position)
         self.nodes[nid] = node
+        # 插桩：同步到空间索引
+        self._spatial_index.insert_node(nid, position)
         return node
 
     def add_edge(self, node_a: Node, node_b: Node, geometry: list[Vec3] | None = None) -> Edge:
@@ -114,6 +119,9 @@ class RailNetwork:
         self._rebuild_connectivity_for(node_a.node_id)
         self._rebuild_connectivity_for(node_b.node_id)
 
+        # 插桩：同步到空间索引
+        self._spatial_index.insert_edge(eid, edge, node_a, node_b)
+
         return edge
 
     def adjacent_edges_at(self, node_id: int, from_edge_id: int) -> set[int]:
@@ -153,6 +161,9 @@ class RailNetwork:
         if edge is None:
             return
 
+        # 插桩：先从空间索引删除
+        self._spatial_index.remove_edge(edge_id)
+
         node_a = self.nodes.get(edge.node_a_id)
         node_b = self.nodes.get(edge.node_b_id)
         if node_a:
@@ -171,6 +182,8 @@ class RailNetwork:
             self.remove_edge(eid)
         self.nodes.pop(node_id, None)
         self._connectivity.pop(node_id, None)
+        # 插桩：从空间索引删除 Node
+        self._spatial_index.remove_node(node_id, node.position)
 
     def split_edge_at(
         self, edge_id: int, t: float
@@ -243,6 +256,22 @@ class RailNetwork:
             if d < epsilon:
                 return edge.edge_id
         return None
+
+    def nearby_node_ids(self, pos: Vec3, radius: float) -> set[int]:
+        """返回距 pos 世界距离可能 <= radius 的 Node ID 候选集。
+
+        候选集可能略多（瓦片邻域粒度），调用方需按实际距离精算筛选。
+        见 docs/tiling.md §6。
+        """
+        return self._spatial_index.nearby_node_ids(pos, radius)
+
+    def nearby_edge_ids(self, pos: Vec3, radius: float) -> set[int]:
+        """返回距 pos 世界距离可能 <= radius 的 Edge ID 候选集。
+
+        候选集可能略多（瓦片邻域粒度），调用方需按实际距离精算筛选。
+        见 docs/tiling.md §6。
+        """
+        return self._spatial_index.nearby_edge_ids(pos, radius)
 
 
 def _point_to_segment_distance(p: Vec3, a: Vec3, b: Vec3) -> float:

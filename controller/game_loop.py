@@ -113,6 +113,11 @@ class GameLoop:
         elif event.key == pygame.K_p:
             # P 键切换平行吸附(Simple/Complex Case)；独立开关
             self.editor.parallel_snap_enabled = not self.editor.parallel_snap_enabled
+        elif event.key == pygame.K_s:
+            # S 键保存当前路网到 manual_track.geojson（临时持久化功能）
+            from model.geojson_writer import write_geojson
+            write_geojson(self.editor.network, "manual_track.geojson")
+            print(f"已保存 {len(self.editor.network.edges)} 条边到 manual_track.geojson")
 
     def _handle_mouse_down(self, event: pygame.event.Event) -> None:
         # 滚轮先处理（不参与平移逻辑）
