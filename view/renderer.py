@@ -35,6 +35,8 @@ COLOR_CASE2T_ENTRY = (255, 100, 255)  # §10.5 算法回算的接入点标记（
 COLOR_HUD_BG = (20, 20, 20)           # 建造 HUD tooltip 背景
 COLOR_HUD_TEXT = (210, 220, 230)      # 建造 HUD 文本
 COLOR_BALLAST = (72, 66, 58)          # 道床带填充（暖灰，衬于逻辑细线之下）
+COLOR_TILE_BOUNDARY = (60, 60, 60)    # 瓦片边界（淡灰）
+COLOR_TILE_QUERY = (120, 120, 60)     # 查询邻域高亮（黄灰）
 
 MODE_NAMES: dict[EditMode, str] = {
     EditMode.IDLE: "IDLE",
@@ -454,3 +456,55 @@ def _draw_dashed_polyline(
     """对折线段逐段画虚线（不跨段保持 dash 相位，简单实现就够用）。"""
     for i in range(len(points) - 1):
         _draw_dashed_line(surface, color, points[i], points[i + 1], dash_len, gap_len)
+
+
+def draw_spatial_index_debug(
+    surface: pygame.Surface,
+    camera: Camera,
+    network: RailNetwork,
+    cursor_world_pos: Vec3 | None = None,
+    query_radius: float = 30.0,
+) -> None:
+    """绘制空间索引的调试可视化（I 键切换）。
+
+    - 淡灰色网格：所有非空瓦片的边界
+    - 黄灰色高亮：光标附近查询邻域的瓦片
+    - 用于验证瓦片划分、查询范围是否合理
+    """
+    w = surface.get_width()
+    h = surface.get_height()
+    index = network._spatial_index
+    tile_size = index.tile_size
+
+    # 收集所有非空瓦片
+    all_tiles = set(index.node_tiles.keys()) | set(index.edge_tiles.keys())
+
+    # 如果有光标位置，计算查询邻域
+    query_tiles = set()
+    if cursor_world_pos is not None:
+        query_tiles = set(index._tiles_in_radius(cursor_world_pos, query_radius))
+
+    # 绘制所有非空瓦片边界
+    for tile_key in all_tiles:
+        tx, ty = tile_key
+        # 瓦片世界坐标范围
+        wx0 = tx * tile_size
+        wy0 = ty * tile_size
+        wx1 = wx0 + tile_size
+        wy1 = wy0 + tile_size
+
+        # 转屏幕坐标
+        sx0, sy0 = camera.world_to_screen(wx0, wy0, w, h)
+        sx1, sy1 = camera.world_to_screen(wx1, wy1, w, h)
+
+        # 视口剔除：屏幕外不画
+        if sx1 < 0 or sx0 > w or sy1 < 0 or sy0 > h:
+            continue
+
+        # 选颜色：查询邻域高亮
+        color = COLOR_TILE_QUERY if tile_key in query_tiles else COLOR_TILE_BOUNDARY
+
+        # 画矩形边界
+        rect = pygame.Rect(int(sx0), int(sy0), int(sx1 - sx0), int(sy1 - sy0))
+        pygame.draw.rect(surface, color, rect, 1)
+

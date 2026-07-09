@@ -38,6 +38,9 @@ class GameLoop:
         self._pan_button_down_pos: pygame.Vector2 = pygame.Vector2(0, 0)
         self._pan_moved: bool = False
 
+        # 空间索引可视化开关（I 键切换）
+        self.debug_show_tiles = False
+
     def run(self) -> None:
         while self.running:
             for event in pygame.event.get():
@@ -51,6 +54,16 @@ class GameLoop:
 
             self.renderer.clear()
             self.renderer.draw_grid()
+            # 空间索引可视化（I 键切换，在 draw_network 之前绘制，避免遮挡轨道）
+            if self.debug_show_tiles:
+                from view.renderer import draw_spatial_index_debug
+                draw_spatial_index_debug(
+                    self.renderer.surface,
+                    self.camera,
+                    self.network,
+                    cursor_world_pos=mouse_world,
+                    query_radius=30.0,  # 可调整，匹配吸附阈值
+                )
             self.renderer.draw_network(self.network, self.editor)
             self.renderer.draw_overlay(self.network, self.editor, mouse_world)
             pygame.display.flip()
@@ -118,6 +131,11 @@ class GameLoop:
             from model.geojson_writer import write_geojson
             write_geojson(self.editor.network, "manual_track.geojson")
             print(f"已保存 {len(self.editor.network.edges)} 条边到 manual_track.geojson")
+        elif event.key == pygame.K_i:
+            # I 键切换空间索引可视化（debug 用）
+            self.debug_show_tiles = not self.debug_show_tiles
+            status = "开启" if self.debug_show_tiles else "关闭"
+            print(f"空间索引可视化: {status}")
 
     def _handle_mouse_down(self, event: pygame.event.Event) -> None:
         # 滚轮先处理（不参与平移逻辑）
