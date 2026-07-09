@@ -43,7 +43,10 @@ class PointSnapProvider:
         best_node_id: int | None = None
         best_dist = float('inf')
 
-        for node_id, node in network.nodes.items():
+        # 走空间索引：只扫描邻近节点（O(k) vs O(N) 全扫描）
+        candidates = network.nearby_node_ids(world_pos, self.threshold)
+        for node_id in candidates:
+            node = network.nodes[node_id]
             d = node.position.distance_to(world_pos)
             if d < self.threshold and d < best_dist:
                 best_dist = d
@@ -254,23 +257,18 @@ class ParallelSnapProvider:
         parent_edges = parent_node.incident_edge_ids
         candidates: list[tuple[Vec3, Vec3, int, float, float]] = []  # (最近点, 边切线, edge_id, t, 距离)
 
-        for edge_id, edge in network.edges.items():
+        # 走空间索引：只扫描参考点邻近的边（O(k) vs O(N) 全扫描）
+        # 查询半径 = spacing + delta + 余量，覆盖可能命中的边
+        nearby_edge_ids = network.nearby_edge_ids(ref_pos, self.spacing + delta + 1.0)
+        for edge_id in nearby_edge_ids:
             if edge_id in parent_edges:
                 continue  # 排除父节点关联边
 
-            # AABB 粗筛
+            edge = network.edges[edge_id]
             node_a = network.nodes[edge.node_a_id]
             node_b = network.nodes[edge.node_b_id]
-            aabb_min, aabb_max = edge_aabb(edge, node_a, node_b)
 
-            dx = max(aabb_min.x - ref_pos.x, 0, ref_pos.x - aabb_max.x)
-            dy = max(aabb_min.y - ref_pos.y, 0, ref_pos.y - aabb_max.y)
-            aabb_dist = (dx*dx + dy*dy) ** 0.5
-
-            if aabb_dist > self.spacing + delta + 1.0:
-                continue
-
-            # 精确最近点
+            # 精确最近点（索引已做粗筛，不再需要手工 AABB 判定）
             closest_pt, dist = closest_point_on_edge(ref_pos, edge, node_a, node_b)
 
             if dist < delta:
@@ -405,7 +403,10 @@ class PathSnapProvider:
         best_pos = Vec3()
         best_dist = float('inf')
 
-        for edge_id, edge in network.edges.items():
+        # 走空间索引：只扫描邻近边（O(k) vs O(N) 全扫描）
+        candidates = network.nearby_edge_ids(world_pos, self.threshold)
+        for edge_id in candidates:
+            edge = network.edges[edge_id]
             node_a = network.nodes[edge.node_a_id]
             node_b = network.nodes[edge.node_b_id]
             t, proj_pos, dist = project_point_on_edge(world_pos, edge, node_a, node_b)
