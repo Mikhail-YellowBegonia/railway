@@ -532,6 +532,7 @@ class PreviewGeometry:
 | ✅ 格点吸附（`GridSnapProvider`，G 键） | §3.3 |
 | ✅ 长度吸附（L 键，仅直线）/ 角度吸附（A 键，仅单弧），G/L/A 互斥 | §3.6 |
 | ✅ 平行吸附 Simple + Complex Case（`ParallelSnapProvider`，P 键） | §3.4 |
+| ✅ 空间索引（uniform grid，`TILE_SIZE=50m`，340× 加速，I 键可视化） | §11 |
 
 吸附功能的完整规格与分类见 §3。**唯一明确未实现**的是平行吸附 Simple Case
 的进阶情况（同侧两参考点间沿最短路径一次性建造整条多段平行轨道），§3.4
@@ -671,11 +672,20 @@ class PreviewGeometry:
 的前四类 + 平行吸附 Simple/Complex Case 均已落地，几何算法通过端到端测试，
 用户手感亦经人工验证。
 
+**空间索引已实施**（commits `3591823` / `9417752` / `48f97ae`）：
+- `model/spatial_index.py`：uniform grid 空间哈希（`TILE_SIZE = 50m`），
+  增量插入/删除，稀疏 dict 查询
+- `RailNetwork` 插桩：5 个增删点同步维护索引，暴露 `nearby_node_ids` /
+  `nearby_edge_ids` 查询方法
+- snap.py 三个 Provider 改走索引：Point/Path/Parallel 从 O(N) 全扫描
+  降为 O(k) 邻近瓦片查询
+- 性能验证：2601 节点 + 5100 边路网，加速比 **340.8×**，索引查询
+  0.002 ms/次，满足 60fps 要求
+- I 键可视化：瓦片边界 + 查询邻域高亮（debug 用）
+
 **已知的下一步方向**：
-- **瓦片化空间索引**（研讨定稿见 `docs/tiling.md`）：把 snap 每帧的 O(N)
-  全扫描降为邻近瓦片 O(k) 查询，并为进阶平行吸附的空间查询铺路。
 - **进阶平行吸附**：沿两 Node 间最短路径一次性建造多段平行轨道
-  （§3.4 平行吸附的进阶特例，需拓扑最短路径查找），排在瓦片化之后。
+  （§3.4 平行吸附的进阶特例，需拓扑最短路径查找）
 
 **近期开发重点仍是编辑器**：车辆、地形、经济等其它模块暂不启动。
 
