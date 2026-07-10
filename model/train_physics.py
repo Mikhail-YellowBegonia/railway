@@ -16,6 +16,7 @@ class TrainPhysics(ABC):
         v: float,
         throttle: float,
         brake: float,
+        consist,  # model.wagon.Consist
         track_metadata: dict | None = None,
     ) -> float:
         """计算瞬时加速度（m/s²）。
@@ -24,6 +25,7 @@ class TrainPhysics(ABC):
             v: 当前速度（m/s）
             throttle: 油门/功率手柄（∈ [0, 1]，0=怠速，1=全开）
             brake: 制动（∈ [0, 1]，0=无制动，1=全制动）
+            consist: 列车编组（用于获取 total_mass 等元数据）
             track_metadata: 轨道元数据（可选），如 {'curve_radius': float, 'grade': float}
                 用于计算曲线/坡度附加阻力（SimplePhysics 忽略，真实物理模型使用）
 
@@ -60,18 +62,104 @@ class SimplePhysics(TrainPhysics):
         v: float,
         throttle: float,
         brake: float,
+        consist,  # model.wagon.Consist
         track_metadata: dict | None = None,
     ) -> float:
-        # Clamp 输入
         throttle = max(0.0, min(throttle, 1.0))
         brake = max(0.0, min(brake, 1.0))
 
-        # 简单线性模型
         a = throttle * self.a_max - brake * self.b_max
 
-        # 速度上限：超过 v_max 时强制不加速（调用方也会 clamp v，这是双保险）
         if v >= self.v_max and a > 0:
             a = 0.0
 
         return a
+
+
+class RealisticElectric(TrainPhysics):
+    """真实电力机车物理模型（阶段 2：Wagon 级别计算）。
+
+    特性：
+    - 遍历 consist.wagons，区分动力车/拖车
+    - 动力车：贡献牵引力（按各自 P_rated 计算）
+    - 拖车：只贡献质量和阻力
+    - 牵引曲线：恒转矩区 + 恒功率区
+    - 阻力：Davis 公式（按总质量）
+    - 黏着限制：整体编组（暂不细化到 Bogie）
+
+    简化（后续阶段扩展）：
+    - 黏着限制用总质量（不区分各车厢轴重）
+    - 忽略坡度/曲线阻力
+    - 所有动力车共享 throttle（后续可独立控制）
+
+    参数:
+        F_max_const: 单节动力车恒转矩区最大牵引力（kN），默认 300
+        v_transition: 恒转矩/恒功率转换速度（m/s），默认 10
+        mu_adhesion: 黏着系数，默认 0.3
+        brake_force: 最大制动力（kN），默认 200
+        davis_A/B/C: Davis 阻力公式系数
+    """
+
+    def __init__(
+        self,
+        F_max_const: float = 300.0,
+        v_transition: float = 10.0,
+        mu_adhesion: float = 0.3,
+        brake_force: float = 200.0,
+        davis_A: float = 2.0,
+        davis_B: float = 0.01,
+        davis_C: float = 0.0004,
+    ) -> None:
+        self.F_max_const = F_max_const
+        self.v_transition = v_transition
+        self.mu_adhesion = mu_adhesion
+        self.brake_force = brake_force
+        self.davis_A = davis_A
+        self.davis_B = davis_B
+        self.davis_C = davis_C
+
+    def compute_acceleration(
+        self,
+        v: float,
+        throttle: float,
+        brake: float,
+        consist,  # model.wagon.Consist
+        track_metadata: dict | None = None,
+    ) -> float:
+        throttle = max(0.0, min(throttle, 1.0))
+        brake = max(0.0, min(brake, 1.0))
+
+        m_total = consist.total_mass  # 吨
+
+        # 遍历车厢，累加动力车的牵引力
+        F_traction_total = 0.0
+        for wagon in consist.wagons:
+            if wagon.is_powered:
+                P_rated = wagon.P_rated  # kW
+                if v < self.v_transition:
+                    # 恒转矩区
+                    F_wagon = throttle * self.F_max_const
+                else:
+                    # 恒功率区
+                    F_wagon = throttle * P_rated / v if v > 0 else 0
+                F_traction_total += F_wagon
+
+        # 黏着限制（整体编组）
+        F_adhesion = self.mu_adhesion * m_total * 1000 * 9.81 / 1000  # kN
+        F_traction_total = min(F_traction_total, F_adhesion)
+
+        # 阻力（Davis 公式，按总质量）
+        R = self.davis_A + self.davis_B * v + self.davis_C * v * v
+
+        # 制动力
+        F_brake = brake * self.brake_force
+
+        # 净力
+        F_net = F_traction_total - R - F_brake
+
+        # 加速度
+        a = F_net / m_total
+
+        return a
+
 

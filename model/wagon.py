@@ -35,7 +35,7 @@ class WagonConfig:
     bogies: list[BogieConfig] = field(default_factory=list)  # 转向架列表（通常 2 个）
     coupler_1_pos: float = 0.0      # 前车钩位置（米，逻辑原点，通常 0）
     coupler_2_pos: float = 0.0      # 后车钩位置（米，= length 或略小）
-    # engine_property: 预留，后续真实物理扩展（动力类型、功率曲线）
+    P_rated: float | None = None    # 额定功率（kW），None = 拖车，非 None = 动力车
 
     def __post_init__(self):
         """自动填充 coupler_2_pos = length（如果未显式设置）。"""
@@ -51,6 +51,11 @@ class WagonConfig:
         if len(self.bogies) != 2:
             raise ValueError(f"bogie_spacing 需要恰好 2 个转向架，当前 {len(self.bogies)} 个")
         return abs(self.bogies[1].pos - self.bogies[0].pos)
+
+    @property
+    def is_powered(self) -> bool:
+        """是否为动力车（有额定功率）。"""
+        return self.P_rated is not None
 
 
 @dataclass
@@ -217,12 +222,17 @@ def _estimate_curvature_radius(
 
 # ===== 预定义配置（示例/测试用） =====
 
-def create_simple_wagon(length: float = 20.0, mass: float = 50.0) -> WagonConfig:
+def create_simple_wagon(
+    length: float = 20.0,
+    mass: float = 50.0,
+    P_rated: float | None = None,
+) -> WagonConfig:
     """创建一个简单的标准车厢（两转向架，对称布局）。
 
     参数:
         length: 车厢长度（米），默认 20m
         mass: 质量（吨），默认 50 吨
+        P_rated: 额定功率（kW），None = 拖车，非 None = 动力车
 
     转向架布局：前后各占 1/8 长度处（即两转向架间距 = 3/4 长度）。
     """
@@ -233,6 +243,7 @@ def create_simple_wagon(length: float = 20.0, mass: float = 50.0) -> WagonConfig
     return WagonConfig(
         length=length,
         mass=mass,
+        P_rated=P_rated,
         bogies=[
             BogieConfig(geometric_role=GeometricRole.LEADING, pos=bogie_1_pos, load_share=0.5),
             BogieConfig(geometric_role=GeometricRole.TRAILING, pos=bogie_2_pos, load_share=0.5),

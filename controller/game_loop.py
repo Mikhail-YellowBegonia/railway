@@ -89,12 +89,12 @@ class GameLoop:
 
                 # 物理层：计算加速度（无状态）
                 self.debug_train_a = self.debug_train_physics.compute_acceleration(
-                    self.debug_train_v, throttle, brake
+                    self.debug_train_v, throttle, brake, self.debug_train_consist
                 )
 
                 # 状态积分：v 和 s 的欧拉更新
                 self.debug_train_v += self.debug_train_a * dt
-                self.debug_train_v = max(0.0, min(self.debug_train_v, self.debug_train_physics.v_max))
+                self.debug_train_v = max(0.0, self.debug_train_v)  # 速度不能为负
                 self.debug_train_s += self.debug_train_v * dt
                 self.debug_train_s = max(0.0, min(self.debug_train_s, self.debug_train_kinematics.total_length))
 
@@ -106,12 +106,11 @@ class GameLoop:
 
                 # 相机跟随列车（A1）
                 if self.camera.follow_enabled:
-                    # 兼容质点和刚体运动学（duck typing）
-                    if hasattr(self.debug_train_kinematics, 'get_wagon_pose'):
-                        pose = self.debug_train_kinematics.get_wagon_pose(self.debug_train_s)
-                    else:
-                        pose = self.debug_train_kinematics.pose_at(self.debug_train_s)
-                    self.camera.set_center_smooth(pose.position.x, pose.position.y)
+                    # D6: 多节编组相机跟随首节车厢
+                    wagon_poses = self.debug_train_kinematics.get_all_wagon_poses(self.debug_train_s)
+                    if wagon_poses:
+                        lead_pose = wagon_poses[0]
+                        self.camera.set_center_smooth(lead_pose.position.x, lead_pose.position.y)
 
             mouse_world = self._mouse_world_pos()
             self.editor.update_hover(mouse_world)
@@ -387,14 +386,18 @@ class GameLoop:
             )
             # 自动启动 debug 列车（物理层 + 状态初始化）
             from model.kinematics import PathKinematics
-            from model.train_physics import SimplePhysics
+            from model.train_physics import RealisticElectric
             from model.rigid_kinematics import RigidWagonKinematics
-            from model.wagon import create_simple_wagon
+            from model.wagon import create_simple_wagon, Consist
 
-            # D4: 使用刚体车厢运动学（替代质点模型）
-            wagon_config = create_simple_wagon(length=20.0, mass=50.0)
-            self.debug_train_kinematics = RigidWagonKinematics(self.network, path, wagon_config)
-            self.debug_train_physics = SimplePhysics()  # 无状态，只需创建实例
+            # 阶段 2 测试：1 节动力车 + 2 节拖车
+            locomotive = create_simple_wagon(length=20.0, mass=50.0, P_rated=3000.0)  # 动力车
+            coach1 = create_simple_wagon(length=18.0, mass=45.0, P_rated=None)        # 拖车
+            coach2 = create_simple_wagon(length=22.0, mass=60.0, P_rated=None)        # 拖车
+            consist = Consist(wagons=[locomotive, coach1, coach2])
+            self.debug_train_kinematics = RigidWagonKinematics(self.network, path, consist)
+            self.debug_train_physics = RealisticElectric()  # 阶段 2：Wagon 级别物理
+            self.debug_train_consist = consist  # 保存引用，传给物理层
             self.debug_train_s = 0.0
             self.debug_train_v = 0.0
             self.debug_train_a = 0.0
@@ -402,7 +405,7 @@ class GameLoop:
             # 相机跟随（A1）
             self.camera.follow_enabled = True
             print(f"  → Debug 列车已启动，路径总长 {self.debug_train_kinematics.total_length:.2f} m")
-            print(f"  → 车厢: 长度={wagon_config.length}m, 转向架间距={wagon_config.bogie_spacing}m")
+            print(f"  → 编组: {len(consist.wagons)} 节车厢，总质量 {consist.total_mass:.1f} 吨，总长 {consist.total_length:.1f} m")
             print(f"  → 控制：方向键 ↑ 加速，↓ 制动，空格 重置")
             print(f"  → 相机自动跟随（拖动暂停，C 键切换）")
 

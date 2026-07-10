@@ -584,10 +584,10 @@ def draw_debug_train(
     kinematics,  # PathKinematics 或 RigidWagonKinematics
     s: float,
 ) -> None:
-    """绘制 debug 列车：质点（方块+箭头）或刚体车厢（两转向架+连线）。
+    """绘制 debug 列车：质点（方块+箭头）或刚体车厢（多节转向架+连线）。
 
     - 质点模型（PathKinematics）: 橙色方块 + heading 箭头
-    - 刚体模型（RigidWagonKinematics）: 两个转向架圆圈 + 连线（线框）
+    - 刚体模型（RigidWagonKinematics）: 所有转向架圆圈 + 连线（线框）
     """
     if kinematics is None:
         return
@@ -596,26 +596,58 @@ def draw_debug_train(
     h = surface.get_height()
 
     # 判断运动学类型（duck typing）
-    is_rigid = hasattr(kinematics, 'get_bogie_poses')
+    is_rigid = hasattr(kinematics, 'get_all_bogie_poses')
 
     if is_rigid:
-        # D5: 刚体车厢可视化（两转向架 + 连线）
-        front_pose, rear_pose = kinematics.get_bogie_poses(s)
+        # D6: 多节编组可视化（循环绘制所有车厢）
+        bogie_pairs = kinematics.get_all_bogie_poses(s)
+        wagon_poses = kinematics.get_all_wagon_poses(s)
+        consist = kinematics.consist
 
-        # 转向架位置转屏幕坐标
-        fx, fy = camera.world_to_screen(front_pose.position.x, front_pose.position.y, w, h)
-        rx, ry = camera.world_to_screen(rear_pose.position.x, rear_pose.position.y, w, h)
+        for i, ((front_pose, rear_pose), wagon_pose) in enumerate(zip(bogie_pairs, wagon_poses)):
+            wagon_config = consist.wagons[i]
 
-        # 连线（车厢主体）
-        pygame.draw.line(surface, COLOR_TRAIN, (int(fx), int(fy)), (int(rx), int(ry)), 3)
+            # 车厢外轮廓（长方形）
+            wagon_length = wagon_config.length - 1.0  # 减去车钩长度
+            wagon_width = 3.0  # ponytail: 固定宽度，WagonConfig 未定义该字段
 
-        # 前转向架（绿色圆圈）
-        pygame.draw.circle(surface, (60, 220, 100), (int(fx), int(fy)), 5)
-        pygame.draw.circle(surface, (255, 255, 255), (int(fx), int(fy)), 5, 1)
+            pos = wagon_pose.position
+            heading = wagon_pose.heading
+            right = Vec3(-heading.y, heading.x, 0.0)  # 2D 右手系垂直方向
 
-        # 后转向架（红色圆圈）
-        pygame.draw.circle(surface, (255, 60, 60), (int(rx), int(ry)), 5)
-        pygame.draw.circle(surface, (255, 255, 255), (int(rx), int(ry)), 5, 1)
+            # 4 个角点（世界坐标）
+            half_len = wagon_length / 2.0
+            half_wid = wagon_width / 2.0
+            corners_world = [
+                pos + heading * half_len + right * half_wid,   # 前左
+                pos + heading * half_len - right * half_wid,   # 前右
+                pos - heading * half_len - right * half_wid,   # 后右
+                pos - heading * half_len + right * half_wid,   # 后左
+            ]
+
+            # 转屏幕坐标
+            corners_screen = [
+                camera.world_to_screen(c.x, c.y, w, h) for c in corners_world
+            ]
+            corners_screen = [(int(x), int(y)) for x, y in corners_screen]
+
+            # 绘制轮廓（线框）
+            pygame.draw.polygon(surface, COLOR_TRAIN, corners_screen, 2)
+
+            # 转向架位置转屏幕坐标
+            fx, fy = camera.world_to_screen(front_pose.position.x, front_pose.position.y, w, h)
+            rx, ry = camera.world_to_screen(rear_pose.position.x, rear_pose.position.y, w, h)
+
+            # 连线（车厢中心线）
+            pygame.draw.line(surface, COLOR_TRAIN, (int(fx), int(fy)), (int(rx), int(ry)), 1)
+
+            # 前转向架（绿色圆圈）
+            pygame.draw.circle(surface, (60, 220, 100), (int(fx), int(fy)), 5)
+            pygame.draw.circle(surface, (255, 255, 255), (int(fx), int(fy)), 5, 1)
+
+            # 后转向架（红色圆圈）
+            pygame.draw.circle(surface, (255, 60, 60), (int(rx), int(ry)), 5)
+            pygame.draw.circle(surface, (255, 255, 255), (int(rx), int(ry)), 5, 1)
 
     else:
         # 质点模型可视化（原有方块+箭头）
