@@ -25,10 +25,12 @@ without asking.
 ```
 model/       Pure data + geometry, no view/controller deps
   vec3.py            Vec3 (3D arithmetic)
-  rail_network.py    Node, Edge, RailNetwork (graph + connectivity + split_edge_at)
+  rail_network.py    Node, Edge, RailNetwork (graph + connectivity + split_edge_at + turn_allowed)
   geom_utils.py      All geometry: projections, tangents, solve_case2_arc,
                      solve_biarc, merge predicates, split_arc_b_points
   geojson_loader.py  / geojson_writer.py — round-trip-safe arc serialization
+  pathfinding.py     Edge-based Dijkstra, Path dataclass, turn_allowed integration
+  spatial_index.py   Tile-based spatial index (340× speedup, 60fps保障)
 
 view/        pygame-ce rendering only
   camera.py          World→screen mapping, pan/zoom
@@ -126,13 +128,37 @@ on load — round-trip is bit-stable for arc geometry within 1e-4.
 | `Esc` | other | Switch to IDLE |
 | Right click | BUILD_ACTIVE | Cancel current build (same as Esc) |
 | `Q` | any | Quit program |
+| `S` | any | Save network to manual_track.geojson (loaded on startup if exists) |
+| `F` | any | Toggle pathfinding test mode (debug) |
+| `I` | any | Toggle spatial index visualization (debug) |
 | `LSHIFT` (held) | BUILD_ACTIVE | Force straight along T1 |
 | `LALT` (held) | BUILD_ACTIVE | Force Case 2T single-tangent arc (M2 path-snap to straight edge) |
 | Left/Right/Middle drag | IDLE | Pan camera |
 | Middle drag | BUILD/DELETE | Pan camera |
+| Left click | Pathfinding test | Select start/goal nodes (F mode) |
 | Scroll | any | Zoom |
 
 Modifier keys are polled per frame in `GameLoop._sync_modifiers`, not edge-triggered.
+
+## Pathfinding (转向许可与寻路)
+
+**Turn permission** (`RailNetwork.turn_allowed`): 几何自动推断,无需道岔配置。
+判据为**前进半平面**——到达节点的行进方向 `d_in` 与离开方向 `d_out` 夹角
+严格 < 90°(`d_in · d_out > 0`)。这样直通(0°)和缓分股(~32°)许可,发卡弯
+(~148°)、正交(90°)、掉头(180°)禁止。初版用 cos(150°) 阈值,交叉渡线的
+4 联通点会误判 148° 发卡弯为许可(dot=-0.847 通过 >=-0.866),改为前进半平面
+后彻底修复(合法/非法两侧余量极大:32° vs 148°)。
+
+**Pathfinding** (`model/pathfinding.py`): Edge-based Dijkstra。搜索状态 =
+有向边 `(edge_id, dir)`,`dir ∈ {+1, -1}`(+1 沿 node_a→node_b,-1 反向)。
+邻接由 `turn_allowed` 决定,代价/可通行走 `cost_fn`/`passable_fn` 钩子
+(信号层以后注入约束,不返工)。`Path` dataclass = 有向边序列 + total_cost,
+就是给运动学层的契约。`find_path_between_nodes` 是节点间寻路入口,枚举
+所有出发有向边取最短。
+
+**Debug 测试**(F 键叠加态): 左键依次点选两节点 → 自动求路 → 控制台打印
+段数/总长/有向边序列;第三次点击重置。可视化:起点绿圈/终点红圈,路径橙色
+加粗,每段中点顺序编号 1,2,3…。
 
 ## Working with `docs/editor.md`
 
