@@ -131,6 +131,10 @@ on load — round-trip is bit-stable for arc geometry within 1e-4.
 | `S` | any | Save network to manual_track.geojson (loaded on startup if exists) |
 | `F` | any | Toggle pathfinding test mode (debug) |
 | `I` | any | Toggle spatial index visualization (debug) |
+| `C` | any | Toggle camera follow (train tracking) |
+| `Space` | Train active | Reset train to path start (s=0, v=0) |
+| `↑` | Train active | Throttle (accelerate) |
+| `↓` | Train active | Brake (decelerate) |
 | `LSHIFT` (held) | BUILD_ACTIVE | Force straight along T1 |
 | `LALT` (held) | BUILD_ACTIVE | Force Case 2T single-tangent arc (M2 path-snap to straight edge) |
 | Left/Right/Middle drag | IDLE | Pan camera |
