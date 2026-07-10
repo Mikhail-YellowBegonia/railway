@@ -128,7 +128,7 @@ class GameLoop:
             self.renderer.draw_overlay(self.network, self.editor, mouse_world)
             # 寻路测试可视化（F 键叠加态）
             if self.pathtest_enabled:
-                from view.renderer import draw_pathfinding_debug, draw_debug_train
+                from view.renderer import draw_pathfinding_debug, draw_debug_train, draw_train_hud
                 draw_pathfinding_debug(
                     self.renderer.surface,
                     self.camera,
@@ -145,6 +145,15 @@ class GameLoop:
                         self.camera,
                         self.debug_train_kinematics,
                         self.debug_train_s,
+                    )
+                    # 列车状态 HUD（A2）
+                    draw_train_hud(
+                        self.renderer.surface,
+                        self.renderer._font,
+                        self.debug_train_s,
+                        self.debug_train_v,
+                        self.debug_train_a,
+                        self.debug_train_kinematics.total_length,
                     )
             pygame.display.flip()
             self.clock.tick(60)

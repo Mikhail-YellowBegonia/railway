@@ -627,3 +627,41 @@ def draw_debug_train(
         [(int(ax), int(ay)), (int(tip1_x), int(tip1_y)), (int(tip2_x), int(tip2_y))],
     )
 
+
+def draw_train_hud(
+    surface: pygame.Surface,
+    font: pygame.font.Font,
+    s: float,
+    v: float,
+    a: float,
+    total_length: float,
+) -> None:
+    """绘制列车状态 HUD（A2 交互优化）：速度、弧长、加速度。
+
+    显示在屏幕左上角，半透明黑色背景 + 白色文本。
+    """
+    # HUD 内容
+    v_kmh = v * 3.6  # m/s → km/h
+    lines = [
+        f"速度: {v_kmh:6.1f} km/h",
+        f"弧长: {s:7.1f} / {total_length:.1f} m",
+        f"加速度: {a:+5.2f} m/s²",
+    ]
+
+    # 文本渲染
+    line_height = 20
+    padding = 8
+    bg_width = 220
+    bg_height = len(lines) * line_height + padding * 2
+
+    # 半透明背景
+    bg_surface = pygame.Surface((bg_width, bg_height))
+    bg_surface.set_alpha(180)  # 半透明
+    bg_surface.fill((20, 20, 20))  # 深灰色
+    surface.blit(bg_surface, (10, 10))
+
+    # 文本
+    for i, line in enumerate(lines):
+        text = font.render(line, True, (255, 255, 255))
+        surface.blit(text, (10 + padding, 10 + padding + i * line_height))
+
