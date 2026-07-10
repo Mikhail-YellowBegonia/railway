@@ -581,13 +581,13 @@ COLOR_TRAIN_HEADING = (255, 220, 80)  # heading 箭头（亮黄）
 def draw_debug_train(
     surface: pygame.Surface,
     camera: Camera,
-    kinematics,  # PathKinematics
+    kinematics,  # PathKinematics 或 RigidWagonKinematics
     s: float,
 ) -> None:
-    """绘制 debug 列车（需求 D）：沿路径移动的方块 + heading 箭头。
+    """绘制 debug 列车：质点（方块+箭头）或刚体车厢（两转向架+连线）。
 
-    - 橙色方块标识列车位置
-    - 亮黄色箭头指示 heading 方向
+    - 质点模型（PathKinematics）: 橙色方块 + heading 箭头
+    - 刚体模型（RigidWagonKinematics）: 两个转向架圆圈 + 连线（线框）
     """
     if kinematics is None:
         return
@@ -595,37 +595,61 @@ def draw_debug_train(
     w = surface.get_width()
     h = surface.get_height()
 
-    pose = kinematics.pose_at(s)
-    pos = pose.position
-    heading = pose.heading
+    # 判断运动学类型（duck typing）
+    is_rigid = hasattr(kinematics, 'get_bogie_poses')
 
-    # 世界坐标转屏幕
-    cx, cy = camera.world_to_screen(pos.x, pos.y, w, h)
+    if is_rigid:
+        # D5: 刚体车厢可视化（两转向架 + 连线）
+        front_pose, rear_pose = kinematics.get_bogie_poses(s)
 
-    # 画方块（10×10 像素）
-    rect = pygame.Rect(int(cx - 5), int(cy - 5), 10, 10)
-    pygame.draw.rect(surface, COLOR_TRAIN, rect)
-    pygame.draw.rect(surface, (255, 255, 255), rect, 1)  # 白色边框
+        # 转向架位置转屏幕坐标
+        fx, fy = camera.world_to_screen(front_pose.position.x, front_pose.position.y, w, h)
+        rx, ry = camera.world_to_screen(rear_pose.position.x, rear_pose.position.y, w, h)
 
-    # 画 heading 箭头（从方块中心指出 20 像素）
-    arrow_len_world = 5.0  # 世界单位
-    arrow_end_world = pos + heading * arrow_len_world
-    ax, ay = camera.world_to_screen(arrow_end_world.x, arrow_end_world.y, w, h)
-    pygame.draw.line(surface, COLOR_TRAIN_HEADING, (int(cx), int(cy)), (int(ax), int(ay)), 3)
+        # 连线（车厢主体）
+        pygame.draw.line(surface, COLOR_TRAIN, (int(fx), int(fy)), (int(rx), int(ry)), 3)
 
-    # 箭头尖端（简单三角形）
-    import math
-    angle = math.atan2(ay - cy, ax - cx)
-    tip_size = 8
-    tip1_x = ax - tip_size * math.cos(angle - 2.7)
-    tip1_y = ay - tip_size * math.sin(angle - 2.7)
-    tip2_x = ax - tip_size * math.cos(angle + 2.7)
-    tip2_y = ay - tip_size * math.sin(angle + 2.7)
-    pygame.draw.polygon(
-        surface,
-        COLOR_TRAIN_HEADING,
-        [(int(ax), int(ay)), (int(tip1_x), int(tip1_y)), (int(tip2_x), int(tip2_y))],
-    )
+        # 前转向架（绿色圆圈）
+        pygame.draw.circle(surface, (60, 220, 100), (int(fx), int(fy)), 5)
+        pygame.draw.circle(surface, (255, 255, 255), (int(fx), int(fy)), 5, 1)
+
+        # 后转向架（红色圆圈）
+        pygame.draw.circle(surface, (255, 60, 60), (int(rx), int(ry)), 5)
+        pygame.draw.circle(surface, (255, 255, 255), (int(rx), int(ry)), 5, 1)
+
+    else:
+        # 质点模型可视化（原有方块+箭头）
+        pose = kinematics.pose_at(s)
+        pos = pose.position
+        heading = pose.heading
+
+        # 世界坐标转屏幕
+        cx, cy = camera.world_to_screen(pos.x, pos.y, w, h)
+
+        # 画方块（10×10 像素）
+        rect = pygame.Rect(int(cx - 5), int(cy - 5), 10, 10)
+        pygame.draw.rect(surface, COLOR_TRAIN, rect)
+        pygame.draw.rect(surface, (255, 255, 255), rect, 1)  # 白色边框
+
+        # 画 heading 箭头（从方块中心指出 20 像素）
+        arrow_len_world = 5.0  # 世界单位
+        arrow_end_world = pos + heading * arrow_len_world
+        ax, ay = camera.world_to_screen(arrow_end_world.x, arrow_end_world.y, w, h)
+        pygame.draw.line(surface, COLOR_TRAIN_HEADING, (int(cx), int(cy)), (int(ax), int(ay)), 3)
+
+        # 箭头尖端（简单三角形）
+        import math
+        angle = math.atan2(ay - cy, ax - cx)
+        tip_size = 8
+        tip1_x = ax - tip_size * math.cos(angle - 2.7)
+        tip1_y = ay - tip_size * math.sin(angle - 2.7)
+        tip2_x = ax - tip_size * math.cos(angle + 2.7)
+        tip2_y = ay - tip_size * math.sin(angle + 2.7)
+        pygame.draw.polygon(
+            surface,
+            COLOR_TRAIN_HEADING,
+            [(int(ax), int(ay)), (int(tip1_x), int(tip1_y)), (int(tip2_x), int(tip2_y))],
+        )
 
 
 def draw_train_hud(
