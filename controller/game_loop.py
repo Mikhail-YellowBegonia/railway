@@ -57,10 +57,14 @@ class GameLoop:
         self.pathtest_goal_node: int | None = None
         self.pathtest_path = None  # model.pathfinding.Path | None
 
-        # Debug 列车（需求 D）：算出 Path 后自动启动，沿路径以固定速度移动
+        # Debug 列车（需求 D + 物理层）：算出 Path 后自动启动
         self.debug_train_active = False
         self.debug_train_kinematics = None  # model.kinematics.PathKinematics | None
-        self.debug_train_physics = None     # model.train_physics.SimplePhysics | None
+        self.debug_train_physics = None     # model.train_physics.TrainPhysics | None
+        # 列车状态（由 GameLoop 管理，物理层只计算加速度）
+        self.debug_train_s = 0.0  # 弧长（米）
+        self.debug_train_v = 0.0  # 速度（m/s）
+        self.debug_train_a = 0.0  # 加速度（m/s²）
 
     def run(self) -> None:
         while self.running:
@@ -70,27 +74,34 @@ class GameLoop:
             # 每帧同步键盘修饰键状态到 Editor（force_straight 等）
             self._sync_modifiers()
 
-            # 更新 debug 列车（物理层）
+            # 更新 debug 列车（物理层 + 状态积分）
             if self.debug_train_active and self.debug_train_physics is not None:
                 # 方向键控制油门/制动（临时交互，AI 调度前）
                 keys = pygame.key.get_pressed()
                 if keys[pygame.K_UP]:
-                    self.debug_train_physics.apply_throttle(1.0)
-                    self.debug_train_physics.apply_brake(0.0)
+                    throttle, brake = 1.0, 0.0
                 elif keys[pygame.K_DOWN]:
-                    self.debug_train_physics.apply_throttle(0.0)
-                    self.debug_train_physics.apply_brake(1.0)
+                    throttle, brake = 0.0, 1.0
                 else:
-                    # 松开：惰行
-                    self.debug_train_physics.apply_throttle(0.0)
-                    self.debug_train_physics.apply_brake(0.0)
+                    throttle, brake = 0.0, 0.0  # 惰行
 
                 dt = self.clock.get_time() / 1000.0
-                self.debug_train_physics.update(dt)
-                s, v, a = self.debug_train_physics.get_state()
+
+                # 物理层：计算加速度（无状态）
+                self.debug_train_a = self.debug_train_physics.compute_acceleration(
+                    self.debug_train_v, throttle, brake
+                )
+
+                # 状态积分：v 和 s 的欧拉更新
+                self.debug_train_v += self.debug_train_a * dt
+                self.debug_train_v = max(0.0, min(self.debug_train_v, self.debug_train_physics.v_max))
+                self.debug_train_s += self.debug_train_v * dt
+                self.debug_train_s = max(0.0, min(self.debug_train_s, self.debug_train_kinematics.total_length))
 
                 # 到达终点停止
-                if s >= self.debug_train_kinematics.total_length:
+                if self.debug_train_s >= self.debug_train_kinematics.total_length:
+                    self.debug_train_v = 0.0
+                    self.debug_train_a = 0.0
                     self.debug_train_active = False
 
             mouse_world = self._mouse_world_pos()
@@ -124,12 +135,11 @@ class GameLoop:
                 )
                 # Debug 列车（需求 D）
                 if self.debug_train_active and self.debug_train_physics:
-                    s, v, a = self.debug_train_physics.get_state()
                     draw_debug_train(
                         self.renderer.surface,
                         self.camera,
                         self.debug_train_kinematics,
-                        s,
+                        self.debug_train_s,
                     )
             pygame.display.flip()
             self.clock.tick(60)
@@ -298,6 +308,9 @@ class GameLoop:
         self.debug_train_active = False
         self.debug_train_kinematics = None
         self.debug_train_physics = None
+        self.debug_train_s = 0.0
+        self.debug_train_v = 0.0
+        self.debug_train_a = 0.0
 
     def _snap_node_at(self, world_pos: Vec3) -> int | None:
         """复用编辑器吸附系统，返回点击命中的节点 ID（未命中节点返回 None）。"""
@@ -341,15 +354,15 @@ class GameLoop:
                 f"寻路测试：节点 {self.pathtest_start_node} → {node_id} "
                 f"共 {len(path.edges)} 段，总长 {path.total_cost:.2f}\n  {seq}"
             )
-            # 自动启动 debug 列车（物理层）
+            # 自动启动 debug 列车（物理层 + 状态初始化）
             from model.kinematics import PathKinematics
             from model.train_physics import SimplePhysics
 
             self.debug_train_kinematics = PathKinematics(self.network, path)
-            self.debug_train_physics = SimplePhysics(
-                path_length=self.debug_train_kinematics.total_length,
-                initial_s=0.0,
-            )
+            self.debug_train_physics = SimplePhysics()  # 无状态，只需创建实例
+            self.debug_train_s = 0.0
+            self.debug_train_v = 0.0
+            self.debug_train_a = 0.0
             self.debug_train_active = True
             print(f"  → Debug 列车已启动，路径总长 {self.debug_train_kinematics.total_length:.2f} m")
             print(f"  → 控制：方向键 ↑ 加速，↓ 制动")
