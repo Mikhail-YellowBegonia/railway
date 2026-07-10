@@ -57,6 +57,12 @@ class GameLoop:
         self.pathtest_goal_node: int | None = None
         self.pathtest_path = None  # model.pathfinding.Path | None
 
+        # Debug 列车（需求 D）：算出 Path 后自动启动，沿路径以固定速度移动
+        self.debug_train_active = False
+        self.debug_train_s = 0.0          # 当前弧长（米）
+        self.debug_train_speed = 10.0     # 固定速度（m/s），物理层 placeholder
+        self.debug_train_kinematics = None  # model.kinematics.PathKinematics | None
+
     def run(self) -> None:
         while self.running:
             for event in pygame.event.get():
@@ -64,6 +70,15 @@ class GameLoop:
 
             # 每帧同步键盘修饰键状态到 Editor（force_straight 等）
             self._sync_modifiers()
+
+            # 更新 debug 列车位置
+            if self.debug_train_active and self.debug_train_kinematics is not None:
+                dt = self.clock.get_time() / 1000.0  # 秒
+                self.debug_train_s += self.debug_train_speed * dt
+                # 到达终点停止
+                if self.debug_train_s >= self.debug_train_kinematics.total_length:
+                    self.debug_train_s = self.debug_train_kinematics.total_length
+                    self.debug_train_active = False
 
             mouse_world = self._mouse_world_pos()
             self.editor.update_hover(mouse_world)
@@ -84,7 +99,7 @@ class GameLoop:
             self.renderer.draw_overlay(self.network, self.editor, mouse_world)
             # 寻路测试可视化（F 键叠加态）
             if self.pathtest_enabled:
-                from view.renderer import draw_pathfinding_debug
+                from view.renderer import draw_pathfinding_debug, draw_debug_train
                 draw_pathfinding_debug(
                     self.renderer.surface,
                     self.camera,
@@ -94,6 +109,14 @@ class GameLoop:
                     self.pathtest_goal_node,
                     self.pathtest_path,
                 )
+                # Debug 列车（需求 D）
+                if self.debug_train_active:
+                    draw_debug_train(
+                        self.renderer.surface,
+                        self.camera,
+                        self.debug_train_kinematics,
+                        self.debug_train_s,
+                    )
             pygame.display.flip()
             self.clock.tick(60)
 
@@ -257,6 +280,9 @@ class GameLoop:
         self.pathtest_start_node = None
         self.pathtest_goal_node = None
         self.pathtest_path = None
+        # 重置时停止 debug 列车
+        self.debug_train_active = False
+        self.debug_train_kinematics = None
 
     def _snap_node_at(self, world_pos: Vec3) -> int | None:
         """复用编辑器吸附系统，返回点击命中的节点 ID（未命中节点返回 None）。"""
@@ -290,12 +316,21 @@ class GameLoop:
             print(
                 f"寻路测试：节点 {self.pathtest_start_node} → {node_id} 不可达"
             )
+            # 不可达，停止 debug 列车
+            self.debug_train_active = False
+            self.debug_train_kinematics = None
         else:
             seq = " → ".join(f"e{eid}({'+' if d > 0 else '-'})" for eid, d in path.edges)
             print(
                 f"寻路测试：节点 {self.pathtest_start_node} → {node_id} "
                 f"共 {len(path.edges)} 段，总长 {path.total_cost:.2f}\n  {seq}"
             )
+            # 自动启动 debug 列车
+            from model.kinematics import PathKinematics
+            self.debug_train_kinematics = PathKinematics(self.network, path)
+            self.debug_train_s = 0.0
+            self.debug_train_active = True
+            print(f"  → Debug 列车已启动，路径总长 {self.debug_train_kinematics.total_length:.2f} m")
 
 
 def run_game(geo_path: str) -> None:

@@ -572,3 +572,58 @@ def draw_pathfinding_debug(
         label = font.render(str(order), True, COLOR_PATH_LABEL)
         surface.blit(label, (int(mid[0]) + 4, int(mid[1]) - 8))
 
+
+# Debug 列车可视化配色
+COLOR_TRAIN = (255, 140, 0)          # 列车方块（橙）
+COLOR_TRAIN_HEADING = (255, 220, 80)  # heading 箭头（亮黄）
+
+
+def draw_debug_train(
+    surface: pygame.Surface,
+    camera: Camera,
+    kinematics,  # PathKinematics
+    s: float,
+) -> None:
+    """绘制 debug 列车（需求 D）：沿路径移动的方块 + heading 箭头。
+
+    - 橙色方块标识列车位置
+    - 亮黄色箭头指示 heading 方向
+    """
+    if kinematics is None:
+        return
+
+    w = surface.get_width()
+    h = surface.get_height()
+
+    pose = kinematics.pose_at(s)
+    pos = pose.position
+    heading = pose.heading
+
+    # 世界坐标转屏幕
+    cx, cy = camera.world_to_screen(pos.x, pos.y, w, h)
+
+    # 画方块（10×10 像素）
+    rect = pygame.Rect(int(cx - 5), int(cy - 5), 10, 10)
+    pygame.draw.rect(surface, COLOR_TRAIN, rect)
+    pygame.draw.rect(surface, (255, 255, 255), rect, 1)  # 白色边框
+
+    # 画 heading 箭头（从方块中心指出 20 像素）
+    arrow_len_world = 5.0  # 世界单位
+    arrow_end_world = pos + heading * arrow_len_world
+    ax, ay = camera.world_to_screen(arrow_end_world.x, arrow_end_world.y, w, h)
+    pygame.draw.line(surface, COLOR_TRAIN_HEADING, (int(cx), int(cy)), (int(ax), int(ay)), 3)
+
+    # 箭头尖端（简单三角形）
+    import math
+    angle = math.atan2(ay - cy, ax - cx)
+    tip_size = 8
+    tip1_x = ax - tip_size * math.cos(angle - 2.7)
+    tip1_y = ay - tip_size * math.sin(angle - 2.7)
+    tip2_x = ax - tip_size * math.cos(angle + 2.7)
+    tip2_y = ay - tip_size * math.sin(angle + 2.7)
+    pygame.draw.polygon(
+        surface,
+        COLOR_TRAIN_HEADING,
+        [(int(ax), int(ay)), (int(tip1_x), int(tip1_y)), (int(tip2_x), int(tip2_y))],
+    )
+
