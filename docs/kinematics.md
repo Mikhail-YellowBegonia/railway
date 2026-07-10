@@ -35,3 +35,86 @@ Wagon:{
 不过这里存在一个问题，该计算必须按顺序逐步进行，这使得车厢位置的计算成为了关于列车编组长度呈O(2n)的方法，需要警惕性能问题。
 
 上述内容均为预先构想，需经过充分研讨与修改，方可实施。
+
+针对D1-D6的补充意见：
+
+## D1 数据结构与元数据
+
+```伪代码
+length: float # 用于碰撞判定和boundary计算，是车钩中心距
+mass: float
+
+bogie:{
+id: int # 应有至少2个bogie
+geometric_role: enum (front/rear/mid) # 转向架个数溢出时，front和rear参与几何计算，mid不参与
+load_share: float (0~1) # 载荷权重，是一个比例值。没有写死，因为如果车厢载货，货物也算重量
+axle_dummy: int (0) # 无动力车轴数量。
+axle_powered: int (2) # 有动力车轴数量。目前来讲不讨论车轴属性，所以暂时没用
+...
+bogie_property: enum # 此处填入该转向架的物理性质类型，作为车厢元数据的一部分，传给物理逻辑
+pos: float # 此处描述转向架在车厢轴线上的位置，相减得到间距
+}
+
+engine_property: enum # 此处填入该机车（如是）的物理性质类型，作为车厢元数据的一部分，传给物理逻辑
+coupler_1_pos: float (0) # 以前端车钩为原点，符合业务习惯，同时用于后续图形对齐
+coupler_2_pos: float (length) # 用这些pos加减，可以求出两节车厢间的转向架距离
+```
+
+用东风4B型机车举例：
+
+```
+# 轴式：Co-Co (两台三轴转向架，共6根动力轴)
+
+length: 21.1 # 米（符合游戏内标准）
+mass: 138.0  # 吨（业务习惯）
+
+bogies:
+  - id: 1
+    geometric_role: front
+    load_share: 0.5
+    axle_dummy: 0
+    axle_powered: 3
+    bogie_property: heavy_electric # 电动机驱动的，名称仅供参考
+    pos: 4.5
+
+  - id: 2
+    geometric_role: rear
+    load_share: 0.5
+    axle_dummy: 0
+    axle_powered: 3
+    bogie_property: heavy_electric
+    pos: 16.6
+
+engine_property: diesel_electric # 内燃电传动，名称仅供参考
+coupler_1_pos: 0.0
+coupler_2_pos: 21.1
+```
+
+我同意你对TrainState的定义，但是`List[TrainState]`并不合适，velocity等属性重复了，因此使用`Consist`类作。
+这是处于两层考虑，一方面列车是一个整体，这样挺合理。另一方面，物理等逻辑可能需要全列车统一结算，特别是存在多个机车时。
+也有三个顾虑，一是过度抽象不是好事，二是计算量和复杂度上升了，三是不同车厢接受的弧长等传入并不相同，这块不能放到`Consist`类中
+
+每个转向架、车厢的速度应当是一致的
+我们就完全没定义车钩连接约束，因此车钩在几何上不产生约束和影响。这不意味后续不添加车钩相关的物理逻辑。至少目前，Coupler毫无意义。
+
+## D2 弧长/割线求解器
+一方面，合理的弧形铁轨，曲率很小。另一方面，一阶展开后余项误差已经到厘米级了，可接受。
+原本我们要使用反三角函数：
+$$\Delta s = 2R \arcsin\left(\frac{l}{2R}\right)$$
+我们直接使用粗糙的：
+$$\Delta s = l + \frac{l^3}{24R^2}$$
+就完全够用了，而且计算开销也能接受。
+
+## D3 车厢位姿计算
+这里的问题已经解答了，逻辑原点是前车钩。
+但是我们在绘制图形的时候显然有另一套标准，使用前后转向架连线的中点作为原点，连线方向作为朝向。
+图形素材在制作时也是以此为依据。
+
+## D4 物理层集成
+没有太听懂关于这个问题的讨论，请进一步讲解
+
+## D5 可视化
+做最简单的可视化即可，不要使用实心图形，这样方便debug
+
+## D6 多节编组
+认可你的方案，O(2n) 性能仍然存在，如果有更好的方法欢迎提出，至少目前不是最优先的
