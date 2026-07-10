@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import os
 
 import pygame
 
@@ -13,6 +14,9 @@ from controller.editor import Editor, EditMode, BuildState
 
 WINDOW_W = 1024
 WINDOW_H = 768
+
+# 固定存档文件名：S 键保存到此，启动时若存在则优先加载（方便反复启停调试）。
+SAVE_PATH = "manual_track.geojson"
 
 # 平移触发集：IDLE 模式下左/右/中键都可平移；其它模式仅中键
 PAN_BUTTONS_IDLE = {1, 2, 3}
@@ -27,7 +31,12 @@ class GameLoop:
         self.clock = pygame.time.Clock()
         self.camera = Camera()
         self.renderer = Renderer(self.surface, self.camera)
-        self.network: RailNetwork = load_geojson(geo_path)
+        # 优先加载固定存档，不存在则加载传入的默认地图
+        if os.path.exists(SAVE_PATH):
+            self.network = load_geojson(SAVE_PATH)
+            print(f"已加载存档 {SAVE_PATH}（{len(self.network.edges)} 条边）")
+        else:
+            self.network = load_geojson(geo_path)
         self.editor = Editor(self.network)
         self.running = True
 
@@ -40,6 +49,13 @@ class GameLoop:
 
         # 空间索引可视化开关（I 键切换）
         self.debug_show_tiles = False
+
+        # 寻路测试叠加态（F 键切换）：不参与编辑器状态机，独立于 EditMode。
+        # 依次点选两个吸附到的节点求最短路径，第三次点击重置。
+        self.pathtest_enabled = False
+        self.pathtest_start_node: int | None = None
+        self.pathtest_goal_node: int | None = None
+        self.pathtest_path = None  # model.pathfinding.Path | None
 
     def run(self) -> None:
         while self.running:
@@ -66,6 +82,18 @@ class GameLoop:
                 )
             self.renderer.draw_network(self.network, self.editor)
             self.renderer.draw_overlay(self.network, self.editor, mouse_world)
+            # 寻路测试可视化（F 键叠加态）
+            if self.pathtest_enabled:
+                from view.renderer import draw_pathfinding_debug
+                draw_pathfinding_debug(
+                    self.renderer.surface,
+                    self.camera,
+                    self.network,
+                    self.renderer._font,
+                    self.pathtest_start_node,
+                    self.pathtest_goal_node,
+                    self.pathtest_path,
+                )
             pygame.display.flip()
             self.clock.tick(60)
 
@@ -127,15 +155,21 @@ class GameLoop:
             # P 键切换平行吸附(Simple/Complex Case)；独立开关
             self.editor.parallel_snap_enabled = not self.editor.parallel_snap_enabled
         elif event.key == pygame.K_s:
-            # S 键保存当前路网到 manual_track.geojson（临时持久化功能）
+            # S 键保存当前路网到固定存档（启动时会优先加载它）
             from model.geojson_writer import write_geojson
-            write_geojson(self.editor.network, "manual_track.geojson")
-            print(f"已保存 {len(self.editor.network.edges)} 条边到 manual_track.geojson")
+            write_geojson(self.editor.network, SAVE_PATH)
+            print(f"已保存 {len(self.editor.network.edges)} 条边到 {SAVE_PATH}")
         elif event.key == pygame.K_i:
             # I 键切换空间索引可视化（debug 用）
             self.debug_show_tiles = not self.debug_show_tiles
             status = "开启" if self.debug_show_tiles else "关闭"
             print(f"空间索引可视化: {status}")
+        elif event.key == pygame.K_f:
+            # F 键切换寻路测试叠加态（debug 用）
+            self.pathtest_enabled = not self.pathtest_enabled
+            self._reset_pathtest()
+            status = "开启" if self.pathtest_enabled else "关闭"
+            print(f"寻路测试: {status}（点选起点、终点两个节点）")
 
     def _handle_mouse_down(self, event: pygame.event.Event) -> None:
         # 滚轮先处理（不参与平移逻辑）
@@ -151,6 +185,11 @@ class GameLoop:
             and self.editor.build_state == BuildState.ACTIVE
         ):
             self.editor.handle_cancel()
+            return
+
+        # 寻路测试态：左键专用于选点，优先于平移拦截（否则 IDLE 下左键会被平移分支吃掉）
+        if event.button == 1 and self.pathtest_enabled:
+            self._pathtest_click(self._mouse_world_pos())
             return
 
         pan_buttons = self._pan_buttons_for_mode()
@@ -211,6 +250,52 @@ class GameLoop:
             self.surface.get_height(),
         )
         return Vec3(wx, wy, 0.0)
+
+    # ===== 寻路测试（F 键叠加态，debug） =====
+
+    def _reset_pathtest(self) -> None:
+        self.pathtest_start_node = None
+        self.pathtest_goal_node = None
+        self.pathtest_path = None
+
+    def _snap_node_at(self, world_pos: Vec3) -> int | None:
+        """复用编辑器吸附系统，返回点击命中的节点 ID（未命中节点返回 None）。"""
+        snap = self.editor._snap(world_pos)
+        return snap.snapped_node_id
+
+    def _pathtest_click(self, world_pos: Vec3) -> None:
+        from model.pathfinding import find_path_between_nodes
+
+        # 已有完整结果 → 第三次点击重置，重新开始
+        if self.pathtest_start_node is not None and self.pathtest_goal_node is not None:
+            self._reset_pathtest()
+
+        node_id = self._snap_node_at(world_pos)
+        if node_id is None:
+            print("寻路测试：未点中节点（请点选轨道节点）")
+            return
+
+        if self.pathtest_start_node is None:
+            self.pathtest_start_node = node_id
+            print(f"寻路测试：起点 = 节点 {node_id}")
+            return
+
+        # 选终点并求路径
+        self.pathtest_goal_node = node_id
+        path = find_path_between_nodes(
+            self.network, self.pathtest_start_node, self.pathtest_goal_node
+        )
+        self.pathtest_path = path
+        if path is None:
+            print(
+                f"寻路测试：节点 {self.pathtest_start_node} → {node_id} 不可达"
+            )
+        else:
+            seq = " → ".join(f"e{eid}({'+' if d > 0 else '-'})" for eid, d in path.edges)
+            print(
+                f"寻路测试：节点 {self.pathtest_start_node} → {node_id} "
+                f"共 {len(path.edges)} 段，总长 {path.total_cost:.2f}\n  {seq}"
+            )
 
 
 def run_game(geo_path: str) -> None:

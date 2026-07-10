@@ -6,6 +6,17 @@ from dataclasses import dataclass, field
 from model.vec3 import Vec3
 from model.spatial_index import SpatialIndex
 
+# 转向许可判据：列车只能前进——到达节点的行进方向与离开节点的行进方向
+# 夹角必须 < 90°（d_in · d_out > TURN_ALLOW_DOT_MIN，取 0）。
+# 这样交叉渡线 (crossover) 的缓角分股（~30°，dot≈+0.85）许可，而近 180°
+# 的发卡掉头（dot≈-0.85）被排除。
+#
+# 注：早先用 cos(150°)≈-0.866 作阈值，基于"编辑器只产生 0°/180° 切线"的
+# 假设。但交叉渡线的 4 联通点存在真实分股角，148° 的发卡弯（dot=-0.847）
+# 会通过 -0.847 >= -0.866 而被误判为许可（表现为寻路在渡线口发卡掉头）。
+# 改为前进半平面（90°）判据后彻底修复；90° 相对真实道岔角（<15°）已极宽松。
+TURN_ALLOW_DOT_MIN = 0.0
+
 
 @dataclass
 class Node:
@@ -131,6 +142,60 @@ class RailNetwork:
                 return group - {from_edge_id}
         target_node = self.nodes[node_id]
         return target_node.incident_edge_ids - {from_edge_id}
+
+    def _edge_dir_at_node(self, edge: Edge, node_id: int, *, leaving: bool) -> Vec3 | None:
+        """边在给定端点处的行进切线方向（几何推断转向许可用）。
+
+        - leaving=True：从 node_id 出发、沿边离开的方向（指出节点）。
+        - leaving=False：到达 node_id 时的行进方向（指向节点）。
+
+        node_id 必须是 edge 的某个端点，否则返回 None。
+        """
+        from model.geom_utils import tangent_along_edge
+
+        node_a = self.nodes.get(edge.node_a_id)
+        node_b = self.nodes.get(edge.node_b_id)
+        if node_a is None or node_b is None:
+            return None
+
+        # tangent_along_edge 给的是 node_a -> node_b 的 forward 切线。
+        if node_id == edge.node_a_id:
+            # node_a 处：forward 即离开方向；到达方向为其反向。
+            fwd = tangent_along_edge(edge, node_a, node_b, 0.0)
+            return fwd if leaving else fwd * -1.0
+        elif node_id == edge.node_b_id:
+            # node_b 处：forward 指向节点，即到达方向；离开为其反向。
+            fwd = tangent_along_edge(edge, node_a, node_b, 1.0)
+            return fwd * -1.0 if leaving else fwd
+        return None
+
+    def turn_allowed(self, node_id: int, from_edge_id: int, to_edge_id: int) -> bool:
+        """经节点 node_id 从 from_edge 转到 to_edge 是否几何许可。
+
+        判据：到达节点的行进方向 d_in 与离开节点的行进方向 d_out 的夹角
+        <= 150°（d_in · d_out >= TURN_ALLOW_DOT_MIN）。这样直通（0°）许可、
+        掉头（180°）被排除。纯几何推断，无需道岔配置。
+
+        约束：to_edge 必须在 from_edge 经该节点的拓扑邻接集内，否则不许可。
+        原路返回（from == to）视为掉头，不许可。
+        """
+        if from_edge_id == to_edge_id:
+            return False
+        if to_edge_id not in self.adjacent_edges_at(node_id, from_edge_id):
+            return False
+
+        from_edge = self.edges.get(from_edge_id)
+        to_edge = self.edges.get(to_edge_id)
+        if from_edge is None or to_edge is None:
+            return False
+
+        d_in = self._edge_dir_at_node(from_edge, node_id, leaving=False)
+        d_out = self._edge_dir_at_node(to_edge, node_id, leaving=True)
+        if d_in is None or d_out is None:
+            return False
+
+        # 严格大于：dot=0（正交 90°）也排除，铁路不存在直角转向。
+        return d_in.dot(d_out) > TURN_ALLOW_DOT_MIN
 
     def _rebuild_connectivity_for(self, node_id: int) -> None:
         node = self.nodes[node_id]

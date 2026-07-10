@@ -508,3 +508,67 @@ def draw_spatial_index_debug(
         rect = pygame.Rect(int(sx0), int(sy0), int(sx1 - sx0), int(sy1 - sy0))
         pygame.draw.rect(surface, color, rect, 1)
 
+
+# 寻路测试可视化配色
+COLOR_PATH = (255, 120, 40)          # 路径高亮（橙）
+COLOR_PATH_START = (60, 220, 100)    # 起点（绿）
+COLOR_PATH_GOAL = (255, 60, 60)      # 终点（红）
+COLOR_PATH_LABEL = (255, 255, 255)   # 顺序编号
+
+
+def _edge_screen_points(edge, network: RailNetwork, camera: Camera, w: int, h: int):
+    """一条边的屏幕折线点（直线两端；圆弧采样）。"""
+    node_a = network.nodes[edge.node_a_id]
+    node_b = network.nodes[edge.node_b_id]
+    if edge.is_arc:
+        pts = edge.sample_arc_points(30)
+        return [camera.world_to_screen(p.x, p.y, w, h) for p in pts]
+    return [
+        camera.world_to_screen(node_a.position.x, node_a.position.y, w, h),
+        camera.world_to_screen(node_b.position.x, node_b.position.y, w, h),
+    ]
+
+
+def draw_pathfinding_debug(
+    surface: pygame.Surface,
+    camera: Camera,
+    network: RailNetwork,
+    font: pygame.font.Font,
+    start_node_id: int | None,
+    goal_node_id: int | None,
+    path,
+) -> None:
+    """绘制寻路测试结果（F 键叠加态）。
+
+    - 起点/终点节点：绿/红实心圈
+    - 路径边：橙色加粗折线，每段中点标注行进顺序编号（1,2,3…）
+    """
+    w = surface.get_width()
+    h = surface.get_height()
+
+    # 已选节点标记（即使还没算出路径也显示）
+    for node_id, color in ((start_node_id, COLOR_PATH_START), (goal_node_id, COLOR_PATH_GOAL)):
+        if node_id is None:
+            continue
+        node = network.nodes.get(node_id)
+        if node is None:
+            continue
+        cx, cy = camera.world_to_screen(node.position.x, node.position.y, w, h)
+        pygame.draw.circle(surface, color, (int(cx), int(cy)), 9)
+        pygame.draw.circle(surface, (255, 255, 255), (int(cx), int(cy)), 9, 2)
+
+    if path is None:
+        return
+
+    for order, (edge_id, _direction) in enumerate(path.edges, start=1):
+        edge = network.edges.get(edge_id)
+        if edge is None:
+            continue
+        screen_pts = _edge_screen_points(edge, network, camera, w, h)
+        if len(screen_pts) >= 2:
+            pygame.draw.lines(surface, COLOR_PATH, False, screen_pts, 4)
+        # 顺序编号标在该段折线中点
+        mid = screen_pts[len(screen_pts) // 2]
+        label = font.render(str(order), True, COLOR_PATH_LABEL)
+        surface.blit(label, (int(mid[0]) + 4, int(mid[1]) - 8))
+
