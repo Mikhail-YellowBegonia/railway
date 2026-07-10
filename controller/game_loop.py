@@ -106,7 +106,11 @@ class GameLoop:
 
                 # 相机跟随列车（A1）
                 if self.camera.follow_enabled:
-                    pose = self.debug_train_kinematics.pose_at(self.debug_train_s)
+                    # 兼容质点和刚体运动学（duck typing）
+                    if hasattr(self.debug_train_kinematics, 'get_wagon_pose'):
+                        pose = self.debug_train_kinematics.get_wagon_pose(self.debug_train_s)
+                    else:
+                        pose = self.debug_train_kinematics.pose_at(self.debug_train_s)
                     self.camera.set_center_smooth(pose.position.x, pose.position.y)
 
             mouse_world = self._mouse_world_pos()
@@ -384,8 +388,12 @@ class GameLoop:
             # 自动启动 debug 列车（物理层 + 状态初始化）
             from model.kinematics import PathKinematics
             from model.train_physics import SimplePhysics
+            from model.rigid_kinematics import RigidWagonKinematics
+            from model.wagon import create_simple_wagon
 
-            self.debug_train_kinematics = PathKinematics(self.network, path)
+            # D4: 使用刚体车厢运动学（替代质点模型）
+            wagon_config = create_simple_wagon(length=20.0, mass=50.0)
+            self.debug_train_kinematics = RigidWagonKinematics(self.network, path, wagon_config)
             self.debug_train_physics = SimplePhysics()  # 无状态，只需创建实例
             self.debug_train_s = 0.0
             self.debug_train_v = 0.0
@@ -394,6 +402,7 @@ class GameLoop:
             # 相机跟随（A1）
             self.camera.follow_enabled = True
             print(f"  → Debug 列车已启动，路径总长 {self.debug_train_kinematics.total_length:.2f} m")
+            print(f"  → 车厢: 长度={wagon_config.length}m, 转向架间距={wagon_config.bogie_spacing}m")
             print(f"  → 控制：方向键 ↑ 加速，↓ 制动，空格 重置")
             print(f"  → 相机自动跟随（拖动暂停，C 键切换）")
 
