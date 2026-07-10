@@ -75,6 +75,72 @@ class Consist:
         return sum(w.length for w in self.wagons)
 
 
+# ===== D2: 弧长/割线求解器 =====
+
+def solve_rear_bogie_s(
+    front_bogie_s: float,
+    bogie_spacing: float,
+    path_kinematics,  # model.kinematics.PathKinematics
+) -> float:
+    """根据前转向架弧长和固定割线距离，求解后转向架弧长（泰勒展开）。
+
+    使用一阶泰勒展开近似: Δs = l + l³/(24R²)
+    其中 l = bogie_spacing（割线距离），R = 轨道曲率半径。
+
+    参数:
+        front_bogie_s: 前转向架在 Path 上的弧长（米）
+        bogie_spacing: 两转向架间固定割线距离（米）
+        path_kinematics: 路径运动学对象，用于查询曲率
+
+    返回:
+        后转向架弧长（米）
+
+    注意:
+    - 后转向架在前转向架**后方**（s 更小），所以返回值 < front_bogie_s
+    - 直线段: R → ∞, Δs ≈ l（退化为质点模型）
+    - 弯道: Δs > l（外侧 Bogie 走得更远）
+    """
+    l = bogie_spacing
+
+    # 查询前转向架所在位置的曲率半径（简化：用前转向架位置的局部曲率）
+    # 更精确的做法是积分整段路径的曲率，但一阶近似下用单点曲率足够
+    R = _estimate_curvature_radius(front_bogie_s, path_kinematics)
+
+    # 泰勒展开修正
+    if R > 1e6:  # 直线（曲率半径极大）
+        delta_s = l
+    else:
+        delta_s = l + (l ** 3) / (24 * R ** 2)
+
+    # 后转向架在前方向后（s 减小）
+    rear_bogie_s = front_bogie_s - delta_s
+    return max(0.0, rear_bogie_s)  # clamp 到路径起点
+
+
+def _estimate_curvature_radius(
+    s: float,
+    path_kinematics,  # model.kinematics.PathKinematics
+) -> float:
+    """估算路径在弧长 s 处的曲率半径（米）。
+
+    方法:
+    - 直线段: 返回无穷大（1e9）
+    - 圆弧段: 返回 edge.arc_radius
+
+    简化假设: 用 s 所在 Edge 的曲率代表该点曲率（忽略跨 Edge 过渡）。
+    """
+    # 定位 s 落在哪个 segment（有向边）
+    for i, (directed, s_start, seg_length) in enumerate(path_kinematics._segments):
+        if s < s_start + seg_length or i == len(path_kinematics._segments) - 1:
+            edge_id, direction = directed
+            edge = path_kinematics.network.edges[edge_id]
+            if edge.is_arc:
+                return edge.arc_radius
+            else:
+                return 1e9  # 直线，曲率半径无穷大
+    return 1e9  # fallback
+
+
 # ===== 预定义配置（示例/测试用） =====
 
 def create_simple_wagon(length: float = 20.0, mass: float = 50.0) -> WagonConfig:
