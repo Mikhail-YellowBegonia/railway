@@ -236,6 +236,14 @@ class GameLoop:
             self.camera.follow_enabled = not self.camera.follow_enabled
             status = "开启" if self.camera.follow_enabled else "关闭"
             print(f"相机跟随: {status}")
+        elif event.key == pygame.K_SPACE:
+            # 空格键重置列车到起点（A3）
+            if self.debug_train_active and self.debug_train_kinematics:
+                self.debug_train_s = 0.0
+                self.debug_train_v = 0.0
+                self.debug_train_a = 0.0
+                self.debug_train_active = True  # 重新激活（如果到终点停止了）
+                print("列车已重置到起点")
 
     def _handle_mouse_down(self, event: pygame.event.Event) -> None:
         # 滚轮先处理（不参与平移逻辑）
@@ -386,7 +394,7 @@ class GameLoop:
             # 相机跟随（A1）
             self.camera.follow_enabled = True
             print(f"  → Debug 列车已启动，路径总长 {self.debug_train_kinematics.total_length:.2f} m")
-            print(f"  → 控制：方向键 ↑ 加速，↓ 制动")
+            print(f"  → 控制：方向键 ↑ 加速，↓ 制动，空格 重置")
             print(f"  → 相机自动跟随（拖动暂停，C 键切换）")
 
 
