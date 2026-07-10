@@ -87,6 +87,10 @@ def solve_rear_bogie_s(
     使用一阶泰勒展开近似: Δs = l + l³/(24R²)
     其中 l = bogie_spacing（割线距离），R = 轨道曲率半径。
 
+    跨 Edge 边界处理:
+    - 同 Edge: 用单点曲率（快速）
+    - 跨 Edge: 用加权平均曲率（避免抖动）
+
     参数:
         front_bogie_s: 前转向架在 Path 上的弧长（米）
         bogie_spacing: 两转向架间固定割线距离（米）
@@ -102,9 +106,32 @@ def solve_rear_bogie_s(
     """
     l = bogie_spacing
 
-    # 查询前转向架所在位置的曲率半径（简化：用前转向架位置的局部曲率）
-    # 更精确的做法是积分整段路径的曲率，但一阶近似下用单点曲率足够
-    R = _estimate_curvature_radius(front_bogie_s, path_kinematics)
+    # 粗略估算后转向架位置（用于判断是否跨 Edge）
+    rear_s_rough = max(0.0, front_bogie_s - l * 1.1)  # 稍微多留余量
+
+    # 定位前后转向架所在 segment
+    front_seg_idx = path_kinematics._locate_segment(front_bogie_s)
+    rear_seg_idx = path_kinematics._locate_segment(rear_s_rough)
+
+    # 跨 Edge 判断
+    if front_seg_idx == rear_seg_idx:
+        # 同一 Edge，用单点曲率（原有逻辑，性能最优）
+        R = _estimate_curvature_radius(front_bogie_s, path_kinematics)
+    else:
+        # 跨 Edge，迭代求精曲率（两次计算：粗估 → 加权曲率 → 精算）
+        # 第一次：用粗估 s2 的单点曲率
+        R_rough = _estimate_curvature_radius(rear_s_rough, path_kinematics)
+        if R_rough > 1e6:
+            delta_s_rough = l
+        else:
+            delta_s_rough = l + (l ** 3) / (24 * R_rough ** 2)
+        rear_s_iter1 = max(0.0, front_bogie_s - delta_s_rough)
+
+        # 第二次：用 [rear_s_iter1, front_s] 的加权平均曲率
+        rear_seg_iter1 = path_kinematics._locate_segment(rear_s_iter1)
+        R = _weighted_average_curvature(
+            front_bogie_s, rear_s_iter1, front_seg_idx, rear_seg_iter1, path_kinematics
+        )
 
     # 泰勒展开修正
     if R > 1e6:  # 直线（曲率半径极大）
@@ -115,6 +142,53 @@ def solve_rear_bogie_s(
     # 后转向架在前方向后（s 减小）
     rear_bogie_s = front_bogie_s - delta_s
     return max(0.0, rear_bogie_s)  # clamp 到路径起点
+
+
+def _weighted_average_curvature(
+    s1: float,
+    s2: float,
+    seg_idx1: int,
+    seg_idx2: int,
+    path_kinematics,  # model.kinematics.PathKinematics
+) -> float:
+    """计算 [s2, s1] 区间的加权平均曲率半径（跨 Edge 补丁）。
+
+    按每段 Edge 在区间内的长度占比加权平均 1/R，然后取倒数得 R_avg。
+    """
+    segments = path_kinematics._segments
+    total_length = 0.0
+    weighted_curvature = 0.0  # 加权平均 κ = 1/R
+
+    # 从后到前遍历涉及的 segments（s2 → s1）
+    for i in range(seg_idx2, seg_idx1 + 1):
+        if i >= len(segments):
+            break
+        directed, s_start, seg_length = segments[i]
+        edge_id, direction = directed
+        edge = path_kinematics.network.edges[edge_id]
+
+        # 计算该 segment 在 [s2, s1] 区间的重叠长度
+        seg_end = s_start + seg_length
+        overlap_start = max(s2, s_start)
+        overlap_end = min(s1, seg_end)
+        overlap_length = max(0.0, overlap_end - overlap_start)
+
+        if overlap_length > 0:
+            total_length += overlap_length
+            # 曲率 κ = 1/R（直线 κ=0）
+            if edge.is_arc:
+                curvature = 1.0 / edge.arc_radius
+            else:
+                curvature = 0.0  # 直线
+            weighted_curvature += curvature * overlap_length
+
+    # 加权平均曲率
+    if total_length < 1e-6:
+        return 1e9  # fallback：极短距离，当直线
+    avg_curvature = weighted_curvature / total_length
+    if avg_curvature < 1e-9:
+        return 1e9  # 平均曲率接近 0，当直线
+    return 1.0 / avg_curvature  # R_avg = 1 / κ_avg
 
 
 def _estimate_curvature_radius(
