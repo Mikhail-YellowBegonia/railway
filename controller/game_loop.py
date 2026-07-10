@@ -104,6 +104,11 @@ class GameLoop:
                     self.debug_train_a = 0.0
                     self.debug_train_active = False
 
+                # 相机跟随列车（A1）
+                if self.camera.follow_enabled:
+                    pose = self.debug_train_kinematics.pose_at(self.debug_train_s)
+                    self.camera.set_center_smooth(pose.position.x, pose.position.y)
+
             mouse_world = self._mouse_world_pos()
             self.editor.update_hover(mouse_world)
 
@@ -217,6 +222,11 @@ class GameLoop:
             self._reset_pathtest()
             status = "开启" if self.pathtest_enabled else "关闭"
             print(f"寻路测试: {status}（点选起点、终点两个节点）")
+        elif event.key == pygame.K_c:
+            # C 键切换相机跟随（A1）
+            self.camera.follow_enabled = not self.camera.follow_enabled
+            status = "开启" if self.camera.follow_enabled else "关闭"
+            print(f"相机跟随: {status}")
 
     def _handle_mouse_down(self, event: pygame.event.Event) -> None:
         # 滚轮先处理（不参与平移逻辑）
@@ -364,8 +374,11 @@ class GameLoop:
             self.debug_train_v = 0.0
             self.debug_train_a = 0.0
             self.debug_train_active = True
+            # 相机跟随（A1）
+            self.camera.follow_enabled = True
             print(f"  → Debug 列车已启动，路径总长 {self.debug_train_kinematics.total_length:.2f} m")
             print(f"  → 控制：方向键 ↑ 加速，↓ 制动")
+            print(f"  → 相机自动跟随（拖动暂停，C 键切换）")
 
 
 def run_game(geo_path: str) -> None:
