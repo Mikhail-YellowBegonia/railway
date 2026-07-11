@@ -107,6 +107,36 @@ class PathKinematics:
                 return i
         return len(self._segments) - 1  # s 在最后一段或越界
 
+    def sub_path(self, s_tail: float, s_head: float) -> tuple[Path, float]:
+        """提取 [s_tail, s_head] 范围的子路径。
+
+        用于列车停放时截取覆盖车身的最小 Path。
+
+        返回:
+            (sub_path, initial_offset)
+            - sub_path: 覆盖 [s_tail, s_head] 的有向边子序列
+            - initial_offset: s_tail 在子路径第一段内的局部弧长偏移（米）
+              调用方用 RigidWagonKinematics(initial_offset=initial_offset) 保持车头位置
+        """
+        if not self._segments:
+            return Path(edges=[], total_cost=0.0), 0.0
+
+        s_tail = max(0.0, s_tail)
+        s_head = min(s_head, self._total_length)
+
+        # 找到 s_tail 所在段的索引
+        tail_idx = self._locate_segment(s_tail)
+        head_idx = self._locate_segment(s_head)
+
+        sub_edges = [seg[0] for seg in self._segments[tail_idx: head_idx + 1]]
+        sub_cost = sum(seg[2] for seg in self._segments[tail_idx: head_idx + 1])
+
+        # initial_offset = s_tail 在首段内的局部偏移
+        _, seg_start, _ = self._segments[tail_idx]
+        initial_offset = s_tail - seg_start
+
+        return Path(edges=sub_edges, total_cost=sub_cost), initial_offset
+
     def _interpolate_position(self, edge, node_a, node_b, t: float) -> Vec3:
         """边上参数 t ∈ [0,1] 处的位置插值（直线线性 / 圆弧反解角度）。"""
         if not edge.is_arc:

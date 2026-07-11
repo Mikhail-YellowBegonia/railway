@@ -80,11 +80,38 @@ class TrainEntity:
     def emergency_stop(self) -> None:
         """调度层强制停车：忽略物理，直接归零速度，清除控制器。
 
-        几何状态（path + s）保持不变，列车停在当前位置。
+        截取覆盖车身的最小 Path 作为停放 Path，保持几何位置连续。
         """
         self.state.v = 0.0
         self.last_a = 0.0
         self.controller = None
+        self._trim_to_parking_path()
+
+    def _trim_to_parking_path(self) -> None:
+        """截取覆盖车身的最小 Path，更新 state.path / state.s / kinematics。
+
+        停放 Path 覆盖范围：[s_head - consist.total_length - margin, s_head]
+        margin = 25m（最长单节车厢估计值），防止边界误差导致车厢悬空。
+        """
+        MARGIN = 25.0
+        # s_head：车头在底层（未裁剪）path_kin 上的绝对弧长
+        s_head = self.kinematics.initial_offset + self.state.s
+        s_tail = max(0.0, s_head - self.state.consist.total_length - MARGIN)
+
+        base_kin = self.kinematics._path_kin
+        park_path, initial_offset = base_kin.sub_path(s_tail, s_head)
+
+        if not park_path.edges:
+            return
+
+        self.state.path = park_path
+        # seg_start = s_tail - initial_offset（sub_path 第一段在 base_kin 上的起点）
+        seg_start = s_tail - initial_offset
+        self.state.s = (s_head - seg_start) - initial_offset
+        self.kinematics = RigidWagonKinematics(
+            self.network, park_path, self.state.consist,
+            initial_offset=initial_offset,
+        )
 
     # ------------------------------------------------------------------
     # 每帧更新
