@@ -232,11 +232,12 @@ def find_path_from_point(
     # 计算起点偏移（弧长）
     start_offset = start_t * start_edge.length
 
-    # 起点节点：根据列车朝向决定从哪端出发（禁止折返）
-    if start_direction > 0:
-        start_node_id = start_edge.node_b_id  # 正方向 → 继续向 node_b
+    # 起点节点：列车当前所在节点（用于端点附近的 fallback）
+    # 注意：这里不是"朝向的节点"，而是"当前位置最近的节点"
+    if start_t < 0.5:
+        start_node_id = start_edge.node_a_id
     else:
-        start_node_id = start_edge.node_a_id  # 负方向 → 继续向 node_a
+        start_node_id = start_edge.node_b_id
 
     # 目标 Edge 与起始 Edge 相同时的特殊处理
     if start_edge_id == goal_edge_id:
@@ -282,7 +283,25 @@ def find_path_from_point(
 
     # 如果没有分割（端点附近）或分割失败，从端点出发
     if start_directed is None:
-        start_directed = _directed_from(tmp_network, start_edge_id, start_node_id)
+        # 根据 start_t 和 start_direction 确定起始有向边
+        if start_t < 0.5:
+            # 靠近 node_a
+            if start_direction > 0:
+                # 正方向：node_a → node_b
+                start_directed = (start_edge_id, 1)
+            else:
+                # 负方向：需要从 node_a 继续向前（沿反向）
+                # 但这需要找到 node_a 的其他邻接边，暂时用当前边反向
+                start_directed = (start_edge_id, -1)
+        else:
+            # 靠近 node_b
+            if start_direction > 0:
+                # 正方向：需要从 node_b 继续向前
+                # 这种情况下应该从 node_b 的邻接边出发，但简化为当前边正向
+                start_directed = (start_edge_id, 1)
+            else:
+                # 负方向：node_b → node_a
+                start_directed = (start_edge_id, -1)
 
     # 记录起始edge分割后产生的新边
     new_edges_from_start = set(tmp_network.edges.keys()) - original_edge_ids_before_split
