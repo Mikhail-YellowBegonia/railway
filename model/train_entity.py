@@ -168,3 +168,13 @@ class TrainEntity:
         """
         abs_s = self.kinematics.initial_offset + self.state.s
         return self.kinematics._path_kin.edge_at(abs_s)
+
+    def current_direction(self) -> int:
+        """返回列车当前行驶方向（+1 或 -1）。
+
+        从当前 path 的第一条有向边推断（停放时也有方向）。
+        """
+        if not self.state.path.edges:
+            return 1  # 默认正方向
+        _, direction = self.state.path.edges[0]
+        return direction

@@ -383,6 +383,7 @@ class GameLoop:
 
         # 后续点击：从当前位置寻路到目标（支持 Edge 途中）
         start_edge_id, start_t = self.train.current_edge_and_t()
+        start_direction = self.train.current_direction()
 
         # 优先尝试 snap 到 Edge 途中
         goal = self._snap_edge_at(world_pos)
@@ -392,7 +393,8 @@ class GameLoop:
                 self.network,
                 start_edge_id, start_t,
                 goal_edge_id, goal_t,
-                allow_reversal=True,
+                start_direction=start_direction,
+                allow_reversal=False,
             )
             if result is None:
                 print(f"列车模式：不可达（edge {start_edge_id} t={start_t:.2f} → edge {goal_edge_id} t={goal_t:.2f}）")
@@ -426,7 +428,8 @@ class GameLoop:
             self.network,
             start_edge_id, start_t,
             goal_edge_id, goal_t,
-            allow_reversal=True,
+            start_direction=start_direction,
+            allow_reversal=False,
         )
         if result is None:
             print(f"列车模式：节点 {node_id} 不可达")

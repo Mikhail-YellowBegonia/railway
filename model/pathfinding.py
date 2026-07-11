@@ -200,6 +200,7 @@ def find_path_from_point(
     goal_edge_id: int,
     goal_t: float,
     *,
+    start_direction: int = 1,
     cost_fn: CostFn = _default_cost,
     passable_fn: PassableFn = _default_passable,
     allow_reversal: bool = False,
@@ -207,6 +208,10 @@ def find_path_from_point(
     """从 Edge 途中的点寻路到另一 Edge 途中的点。
 
     不修改原网络；在内存中临时分割目标 Edge，寻路完成后丢弃临时副本。
+
+    参数:
+        start_direction: 列车当前朝向（+1 = node_a → node_b，-1 = 反向）
+                        决定从哪端节点出发，禁止反向折返
 
     返回:
         (path, start_offset, end_offset) 或 None（不可达）
@@ -227,49 +232,86 @@ def find_path_from_point(
     # 计算起点偏移（弧长）
     start_offset = start_t * start_edge.length
 
-    # 起点所在 Edge 的出发节点：列车朝向决定从哪端出发
-    # 约定 t < 0.5 时从 node_a 出发，否则从 node_b 出发（当前测试无方向信息，用最近端）
-    start_node_id = start_edge.node_a_id if start_t < 0.5 else start_edge.node_b_id
+    # 起点节点：根据列车朝向决定从哪端出发（禁止折返）
+    if start_direction > 0:
+        start_node_id = start_edge.node_b_id  # 正方向 → 继续向 node_b
+    else:
+        start_node_id = start_edge.node_a_id  # 负方向 → 继续向 node_a
 
     # 目标 Edge 与起始 Edge 相同时的特殊处理
     if start_edge_id == goal_edge_id:
-        if start_t <= goal_t:
-            # 直接向前，不需要绕路
+        # 检查是否需要折返（目标在反方向）
+        if start_direction > 0 and start_t <= goal_t:
+            # 正方向，目标在前方
             directed = _directed_from(network, start_edge_id, start_edge.node_a_id)
             end_offset = (1.0 - goal_t) * goal_edge.length
             path = Path(edges=[directed], total_cost=goal_edge.length)
             return path, start_offset, end_offset
-        # 否则需要绕一圈，继续走正常寻路
+        elif start_direction < 0 and start_t >= goal_t:
+            # 负方向，目标在前方
+            directed = _directed_from(network, start_edge_id, start_edge.node_b_id)
+            end_offset = goal_t * goal_edge.length
+            path = Path(edges=[directed], total_cost=goal_edge.length)
+            return path, start_offset, end_offset
+        # 否则目标在反方向，需要绕路（或不可达）
 
-    # 在临时网络副本中分割目标 Edge，插入虚拟节点
+    # 在临时网络副本中分割起始和目标 Edge
     tmp_network = copy.deepcopy(network)
+    original_edge_ids_before_split = set(tmp_network.edges.keys())
+
+    # 分割起始 edge（如果不在端点）
+    start_directed: DirectedEdge | None = None
+    if 0.01 < start_t < 0.99:
+        start_virtual_node = tmp_network.split_edge_at(start_edge_id, start_t)
+        if start_virtual_node is not None:
+            # 找到虚拟节点出发、沿 start_direction 方向的边
+            vnode = tmp_network.nodes[start_virtual_node]
+            for eid in vnode.incident_edge_ids:
+                edge = tmp_network.edges[eid]
+                if start_direction > 0 and edge.node_a_id == start_virtual_node:
+                    # 正方向：vnode → node_b（原 edge 的 node_b）
+                    start_directed = (eid, 1)
+                    break
+                elif start_direction < 0 and edge.node_b_id == start_virtual_node:
+                    # 负方向：vnode → node_a（原 edge 的 node_a）
+                    start_directed = (eid, -1)
+                    break
+
+    # 如果没有分割（端点附近）或分割失败，从端点出发
+    if start_directed is None:
+        start_directed = _directed_from(tmp_network, start_edge_id, start_node_id)
+
+    # 记录起始edge分割后产生的新边
+    new_edges_from_start = set(tmp_network.edges.keys()) - original_edge_ids_before_split
+
+    # 分割目标 edge
     virtual_node_id = tmp_network.split_edge_at(goal_edge_id, goal_t)
     if virtual_node_id is None:
         # 分割失败（t 极端或几何不可解），降级到最近端节点
         virtual_node_id = goal_edge.node_a_id if goal_t < 0.5 else goal_edge.node_b_id
 
-    # 在临时网络上寻路
-    path = find_path_between_nodes(
-        tmp_network, start_node_id, virtual_node_id,
+    # 记录目标edge分割后产生的新边
+    new_edges_from_goal = set(tmp_network.edges.keys()) - original_edge_ids_before_split - new_edges_from_start
+
+    # 在临时网络上寻路：从有向边开始，到虚拟节点
+    path = find_path(
+        tmp_network, start_directed, virtual_node_id,
         cost_fn=cost_fn, passable_fn=passable_fn,
         allow_reversal=allow_reversal,
     )
     if path is None:
         return None
 
-    # 将临时网络路径映射回原网络的 edge_id（虚拟分割产生了新 edge_id，需要还原）
-    # split_edge_at 保留了原 edge_id（前半段），新增了一个新 edge_id（后半段）
-    # 路径末段的 edge_id 可能是原 edge 或新 edge，但 end_offset 已经编码在目标位置
+    # 将临时网络路径映射回原网络的 edge_id
     end_offset = (1.0 - goal_t) * goal_edge.length
 
-    # 路径里的 edge_id 若属于新增虚拟边，需映射回原 edge_id
-    # 原 edge 被分成两段：前段保留原 id，后段是新 id（tmp_network 中 max edge_id）
-    # 对于 path 里出现新 id 的情况，将其还原为原 goal_edge_id
-    new_edge_ids = set(tmp_network.edges.keys()) - set(network.edges.keys())
     restored_edges: list[DirectedEdge] = []
     for eid, d in path.edges:
-        if eid in new_edge_ids:
-            # 这是后半段虚拟边，还原为原 edge_id（方向不变）
+        if eid in new_edges_from_start:
+            # 起始edge的虚拟边，还原为 start_edge_id
+            restored_edges.append((start_edge_id, d))
+        elif eid in new_edges_from_goal:
+            # 目标edge的虚拟边，还原为 goal_edge_id
             restored_edges.append((goal_edge_id, d))
         else:
             restored_edges.append((eid, d))
