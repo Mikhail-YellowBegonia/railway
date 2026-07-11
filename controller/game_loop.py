@@ -466,13 +466,12 @@ class GameLoop:
         # 提取车尾覆盖路径（用于拼接到新路径前，保持车尾连续）
         tail_path, initial_offset_tail, s_head_in_tail = self.train.tail_coverage_path()
 
-        # 判断是否允许折返：列车停在终点时允许，行驶中途不允许
-        # 终点判定：速度接近 0 且 s 接近路径末端
-        at_end_of_path = (
-            abs(self.train.state.v) < 0.1 and
-            self.train.kinematics.total_length - self.train.state.s < 5.0  # 距离终点 < 5m
-        )
-        allow_reversal = at_end_of_path
+        # 寻路时总是允许折返（通过高代价自然避免不必要的折返）
+        # 折返路径：先到终点 → 停车 → 折返，寻路算法会自动规划
+        allow_reversal = True
+
+        print(f"[折返判定] v={self.train.state.v:.2f} m/s, s={self.train.state.s:.1f}/{self.train.kinematics.total_length:.1f} m")
+        print(f"[折返判定] allow_reversal=True（总是允许，通过代价避免不必要折返）")
 
         # 优先尝试 snap 到 Edge 途中
         goal = self._snap_edge_at(world_pos)
@@ -484,6 +483,7 @@ class GameLoop:
                 goal_edge_id, goal_t,
                 start_direction=start_direction,
                 allow_reversal=allow_reversal,
+                debug=True,  # 启用调试日志
             )
             if result is None:
                 print(f"列车模式：不可达（edge {start_edge_id} t={start_t:.2f} → edge {goal_edge_id} t={goal_t:.2f}）")
@@ -562,6 +562,7 @@ class GameLoop:
             goal_edge_id, goal_t,
             start_direction=start_direction,
             allow_reversal=allow_reversal,
+            debug=True,  # 启用调试日志
         )
         if result is None:
             print(f"列车模式：节点 {node_id} 不可达")

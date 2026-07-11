@@ -205,6 +205,7 @@ def find_path_from_point(
     cost_fn: CostFn = _default_cost,
     passable_fn: PassableFn = _default_passable,
     allow_reversal: bool = False,
+    debug: bool = False,
 ) -> tuple[Path, float, float] | None:
     """从 Edge 途中的点寻路到另一 Edge 途中的点。
 
@@ -225,9 +226,15 @@ def find_path_from_point(
                                        initial_offset=start_offset,
                                        end_offset=end_offset)
     """
+    if debug:
+        print(f"\n[寻路开始] edge {start_edge_id} t={start_t:.2f} dir={start_direction} → edge {goal_edge_id} t={goal_t:.2f}")
+        print(f"[寻路参数] allow_reversal={allow_reversal}")
+
     start_edge = network.edges.get(start_edge_id)
     goal_edge = network.edges.get(goal_edge_id)
     if start_edge is None or goal_edge is None:
+        if debug:
+            print(f"[寻路失败] edge 不存在")
         return None
 
     # 计算起点偏移（弧长）
@@ -242,23 +249,33 @@ def find_path_from_point(
 
     # 目标 Edge 与起始 Edge 相同时的特殊处理
     if start_edge_id == goal_edge_id:
+        if debug:
+            print(f"[寻路] 同 Edge：start_t={start_t:.2f}, goal_t={goal_t:.2f}, dir={start_direction}, allow_reversal={allow_reversal}")
         # 检查是否需要折返（目标在反方向）
         if start_direction > 0 and start_t <= goal_t:
             # 正方向，目标在前方
+            if debug:
+                print(f"[寻路] 同 Edge 正方向，目标在前方，直接返回")
             directed = _directed_from(network, start_edge_id, start_edge.node_a_id)
             end_offset = (1.0 - goal_t) * goal_edge.length
             path = Path(edges=[directed], total_cost=goal_edge.length)
             return path, start_offset, end_offset
         elif start_direction < 0 and start_t >= goal_t:
             # 负方向，目标在前方
+            if debug:
+                print(f"[寻路] 同 Edge 负方向，目标在前方，直接返回")
             directed = _directed_from(network, start_edge_id, start_edge.node_b_id)
             end_offset = goal_t * goal_edge.length
             path = Path(edges=[directed], total_cost=goal_edge.length)
             return path, start_offset, end_offset
         # 否则目标在反方向，不允许折返，返回 None
         if not allow_reversal:
+            if debug:
+                print(f"[寻路] 同 Edge 目标在反方向，allow_reversal=False，返回 None")
             return None
         # allow_reversal=True 时才尝试绕路
+        if debug:
+            print(f"[寻路] 同 Edge 目标在反方向，allow_reversal=True，尝试绕路")
 
     # 在临时网络副本中分割起始和目标 Edge
     tmp_network = copy.deepcopy(network)
@@ -317,12 +334,16 @@ def find_path_from_point(
     new_edges_from_goal = set(tmp_network.edges.keys()) - original_edge_ids_before_split - new_edges_from_start
 
     # 在临时网络上寻路：从有向边开始，到虚拟节点
+    if debug:
+        print(f"[寻路] 调用 find_path：start_directed={start_directed}, goal_node={virtual_node_id}")
     path = find_path(
         tmp_network, start_directed, virtual_node_id,
         cost_fn=cost_fn, passable_fn=passable_fn,
         allow_reversal=allow_reversal,
     )
     if path is None:
+        if debug:
+            print(f"[寻路失败] find_path 返回 None")
         return None
 
     # 将临时网络路径映射回原网络的 edge_id
@@ -339,6 +360,10 @@ def find_path_from_point(
         else:
             restored_edges.append((eid, d))
     path = Path(edges=restored_edges, total_cost=path.total_cost)
+
+    if debug:
+        print(f"[寻路成功] 路径长度 {len(path.edges)} 段，总代价 {path.total_cost:.1f}")
+        print(f"[寻路路径] {[(eid, '+' if d > 0 else '-') for eid, d in path.edges]}")
 
     return path, start_offset, end_offset
 
