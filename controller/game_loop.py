@@ -121,8 +121,9 @@ class GameLoop:
                     self.train_path,
                 )
                 # 路径上的预览列车（橙色，s=0 起点）
+                # 只在停放时显示（出发后隐藏，避免与红色实时列车混淆）
                 from model.rigid_kinematics import RigidWagonKinematics
-                if self.train is not None:
+                if self.train is not None and self.train.is_parked():
                     preview_kin = RigidWagonKinematics(
                         self.network, self.train_path, self.train.state.consist
                     )
