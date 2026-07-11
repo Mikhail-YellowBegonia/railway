@@ -75,20 +75,18 @@ class GameLoop:
         # 空间索引可视化开关（I 键切换）
         self.debug_show_tiles = False
 
-        # 列车模式（F 键切换）：
-        #   第一次点击 = 在节点处放置列车（停放状态）
-        #   后续点击   = 选择目标（节点或 Edge 途中），自动寻路并出发
-        self.train_mode_enabled = False
-        self.train_path = None                     # 当前可视化路径
+        # PLAY 模式状态
+        self.train_path = None                     # 当前可视化路径（焦点列车）
         self.train_path_virtual_points = []        # 寻路虚拟节点位置（调试用）
 
         # 放置列车的两步流程
         self.train_placement_node_id = None        # 第一步：选中的放置节点
         self.train_placement_consist = None        # 待放置的车组
 
-        # 列车实体（持久存在，停放时 controller=None）
-        self.train: "TrainEntity | None" = None
-        self.train_v_target: float = 0.0           # 玩家设定的巡航速度（m/s）
+        # 列车列表 + 焦点（E 阶段）
+        self.trains: list["TrainEntity"] = []
+        self.active_train: "TrainEntity | None" = None
+        self.train_v_target: float = 0.0           # 焦点列车的巡航速度（m/s）
 
     def run(self) -> None:
         while self.running:
@@ -99,7 +97,7 @@ class GameLoop:
             self._sync_modifiers()
 
             # 更新列车（物理层 + 状态积分）
-            if self.train is not None and self.train.is_moving():
+            if self.active_train is not None and self.active_train.is_moving():
                 dt = self.clock.get_time() / 1000.0
 
                 # ↑/↓ 调整目标速度
@@ -110,15 +108,22 @@ class GameLoop:
                     self.train_v_target = min(V_MAX, self.train_v_target + V_STEP * dt)
                 elif keys[pygame.K_DOWN]:
                     self.train_v_target = max(0.0, self.train_v_target - V_STEP * dt)
+                self.active_train.v_target = self.train_v_target
 
-                self.train.update(dt, self.train_v_target)
+                self.active_train.update(dt, self.train_v_target)
 
                 # 相机跟随列车
-                if self.camera.follow_enabled and self.train is not None:
-                    wagon_poses = self.train.kinematics.get_all_wagon_poses(self.train.state.s)
+                if self.camera.follow_enabled and self.active_train is not None:
+                    wagon_poses = self.active_train.kinematics.get_all_wagon_poses(self.active_train.state.s)
                     if wagon_poses:
                         lead_pose = wagon_poses[0]
                         self.camera.set_center_smooth(lead_pose.position.x, lead_pose.position.y)
+
+            # 非焦点列车各自按其上次速度目标继续运行
+            dt = self.clock.get_time() / 1000.0
+            for t in self.trains:
+                if t is not self.active_train and t.is_moving():
+                    t.update(dt, t.v_target)
 
             mouse_world = self._mouse_world_pos()
             self.editor.update_hover(mouse_world)
@@ -137,8 +142,8 @@ class GameLoop:
                 )
             self.renderer.draw_network(self.network, self.editor)
             self.renderer.draw_overlay(self.network, self.editor, mouse_world)
-            # 列车模式可视化
-            if self.train_mode_enabled and self.train_path is not None:
+            # PLAY 模式可视化
+            if self.editor.mode == EditMode.PLAY and self.train_path is not None:
                 from view.renderer import draw_pathfinding_debug, draw_debug_train
                 # 路径预览（橙色）：从起点到终点的完整路径
                 draw_pathfinding_debug(
@@ -153,9 +158,9 @@ class GameLoop:
                 # 路径上的预览列车（橙色，s=0 起点）
                 # 只在停放时显示（出发后隐藏，避免与红色实时列车混淆）
                 from model.rigid_kinematics import RigidWagonKinematics
-                if self.train is not None and self.train.is_parked():
+                if self.active_train is not None and self.active_train.is_parked():
                     preview_kin = RigidWagonKinematics(
-                        self.network, self.train_path, self.train.state.consist
+                        self.network, self.train_path, self.active_train.state.consist
                     )
                     draw_debug_train(
                         self.renderer.surface,
@@ -207,33 +212,41 @@ class GameLoop:
                         # 如果路径太短无法容纳列车，跳过
                         pass
 
-            if self.train is not None:
+            # 非焦点列车（蓝色线框）
+            from view.renderer import draw_debug_train as _draw_train
+            COLOR_INACTIVE = (80, 140, 220)
+            for t in self.trains:
+                if t is not self.active_train:
+                    _draw_train(self.renderer.surface, self.camera,
+                                t.kinematics, t.state.s, color=COLOR_INACTIVE)
+
+            if self.active_train is not None:
                 from view.renderer import draw_debug_train, draw_train_hud
-                # 实时占位列车（红色）
+                # 焦点列车（红色）
                 draw_debug_train(
                     self.renderer.surface,
                     self.camera,
-                    self.train.kinematics,
-                    self.train.state.s,
+                    self.active_train.kinematics,
+                    self.active_train.state.s,
                     occupied=True,
                 )
                 # 制动区判断（HUD 显示用）
-                _v = self.train.state.v
-                _a_b = abs(self.train.physics.compute_acceleration(
-                    _v, 0.0, 1.0, self.train.state.consist))
+                _v = self.active_train.state.v
+                _a_b = abs(self.active_train.physics.compute_acceleration(
+                    _v, 0.0, 1.0, self.active_train.state.consist))
                 _in_braking = False
-                if self.train.controller is not None:
+                if self.active_train.controller is not None:
                     _d_stop = (_v ** 2) / max(1e-6, 2 * _a_b) \
-                              * self.train.controller.safety_margin
-                    _in_braking = (self.train.kinematics.total_length
-                                   - self.train.state.s) <= _d_stop
+                              * self.active_train.controller.safety_margin
+                    _in_braking = (self.active_train.kinematics.total_length
+                                   - self.active_train.state.s) <= _d_stop
                 draw_train_hud(
                     self.renderer.surface,
                     self.renderer._font,
-                    self.train.state.s,
-                    self.train.state.v,
-                    self.train.last_a,
-                    self.train.kinematics.total_length,
+                    self.active_train.state.s,
+                    self.active_train.state.v,
+                    self.active_train.last_a,
+                    self.active_train.kinematics.total_length,
                     self.train_v_target,
                     braking=_in_braking,
                 )
@@ -271,7 +284,27 @@ class GameLoop:
 
     def _handle_keydown(self, event: pygame.event.Event) -> None:
         if event.key == pygame.K_ESCAPE:
-            self.editor.handle_cancel()
+            if self.editor.mode == EditMode.PLAY:
+                if self.active_train is not None or self.train_placement_node_id is not None:
+                    # 先取消焦点/放置流程
+                    self.active_train = None
+                    self.train_placement_node_id = None
+                    self.train_placement_consist = None
+                    self.train_path = None
+                else:
+                    # 再按一次退出 PLAY
+                    self.editor.set_mode(EditMode.IDLE)
+            else:
+                self.editor.handle_cancel()
+        elif event.key == pygame.K_p or event.key == pygame.K_f:
+            # P（正式）/ F（兼容旧习惯）切换 PLAY 模式
+            if self.editor.mode == EditMode.PLAY:
+                self.editor.set_mode(EditMode.IDLE)
+                self.train_path = None
+                print("PLAY 模式：关闭")
+            else:
+                self.editor.set_mode(EditMode.PLAY)
+                print("PLAY 模式：开启（左键选中列车/放置，右键下达指令）")
         elif event.key == pygame.K_b:
             self.editor.set_mode(EditMode.BUILD)
         elif event.key == pygame.K_d:
@@ -310,13 +343,6 @@ class GameLoop:
             self.debug_show_tiles = not self.debug_show_tiles
             status = "开启" if self.debug_show_tiles else "关闭"
             print(f"空间索引可视化: {status}")
-        elif event.key == pygame.K_f:
-            # F 键切换列车模式
-            self.train_mode_enabled = not self.train_mode_enabled
-            if not self.train_mode_enabled:
-                self.train_path = None
-            status = "开启" if self.train_mode_enabled else "关闭"
-            print(f"列车模式: {status}（第一次点击放置列车，后续点击选择目标）")
         elif event.key == pygame.K_c:
             # C 键切换相机跟随（A1）
             self.camera.follow_enabled = not self.camera.follow_enabled
@@ -324,8 +350,8 @@ class GameLoop:
             print(f"相机跟随: {status}")
         elif event.key == pygame.K_SPACE:
             # 空格键：列车紧急停止（emergency_stop）
-            if self.train is not None:
-                self.train.emergency_stop()
+            if self.active_train is not None:
+                self.active_train.emergency_stop()
                 self.train_v_target = 0.0
                 print("列车紧急停止")
     def _handle_mouse_down(self, event: pygame.event.Event) -> None:
@@ -335,7 +361,6 @@ class GameLoop:
             return
 
         # 右键在 BUILD_ACTIVE 中等同于 Esc（取消当前建造），不参与平移。
-        # 见 docs/editor.md §10.4。其它情况（IDLE 等）右键继续走平移分支。
         if (
             event.button == 3
             and self.editor.mode == EditMode.BUILD
@@ -344,10 +369,14 @@ class GameLoop:
             self.editor.handle_cancel()
             return
 
-        # 列车模式：左键专用于选点，优先于平移拦截
-        if event.button == 1 and self.train_mode_enabled:
-            self._train_mode_click(self._mouse_world_pos())
-            return
+        # PLAY 模式：左键=选择/放置，右键=下达寻路指令；两者都不触发平移
+        if self.editor.mode == EditMode.PLAY:
+            if event.button == 1:
+                self._play_left_click(self._mouse_world_pos())
+                return
+            if event.button == 3:
+                self._play_right_click(self._mouse_world_pos())
+                return
 
         pan_buttons = self._pan_buttons_for_mode()
         if event.button in pan_buttons:
@@ -408,7 +437,172 @@ class GameLoop:
         )
         return Vec3(wx, wy, 0.0)
 
-    # ===== 列车模式（F 键叠加态）=====
+    # ===== PLAY 模式（P 键叠加态）=====
+
+    def _hit_test_train(self, world_pos: Vec3) -> "TrainEntity | None":
+        """返回点击命中的列车，未命中返回 None。判定：任意 wagon 中心 < 5m。"""
+        HIT_RADIUS = 5.0
+        for train in self.trains:
+            poses = train.kinematics.get_all_wagon_poses(train.state.s)
+            for pose in poses:
+                if (pose.position - world_pos).length() < HIT_RADIUS:
+                    return train
+        return None
+
+    def _play_left_click(self, world_pos: Vec3) -> None:
+        """左键：切换焦点列车 / 放置新列车（两步流程）。"""
+        from model.pathfinding import Path, _directed_from
+        from model.train_physics import RealisticElectric
+        from model.wagon import create_simple_wagon, Consist
+        from model.train_entity import TrainEntity, TrainState
+
+        # 优先：命中已有列车 → 切换焦点
+        hit = self._hit_test_train(world_pos)
+        if hit is not None:
+            if self.active_train is not hit:
+                self.active_train = hit
+                self.train_v_target = hit.v_target
+                self.train_path = None
+                idx = self.trains.index(hit) + 1
+                print(f"PLAY: 选中列车 #{idx}")
+            return
+
+        # 放置流程第一步：选节点
+        if self.train_placement_node_id is None:
+            node_id = self._snap_node_at(world_pos)
+            if node_id is None:
+                print("PLAY: 左键点选节点放置新列车，右键下达寻路指令")
+                return
+            node = self.network.nodes.get(node_id)
+            if not node or not node.incident_edge_ids:
+                print(f"PLAY: 节点 {node_id} 无关联边，无法放置")
+                return
+            locomotive = create_simple_wagon(length=20.0, mass=50.0, P_rated=3000.0)
+            coach1     = create_simple_wagon(length=18.0, mass=45.0, P_rated=None)
+            coach2     = create_simple_wagon(length=22.0, mass=60.0, P_rated=None)
+            self.train_placement_consist = Consist(wagons=[locomotive, coach1, coach2])
+            self.train_placement_node_id = node_id
+            print(f"PLAY: 节点 {node_id} 已选，左键点相邻节点指定朝向")
+            return
+
+        # 放置流程第二步：选朝向
+        target_node_id = self._snap_node_at(world_pos)
+        if target_node_id is None:
+            print("PLAY: 请点选相邻节点指定朝向")
+            return
+        placement_node = self.network.nodes[self.train_placement_node_id]
+        edge_id = None
+        for eid in placement_node.incident_edge_ids:
+            edge = self.network.edges[eid]
+            if edge.node_a_id == target_node_id or edge.node_b_id == target_node_id:
+                edge_id = eid
+                break
+        if edge_id is None:
+            print(f"PLAY: 节点 {target_node_id} 与放置节点不相邻")
+            return
+        park_directed = _directed_from(self.network, edge_id, self.train_placement_node_id)
+        park_path = Path(edges=[park_directed],
+                         total_cost=self.network.edges[edge_id].length)
+        state = TrainState(path=park_path, s=0.0, v=0.0, consist=self.train_placement_consist)
+        new_train = TrainEntity(state, self.network, RealisticElectric())
+        self.trains.append(new_train)
+        self.active_train = new_train
+        self.train_v_target = 0.0
+        self.camera.follow_enabled = True
+        self.train_placement_node_id = None
+        self.train_placement_consist = None
+        idx = self.trains.index(new_train) + 1
+        print(f"PLAY: 列车 #{idx} 已放置，右键点击目标位置出发")
+
+    def _play_right_click(self, world_pos: Vec3) -> None:
+        """右键：对焦点列车下达寻路指令。"""
+        if self.active_train is None:
+            print("PLAY: 未选中列车，左键先选中或放置")
+            return
+        self._issue_path_order(world_pos)
+
+    def _issue_path_order(self, world_pos: Vec3) -> None:
+        """对 active_train 下达寻路指令（Edge 途中或 Node）。"""
+        from model.pathfinding import find_path_from_point, Path
+
+        train = self.active_train
+        start_edge_id, start_t = train.current_edge_and_t()
+        start_direction = train.current_direction()
+        tail_path, initial_offset_tail, s_head_in_tail = train.tail_coverage_path()
+
+        def _edge_pos(edge, t):
+            na = self.network.nodes[edge.node_a_id].position
+            nb = self.network.nodes[edge.node_b_id].position
+            if not edge.is_arc:
+                return na + (nb - na) * t
+            from model.geom_utils import rotate_around_axis
+            return edge.arc_center + rotate_around_axis(
+                edge.arc_start_dir, edge.arc_normal, edge.arc_angle_rad * t
+            ) * edge.arc_radius
+
+        def _merge(tail, new_path):
+            from model.pathfinding import Path
+            if tail.edges and new_path.edges and tail.edges[-1] == new_path.edges[0]:
+                return Path(
+                    edges=tail.edges + new_path.edges[1:],
+                    total_cost=tail.total_cost + new_path.total_cost
+                              - self.network.edges[new_path.edges[0][0]].length
+                )
+            return Path(edges=tail.edges + new_path.edges,
+                        total_cost=tail.total_cost + new_path.total_cost)
+
+        goal = self._snap_edge_at(world_pos)
+        if goal is not None:
+            goal_edge_id, goal_t = goal
+            result = find_path_from_point(
+                self.network, start_edge_id, start_t, goal_edge_id, goal_t,
+                start_direction=start_direction, allow_reversal=True, debug=True,
+            )
+            if result is None:
+                print(f"PLAY: 不可达 (edge {start_edge_id} → edge {goal_edge_id})")
+                return
+            path, _, end_offset = result
+            se = self.network.edges[start_edge_id]
+            ge = self.network.edges[goal_edge_id]
+            self.train_path_virtual_points = [_edge_pos(se, start_t), _edge_pos(ge, goal_t)]
+            full = _merge(tail_path, path)
+            self.train_path = full
+            train.assign_path(full, initial_offset_tail, end_offset)
+            train.state.s = s_head_in_tail
+            self.train_v_target = 0.0
+            idx = self.trains.index(train) + 1
+            print(f"PLAY: 列车 #{idx} → edge {goal_edge_id} t={goal_t:.2f}，{len(full.edges)} 段 {full.total_cost:.0f} m")
+            return
+
+        node_id = self._snap_node_at(world_pos)
+        if node_id is None:
+            print("PLAY: 右键请靠近节点或轨道")
+            return
+        goal_node = self.network.nodes.get(node_id)
+        if goal_node is None:
+            return
+        goal_edge_id = next(iter(goal_node.incident_edge_ids))
+        goal_edge = self.network.edges[goal_edge_id]
+        goal_t = 0.0 if goal_edge.node_a_id == node_id else 1.0
+        result = find_path_from_point(
+            self.network, start_edge_id, start_t, goal_edge_id, goal_t,
+            start_direction=start_direction, allow_reversal=True, debug=True,
+        )
+        if result is None:
+            print(f"PLAY: 节点 {node_id} 不可达")
+            return
+        path, _, end_offset = result
+        se = self.network.edges[start_edge_id]
+        ge = self.network.edges[goal_edge_id]
+        self.train_path_virtual_points = [_edge_pos(se, start_t), _edge_pos(ge, goal_t)]
+        full = _merge(tail_path, path)
+        self.train_path = full
+        train.assign_path(full, initial_offset_tail, end_offset)
+        train.state.s = s_head_in_tail
+        self.train_v_target = 0.0
+        idx = self.trains.index(train) + 1
+        seq = " → ".join(f"e{eid}({'+' if d > 0 else '-'})" for eid, d in full.edges)
+        print(f"PLAY: 列车 #{idx} → 节点 {node_id}，{len(full.edges)} 段 {full.total_cost:.0f} m\n  {seq}")
 
     def _snap_node_at(self, world_pos: Vec3) -> int | None:
         """返回点击命中的节点 ID，未命中返回 None。"""
@@ -423,229 +617,8 @@ class GameLoop:
         return None
 
     def _train_mode_click(self, world_pos: Vec3) -> None:
-        from model.pathfinding import find_path_from_point, find_path_between_nodes
-        from model.pathfinding import Path, _directed_from
-        from model.train_physics import RealisticElectric
-        from model.wagon import create_simple_wagon, Consist
-        from model.train_entity import TrainEntity, TrainState
+        pass  # ponytail: 旧入口，已由 _play_left_click/_play_right_click 替代，保留避免引用断裂
 
-        # 第一步：选择放置节点
-        if self.train is None and self.train_placement_node_id is None:
-            node_id = self._snap_node_at(world_pos)
-            if node_id is None:
-                print("列车模式：请点选节点放置列车")
-                return
-
-            node = self.network.nodes.get(node_id)
-            if not node or not node.incident_edge_ids:
-                print(f"列车模式：节点 {node_id} 无关联边，无法放置")
-                return
-
-            # 保存放置节点和车组，进入"选择朝向"状态
-            locomotive = create_simple_wagon(length=20.0, mass=50.0, P_rated=3000.0)
-            coach1     = create_simple_wagon(length=18.0, mass=45.0, P_rated=None)
-            coach2     = create_simple_wagon(length=22.0, mass=60.0, P_rated=None)
-            self.train_placement_consist = Consist(wagons=[locomotive, coach1, coach2])
-            self.train_placement_node_id = node_id
-            print(f"列车模式：已选择节点 {node_id}，点击相邻节点指定朝向")
-            return
-
-        # 第二步：选择朝向（点击相邻节点）
-        if self.train is None and self.train_placement_node_id is not None:
-            target_node_id = self._snap_node_at(world_pos)
-            if target_node_id is None:
-                print("列车模式：请点选相邻节点指定朝向")
-                return
-
-            # 检查两节点是否相邻
-            placement_node = self.network.nodes[self.train_placement_node_id]
-            edge_id = None
-            for eid in placement_node.incident_edge_ids:
-                edge = self.network.edges[eid]
-                if edge.node_a_id == target_node_id or edge.node_b_id == target_node_id:
-                    edge_id = eid
-                    break
-
-            if edge_id is None:
-                print(f"列车模式：节点 {target_node_id} 与放置节点 {self.train_placement_node_id} 不相邻")
-                return
-
-            # 创建朝向目标节点的有向边
-            park_directed = _directed_from(self.network, edge_id, self.train_placement_node_id)
-            park_path = Path(edges=[park_directed],
-                             total_cost=self.network.edges[edge_id].length)
-
-            state = TrainState(path=park_path, s=0.0, v=0.0, consist=self.train_placement_consist)
-            physics = RealisticElectric()
-            self.train = TrainEntity(state, self.network, physics)
-            self.train_v_target = 0.0
-            self.camera.follow_enabled = True
-
-            # 清除放置状态
-            self.train_placement_node_id = None
-            self.train_placement_consist = None
-            print(f"列车模式：列车已放置，朝向节点 {target_node_id}，点击目标位置出发")
-            return
-
-        # 后续点击：从当前位置寻路到目标（支持 Edge 途中）
-        start_edge_id, start_t = self.train.current_edge_and_t()
-        start_direction = self.train.current_direction()
-
-        # 提取车尾覆盖路径（用于拼接到新路径前，保持车尾连续）
-        tail_path, initial_offset_tail, s_head_in_tail = self.train.tail_coverage_path()
-
-        # 寻路时总是允许折返（通过高代价自然避免不必要的折返）
-        # 折返路径：先到终点 → 停车 → 折返，寻路算法会自动规划
-        allow_reversal = True
-
-        print(f"[折返判定] v={self.train.state.v:.2f} m/s, s={self.train.state.s:.1f}/{self.train.kinematics.total_length:.1f} m")
-        print(f"[折返判定] allow_reversal=True（总是允许，通过代价避免不必要折返）")
-
-        # 优先尝试 snap 到 Edge 途中
-        goal = self._snap_edge_at(world_pos)
-        if goal is not None:
-            goal_edge_id, goal_t = goal
-            result = find_path_from_point(
-                self.network,
-                start_edge_id, start_t,
-                goal_edge_id, goal_t,
-                start_direction=start_direction,
-                allow_reversal=allow_reversal,
-                debug=True,  # 启用调试日志
-            )
-            if result is None:
-                print(f"列车模式：不可达（edge {start_edge_id} t={start_t:.2f} → edge {goal_edge_id} t={goal_t:.2f}）")
-                return
-            path, start_offset, end_offset = result
-
-            # 记录虚拟节点位置（调试可视化）
-            start_edge = self.network.edges[start_edge_id]
-            goal_edge = self.network.edges[goal_edge_id]
-
-            # 手动插值计算虚拟节点位置
-            def edge_position_at(edge, t):
-                node_a = self.network.nodes[edge.node_a_id]
-                node_b = self.network.nodes[edge.node_b_id]
-                if not edge.is_arc:
-                    return node_a.position + (node_b.position - node_a.position) * t
-                # 圆弧
-                angle_at_t = edge.arc_angle_rad * t
-                from model.geom_utils import rotate_around_axis
-                rotated_dir = rotate_around_axis(edge.arc_start_dir, edge.arc_normal, angle_at_t)
-                return edge.arc_center + rotated_dir * edge.arc_radius
-
-            start_virtual_pos = edge_position_at(start_edge, start_t)
-            goal_virtual_pos = edge_position_at(goal_edge, goal_t)
-            self.train_path_virtual_points = [start_virtual_pos, goal_virtual_pos]
-
-            # 拼接车尾路径到新路径前（保证覆盖整列车身）
-            from model.pathfinding import Path
-
-            # 去重：如果 tail_path 的最后一条 Edge 和 path 的第一条 Edge 完全相同（edge_id + direction），跳过 path 的第一条
-            if (tail_path.edges and path.edges and
-                tail_path.edges[-1] == path.edges[0]):  # 比较 (edge_id, direction) 元组
-                # Edge 完全重复，只保留一份
-                full_path = Path(
-                    edges=tail_path.edges + path.edges[1:],
-                    total_cost=tail_path.total_cost + path.total_cost - self.network.edges[path.edges[0][0]].length
-                )
-            else:
-                full_path = Path(
-                    edges=tail_path.edges + path.edges,
-                    total_cost=tail_path.total_cost + path.total_cost
-                )
-
-            # full_start_offset = 车尾在完整路径首段的偏移
-            full_start_offset = initial_offset_tail
-
-            self.train_path = full_path
-            self.train.assign_path(full_path, full_start_offset, end_offset)
-            # 手动调整 state.s 为车头在新路径上的位置
-            self.train.state.s = s_head_in_tail
-            self.train_v_target = 0.0
-            print(
-                f"列车模式：→ edge {goal_edge_id} t={goal_t:.2f}，"
-                f"共 {len(full_path.edges)} 段，路径长 {full_path.total_cost:.1f} m"
-            )
-            print(f"  → 按住 ↑ 加速，↓ 减速，空格 紧急停止")
-            return
-
-        # snap 未命中 Edge，回退到 Node
-        node_id = self._snap_node_at(world_pos)
-        if node_id is None:
-            print("列车模式：未点中轨道，请靠近节点或轨道点击")
-            return
-
-        goal_node = self.network.nodes.get(node_id)
-        if goal_node is None:
-            return
-        # 以目标节点所在任意边的端点 t=0 作为目标
-        goal_edge_id = next(iter(goal_node.incident_edge_ids))
-        goal_edge = self.network.edges[goal_edge_id]
-        goal_t = 0.0 if goal_edge.node_a_id == node_id else 1.0
-
-        result = find_path_from_point(
-            self.network,
-            start_edge_id, start_t,
-            goal_edge_id, goal_t,
-            start_direction=start_direction,
-            allow_reversal=allow_reversal,
-            debug=True,  # 启用调试日志
-        )
-        if result is None:
-            print(f"列车模式：节点 {node_id} 不可达")
-            return
-        path, start_offset, end_offset = result
-
-        # 记录虚拟节点位置（调试可视化）
-        start_edge = self.network.edges[start_edge_id]
-        goal_edge = self.network.edges[goal_edge_id]
-
-        # 手动插值计算虚拟节点位置
-        def edge_position_at(edge, t):
-            node_a = self.network.nodes[edge.node_a_id]
-            node_b = self.network.nodes[edge.node_b_id]
-            if not edge.is_arc:
-                return node_a.position + (node_b.position - node_a.position) * t
-            # 圆弧
-            angle_at_t = edge.arc_angle_rad * t
-            from model.geom_utils import rotate_around_axis
-            rotated_dir = rotate_around_axis(edge.arc_start_dir, edge.arc_normal, angle_at_t)
-            return edge.arc_center + rotated_dir * edge.arc_radius
-
-        start_virtual_pos = edge_position_at(start_edge, start_t)
-        goal_virtual_pos = edge_position_at(goal_edge, goal_t)
-        self.train_path_virtual_points = [start_virtual_pos, goal_virtual_pos]
-
-        # 拼接车尾路径到新路径前
-        from model.pathfinding import Path
-
-        # 去重：如果 tail_path 的最后一条 Edge 和 path 的第一条 Edge 完全相同（edge_id + direction），跳过 path 的第一条
-        if (tail_path.edges and path.edges and
-            tail_path.edges[-1] == path.edges[0]):  # 比较 (edge_id, direction) 元组
-            full_path = Path(
-                edges=tail_path.edges + path.edges[1:],
-                total_cost=tail_path.total_cost + path.total_cost - self.network.edges[path.edges[0][0]].length
-            )
-        else:
-            full_path = Path(
-                edges=tail_path.edges + path.edges,
-                total_cost=tail_path.total_cost + path.total_cost
-            )
-
-        full_start_offset = initial_offset_tail
-
-        self.train_path = full_path
-        self.train.assign_path(full_path, full_start_offset, end_offset)
-        # 手动调整 state.s 为车头在新路径上的位置
-        self.train.state.s = s_head_in_tail
-        self.train_v_target = 0.0
-        seq = " → ".join(f"e{eid}({'+' if d > 0 else '-'})" for eid, d in full_path.edges)
-        print(
-            f"列车模式：→ 节点 {node_id}，共 {len(full_path.edges)} 段，"
-            f"总长 {full_path.total_cost:.1f} m\n  {seq}"
-        )
-        print(f"  → 按住 ↑ 加速，↓ 减速，空格 紧急停止")
 
 
 def run_game(geo_path: str) -> None:

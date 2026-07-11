@@ -61,6 +61,7 @@ MODE_NAMES: dict[EditMode, str] = {
     EditMode.IDLE: "IDLE",
     EditMode.BUILD: "BUILD (B)",
     EditMode.DELETE: "DELETE (D)",
+    EditMode.PLAY: "PLAY (P)",
 }
 
 
@@ -604,17 +605,17 @@ def draw_debug_train(
     kinematics,  # PathKinematics 或 RigidWagonKinematics
     s: float,
     occupied: bool = False,
+    color: tuple[int, int, int] | None = None,
 ) -> None:
     """绘制 debug 列车：质点（方块+箭头）或刚体车厢（多节转向架+连线）。
 
-    - 质点模型（PathKinematics）: 橙色方块 + heading 箭头
-    - 刚体模型（RigidWagonKinematics）: 所有转向架圆圈 + 连线（线框）
-    - occupied=True: 用红色绘制，表示实时占位（区别于橙色路径预览）
+    color 若指定则覆盖 occupied 选色。
     """
     if kinematics is None:
         return
 
-    color = COLOR_TRAIN_OCCUPIED if occupied else COLOR_TRAIN
+    if color is None:
+        color = COLOR_TRAIN_OCCUPIED if occupied else COLOR_TRAIN
 
     w = surface.get_width()
     h = surface.get_height()
