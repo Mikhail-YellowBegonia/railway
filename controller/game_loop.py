@@ -385,6 +385,9 @@ class GameLoop:
         start_edge_id, start_t = self.train.current_edge_and_t()
         start_direction = self.train.current_direction()
 
+        # 提取车尾覆盖路径（用于拼接到新路径前，保持车尾连续）
+        tail_path, tail_head_offset = self.train.tail_coverage_path()
+
         # 优先尝试 snap 到 Edge 途中
         goal = self._snap_edge_at(world_pos)
         if goal is not None:
@@ -400,12 +403,21 @@ class GameLoop:
                 print(f"列车模式：不可达（edge {start_edge_id} t={start_t:.2f} → edge {goal_edge_id} t={goal_t:.2f}）")
                 return
             path, start_offset, end_offset = result
-            self.train_path = path
-            self.train.assign_path(path, start_offset, end_offset)
+
+            # 拼接车尾路径到新路径前（保证覆盖整列车身）
+            from model.pathfinding import Path
+            full_path = Path(
+                edges=tail_path.edges + path.edges,
+                total_cost=tail_path.total_cost + path.total_cost
+            )
+            full_start_offset = tail_path.total_cost - tail_head_offset + start_offset
+
+            self.train_path = full_path
+            self.train.assign_path(full_path, full_start_offset, end_offset)
             self.train_v_target = 0.0
             print(
                 f"列车模式：→ edge {goal_edge_id} t={goal_t:.2f}，"
-                f"共 {len(path.edges)} 段，路径长 {path.total_cost:.1f} m"
+                f"共 {len(full_path.edges)} 段，路径长 {full_path.total_cost:.1f} m"
             )
             print(f"  → 按住 ↑ 加速，↓ 减速，空格 紧急停止")
             return
@@ -435,13 +447,22 @@ class GameLoop:
             print(f"列车模式：节点 {node_id} 不可达")
             return
         path, start_offset, end_offset = result
-        self.train_path = path
-        self.train.assign_path(path, start_offset, end_offset)
+
+        # 拼接车尾路径到新路径前
+        from model.pathfinding import Path
+        full_path = Path(
+            edges=tail_path.edges + path.edges,
+            total_cost=tail_path.total_cost + path.total_cost
+        )
+        full_start_offset = tail_path.total_cost - tail_head_offset + start_offset
+
+        self.train_path = full_path
+        self.train.assign_path(full_path, full_start_offset, end_offset)
         self.train_v_target = 0.0
-        seq = " → ".join(f"e{eid}({'+' if d > 0 else '-'})" for eid, d in path.edges)
+        seq = " → ".join(f"e{eid}({'+' if d > 0 else '-'})" for eid, d in full_path.edges)
         print(
-            f"列车模式：→ 节点 {node_id}，共 {len(path.edges)} 段，"
-            f"总长 {path.total_cost:.1f} m\n  {seq}"
+            f"列车模式：→ 节点 {node_id}，共 {len(full_path.edges)} 段，"
+            f"总长 {full_path.total_cost:.1f} m\n  {seq}"
         )
         print(f"  → 按住 ↑ 加速，↓ 减速，空格 紧急停止")
 

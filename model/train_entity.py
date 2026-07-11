@@ -178,3 +178,17 @@ class TrainEntity:
             return 1  # 默认正方向
         _, direction = self.state.path.edges[0]
         return direction
+
+    def tail_coverage_path(self) -> tuple[Path, float]:
+        """返回覆盖车尾到车头的路径片段（用于路径拼接）。
+
+        返回:
+            (tail_path, head_offset)
+            - tail_path: 从车尾位置开始到车头位置的子路径
+            - head_offset: 车头在 tail_path 末端的偏移（= tail_path.total_cost - head_offset 即为车头绝对位置）
+
+        用于换路径时保持车尾连续性。
+        """
+        s_head = self.kinematics.initial_offset + self.state.s
+        s_tail = max(0.0, s_head - self.state.consist.total_length)
+        return self.kinematics._path_kin.sub_path(s_tail, s_head)
