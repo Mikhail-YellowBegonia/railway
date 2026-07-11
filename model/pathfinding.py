@@ -94,8 +94,9 @@ def neighbors(
             continue
         result.append((nxt, 0.0))
 
-    # 折返：终端节点（连接数=1）时允许沿原边反向出发
-    if allow_reversal and network.nodes[node_id].connection_count() == 1:
+    # 折返：allow_reversal=True 时允许在任意节点沿原边反向出发
+    # （不限于终端节点，支持复杂场景下的中途折返）
+    if allow_reversal:
         reversed_dir = (edge_id, -direction)
         if passable_fn(network.edges[edge_id], -direction):
             result.append((reversed_dir, REVERSAL_PENALTY))
