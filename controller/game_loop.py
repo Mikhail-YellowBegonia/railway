@@ -61,10 +61,13 @@ class GameLoop:
         self.debug_train_active = False
         self.debug_train_kinematics = None  # model.kinematics.PathKinematics | None
         self.debug_train_physics = None     # model.train_physics.TrainPhysics | None
+        self.debug_train_consist = None     # model.wagon.Consist | None
+        self.debug_train_controller = None  # model.train_controller.SimpleSpeedController | None
         # 列车状态（由 GameLoop 管理，物理层只计算加速度）
-        self.debug_train_s = 0.0  # 弧长（米）
-        self.debug_train_v = 0.0  # 速度（m/s）
-        self.debug_train_a = 0.0  # 加速度（m/s²）
+        self.debug_train_s = 0.0        # 弧长（米）
+        self.debug_train_v = 0.0        # 速度（m/s）
+        self.debug_train_a = 0.0        # 加速度（m/s²）
+        self.debug_train_v_target = 0.0 # 目标速度（m/s），由玩家设定
 
     def run(self) -> None:
         while self.running:
@@ -76,16 +79,21 @@ class GameLoop:
 
             # 更新 debug 列车（物理层 + 状态积分）
             if self.debug_train_active and self.debug_train_physics is not None:
-                # 方向键控制油门/制动（临时交互，AI 调度前）
-                keys = pygame.key.get_pressed()
-                if keys[pygame.K_UP]:
-                    throttle, brake = 1.0, 0.0
-                elif keys[pygame.K_DOWN]:
-                    throttle, brake = 0.0, 1.0
-                else:
-                    throttle, brake = 0.0, 0.0  # 惰行
-
                 dt = self.clock.get_time() / 1000.0
+
+                # ↑/↓ 调整目标速度（保留 throttle/brake 代码，来源改为 PID）
+                keys = pygame.key.get_pressed()
+                V_MAX = 30.0   # m/s
+                V_STEP = 5.0   # 每次按键调整量（m/s）
+                if keys[pygame.K_UP]:
+                    self.debug_train_v_target = min(V_MAX, self.debug_train_v_target + V_STEP * dt)
+                elif keys[pygame.K_DOWN]:
+                    self.debug_train_v_target = max(0.0, self.debug_train_v_target - V_STEP * dt)
+
+                # PID：目标速度 → throttle/brake
+                throttle, brake = self.debug_train_controller.update(
+                    self.debug_train_v_target, self.debug_train_v, dt
+                )
 
                 # 物理层：计算加速度（无状态）
                 self.debug_train_a = self.debug_train_physics.compute_acceleration(
@@ -157,6 +165,7 @@ class GameLoop:
                         self.debug_train_v,
                         self.debug_train_a,
                         self.debug_train_kinematics.total_length,
+                        self.debug_train_v_target,
                     )
             pygame.display.flip()
             self.clock.tick(60)
@@ -240,12 +249,15 @@ class GameLoop:
             status = "开启" if self.camera.follow_enabled else "关闭"
             print(f"相机跟随: {status}")
         elif event.key == pygame.K_SPACE:
-            # 空格键重置列车到起点（A3）
+            # 空格键重置列车到起点
             if self.debug_train_active and self.debug_train_kinematics:
                 self.debug_train_s = 0.0
                 self.debug_train_v = 0.0
                 self.debug_train_a = 0.0
-                self.debug_train_active = True  # 重新激活（如果到终点停止了）
+                self.debug_train_v_target = 0.0
+                if self.debug_train_controller:
+                    self.debug_train_controller.reset()
+                self.debug_train_active = True
                 print("列车已重置到起点")
 
     def _handle_mouse_down(self, event: pygame.event.Event) -> None:
@@ -367,7 +379,8 @@ class GameLoop:
         # 选终点并求路径
         self.pathtest_goal_node = node_id
         path = find_path_between_nodes(
-            self.network, self.pathtest_start_node, self.pathtest_goal_node
+            self.network, self.pathtest_start_node, self.pathtest_goal_node,
+            allow_reversal=True,
         )
         self.pathtest_path = path
         if path is None:
@@ -389,18 +402,21 @@ class GameLoop:
             from model.train_physics import RealisticElectric
             from model.rigid_kinematics import RigidWagonKinematics
             from model.wagon import create_simple_wagon, Consist
+            from model.train_controller import SimpleSpeedController
 
             # 阶段 2 测试：1 节动力车 + 2 节拖车
-            locomotive = create_simple_wagon(length=20.0, mass=50.0, P_rated=3000.0)  # 动力车
-            coach1 = create_simple_wagon(length=18.0, mass=45.0, P_rated=None)        # 拖车
-            coach2 = create_simple_wagon(length=22.0, mass=60.0, P_rated=None)        # 拖车
+            locomotive = create_simple_wagon(length=20.0, mass=50.0, P_rated=3000.0)
+            coach1 = create_simple_wagon(length=18.0, mass=45.0, P_rated=None)
+            coach2 = create_simple_wagon(length=22.0, mass=60.0, P_rated=None)
             consist = Consist(wagons=[locomotive, coach1, coach2])
             self.debug_train_kinematics = RigidWagonKinematics(self.network, path, consist)
-            self.debug_train_physics = RealisticElectric()  # 阶段 2：Wagon 级别物理
-            self.debug_train_consist = consist  # 保存引用，传给物理层
+            self.debug_train_physics = RealisticElectric()
+            self.debug_train_consist = consist
+            self.debug_train_controller = SimpleSpeedController()
             self.debug_train_s = 0.0
             self.debug_train_v = 0.0
             self.debug_train_a = 0.0
+            self.debug_train_v_target = 0.0
             self.debug_train_active = True
             # 相机跟随（A1）
             self.camera.follow_enabled = True
