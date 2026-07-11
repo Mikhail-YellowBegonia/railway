@@ -108,8 +108,9 @@ class GameLoop:
             self.renderer.draw_network(self.network, self.editor)
             self.renderer.draw_overlay(self.network, self.editor, mouse_world)
             # 列车模式可视化
-            if self.train_mode_enabled:
-                from view.renderer import draw_pathfinding_debug, draw_debug_train, draw_train_hud
+            if self.train_mode_enabled and self.train_path is not None:
+                from view.renderer import draw_pathfinding_debug, draw_debug_train
+                # 路径预览（橙色）：从起点到终点的完整路径
                 draw_pathfinding_debug(
                     self.renderer.surface,
                     self.camera,
@@ -119,13 +120,28 @@ class GameLoop:
                     None,
                     self.train_path,
                 )
+                # 路径上的预览列车（橙色，s=0 起点）
+                from model.rigid_kinematics import RigidWagonKinematics
+                if self.train is not None:
+                    preview_kin = RigidWagonKinematics(
+                        self.network, self.train_path, self.train.state.consist
+                    )
+                    draw_debug_train(
+                        self.renderer.surface,
+                        self.camera,
+                        preview_kin,
+                        0.0,
+                        occupied=False,
+                    )
             if self.train is not None:
                 from view.renderer import draw_debug_train, draw_train_hud
+                # 实时占位列车（红色）
                 draw_debug_train(
                     self.renderer.surface,
                     self.camera,
                     self.train.kinematics,
                     self.train.state.s,
+                    occupied=True,
                 )
                 # 制动区判断（HUD 显示用）
                 _v = self.train.state.v

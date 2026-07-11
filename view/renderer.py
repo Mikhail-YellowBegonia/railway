@@ -575,6 +575,7 @@ def draw_pathfinding_debug(
 
 # Debug 列车可视化配色
 COLOR_TRAIN = (255, 140, 0)          # 列车方块（橙）
+COLOR_TRAIN_OCCUPIED = (220, 20, 60) # 实时占位（红）
 COLOR_TRAIN_HEADING = (255, 220, 80)  # heading 箭头（亮黄）
 
 
@@ -583,14 +584,18 @@ def draw_debug_train(
     camera: Camera,
     kinematics,  # PathKinematics 或 RigidWagonKinematics
     s: float,
+    occupied: bool = False,
 ) -> None:
     """绘制 debug 列车：质点（方块+箭头）或刚体车厢（多节转向架+连线）。
 
     - 质点模型（PathKinematics）: 橙色方块 + heading 箭头
     - 刚体模型（RigidWagonKinematics）: 所有转向架圆圈 + 连线（线框）
+    - occupied=True: 用红色绘制，表示实时占位（区别于橙色路径预览）
     """
     if kinematics is None:
         return
+
+    color = COLOR_TRAIN_OCCUPIED if occupied else COLOR_TRAIN
 
     w = surface.get_width()
     h = surface.get_height()
@@ -632,14 +637,14 @@ def draw_debug_train(
             corners_screen = [(int(x), int(y)) for x, y in corners_screen]
 
             # 绘制轮廓（线框）
-            pygame.draw.polygon(surface, COLOR_TRAIN, corners_screen, 2)
+            pygame.draw.polygon(surface, color, corners_screen, 2)
 
             # 转向架位置转屏幕坐标
             fx, fy = camera.world_to_screen(front_pose.position.x, front_pose.position.y, w, h)
             rx, ry = camera.world_to_screen(rear_pose.position.x, rear_pose.position.y, w, h)
 
             # 连线（车厢中心线）
-            pygame.draw.line(surface, COLOR_TRAIN, (int(fx), int(fy)), (int(rx), int(ry)), 1)
+            pygame.draw.line(surface, color, (int(fx), int(fy)), (int(rx), int(ry)), 1)
 
             # 前转向架（绿色圆圈）
             pygame.draw.circle(surface, (60, 220, 100), (int(fx), int(fy)), 5)
@@ -660,7 +665,7 @@ def draw_debug_train(
 
         # 画方块（10×10 像素）
         rect = pygame.Rect(int(cx - 5), int(cy - 5), 10, 10)
-        pygame.draw.rect(surface, COLOR_TRAIN, rect)
+        pygame.draw.rect(surface, color, rect)
         pygame.draw.rect(surface, (255, 255, 255), rect, 1)  # 白色边框
 
         # 画 heading 箭头（从方块中心指出 20 像素）
