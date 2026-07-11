@@ -50,24 +50,17 @@ class GameLoop:
         # 空间索引可视化开关（I 键切换）
         self.debug_show_tiles = False
 
-        # 寻路测试叠加态（F 键切换）：不参与编辑器状态机，独立于 EditMode。
-        # 依次点选两个吸附到的节点求最短路径，第三次点击重置。
-        self.pathtest_enabled = False
-        self.pathtest_start_node: int | None = None
-        self.pathtest_goal_node: int | None = None
-        self.pathtest_path = None  # model.pathfinding.Path | None
+        # 列车模式（F 键切换）：
+        #   第一次点击 = 在节点处放置列车（停放状态）
+        #   第二次点击 = 选择目标节点，自动寻路并出发
+        #   第三次点击（已有目标） = 选择新目标，重新寻路
+        self.train_mode_enabled = False
+        self.train_place_node: int | None = None   # 列车放置节点
+        self.train_path = None                     # 当前可视化路径
 
-        # Debug 列车（需求 D + 物理层）：算出 Path 后自动启动
-        self.debug_train_active = False
-        self.debug_train_kinematics = None  # model.kinematics.PathKinematics | None
-        self.debug_train_physics = None     # model.train_physics.TrainPhysics | None
-        self.debug_train_consist = None     # model.wagon.Consist | None
-        self.debug_train_controller = None  # model.train_controller.SimpleSpeedController | None
-        # 列车状态（由 GameLoop 管理，物理层只计算加速度）
-        self.debug_train_s = 0.0        # 弧长（米）
-        self.debug_train_v = 0.0        # 速度（m/s）
-        self.debug_train_a = 0.0        # 加速度（m/s²）
-        self.debug_train_v_target = 0.0 # 目标速度（m/s），由玩家设定
+        # 列车实体（持久存在，停放时 controller=None）
+        self.train: "TrainEntity | None" = None
+        self.train_v_target: float = 0.0           # 玩家设定的巡航速度（m/s）
 
     def run(self) -> None:
         while self.running:
@@ -77,49 +70,24 @@ class GameLoop:
             # 每帧同步键盘修饰键状态到 Editor（force_straight 等）
             self._sync_modifiers()
 
-            # 更新 debug 列车（物理层 + 状态积分）
-            if self.debug_train_active and self.debug_train_physics is not None:
+            # 更新列车（物理层 + 状态积分）
+            if self.train is not None and self.train.is_moving():
                 dt = self.clock.get_time() / 1000.0
 
-                # ↑/↓ 调整目标速度（保留 throttle/brake 代码，来源改为 PID）
+                # ↑/↓ 调整目标速度
                 keys = pygame.key.get_pressed()
-                V_MAX = 30.0   # m/s
-                V_STEP = 5.0   # 每次按键调整量（m/s）
+                V_MAX = 30.0
+                V_STEP = 5.0
                 if keys[pygame.K_UP]:
-                    self.debug_train_v_target = min(V_MAX, self.debug_train_v_target + V_STEP * dt)
+                    self.train_v_target = min(V_MAX, self.train_v_target + V_STEP * dt)
                 elif keys[pygame.K_DOWN]:
-                    self.debug_train_v_target = max(0.0, self.debug_train_v_target - V_STEP * dt)
+                    self.train_v_target = max(0.0, self.train_v_target - V_STEP * dt)
 
-                # PID + 制动曲线：目标速度 → throttle/brake
-                throttle, brake = self.debug_train_controller.update(
-                    self.debug_train_v,
-                    self.debug_train_s,
-                    self.debug_train_kinematics.total_length,
-                    self.debug_train_v_target,
-                    dt,
-                )
+                self.train.update(dt, self.train_v_target)
 
-                # 物理层：计算加速度（无状态）
-                self.debug_train_a = self.debug_train_physics.compute_acceleration(
-                    self.debug_train_v, throttle, brake, self.debug_train_consist
-                )
-
-                # 状态积分：v 和 s 的欧拉更新
-                self.debug_train_v += self.debug_train_a * dt
-                self.debug_train_v = max(0.0, self.debug_train_v)  # 速度不能为负
-                self.debug_train_s += self.debug_train_v * dt
-                self.debug_train_s = max(0.0, min(self.debug_train_s, self.debug_train_kinematics.total_length))
-
-                # 到达终点停止（由 BrakingController 判断）
-                if self.debug_train_controller.stopped:
-                    self.debug_train_v = 0.0
-                    self.debug_train_a = 0.0
-                    self.debug_train_active = False
-
-                # 相机跟随列车（A1）
-                if self.camera.follow_enabled:
-                    # D6: 多节编组相机跟随首节车厢
-                    wagon_poses = self.debug_train_kinematics.get_all_wagon_poses(self.debug_train_s)
+                # 相机跟随列车
+                if self.camera.follow_enabled and self.train is not None:
+                    wagon_poses = self.train.kinematics.get_all_wagon_poses(self.train.state.s)
                     if wagon_poses:
                         lead_pose = wagon_poses[0]
                         self.camera.set_center_smooth(lead_pose.position.x, lead_pose.position.y)
@@ -141,44 +109,46 @@ class GameLoop:
                 )
             self.renderer.draw_network(self.network, self.editor)
             self.renderer.draw_overlay(self.network, self.editor, mouse_world)
-            # 寻路测试可视化（F 键叠加态）
-            if self.pathtest_enabled:
+            # 列车模式可视化
+            if self.train_mode_enabled:
                 from view.renderer import draw_pathfinding_debug, draw_debug_train, draw_train_hud
                 draw_pathfinding_debug(
                     self.renderer.surface,
                     self.camera,
                     self.network,
                     self.renderer._font,
-                    self.pathtest_start_node,
-                    self.pathtest_goal_node,
-                    self.pathtest_path,
+                    self.train_place_node,
+                    None,
+                    self.train_path,
                 )
-                # Debug 列车（需求 D）
-                if self.debug_train_active and self.debug_train_physics:
-                    draw_debug_train(
-                        self.renderer.surface,
-                        self.camera,
-                        self.debug_train_kinematics,
-                        self.debug_train_s,
-                    )
-                    # 制动区判断（用于 HUD 显示）
-                    _a_b = abs(self.debug_train_physics.compute_acceleration(
-                        self.debug_train_v, 0.0, 1.0, self.debug_train_consist))
-                    _d_stop = (self.debug_train_v ** 2) / max(1e-6, 2 * _a_b) \
-                              * self.debug_train_controller.safety_margin
-                    _in_braking = (self.debug_train_kinematics.total_length
-                                   - self.debug_train_s) <= _d_stop
-                    # 列车状态 HUD
-                    draw_train_hud(
-                        self.renderer.surface,
-                        self.renderer._font,
-                        self.debug_train_s,
-                        self.debug_train_v,
-                        self.debug_train_a,
-                        self.debug_train_kinematics.total_length,
-                        self.debug_train_v_target,
-                        braking=_in_braking,
-                    )
+            if self.train is not None:
+                from view.renderer import draw_debug_train, draw_train_hud
+                draw_debug_train(
+                    self.renderer.surface,
+                    self.camera,
+                    self.train.kinematics,
+                    self.train.state.s,
+                )
+                # 制动区判断（HUD 显示用）
+                _v = self.train.state.v
+                _a_b = abs(self.train.physics.compute_acceleration(
+                    _v, 0.0, 1.0, self.train.state.consist))
+                _in_braking = False
+                if self.train.controller is not None:
+                    _d_stop = (_v ** 2) / max(1e-6, 2 * _a_b) \
+                              * self.train.controller.safety_margin
+                    _in_braking = (self.train.kinematics.total_length
+                                   - self.train.state.s) <= _d_stop
+                draw_train_hud(
+                    self.renderer.surface,
+                    self.renderer._font,
+                    self.train.state.s,
+                    self.train.state.v,
+                    self.train.last_a,
+                    self.train.kinematics.total_length,
+                    self.train_v_target,
+                    braking=_in_braking,
+                )
             pygame.display.flip()
             self.clock.tick(60)
 
@@ -250,27 +220,24 @@ class GameLoop:
             status = "开启" if self.debug_show_tiles else "关闭"
             print(f"空间索引可视化: {status}")
         elif event.key == pygame.K_f:
-            # F 键切换寻路测试叠加态（debug 用）
-            self.pathtest_enabled = not self.pathtest_enabled
-            self._reset_pathtest()
-            status = "开启" if self.pathtest_enabled else "关闭"
-            print(f"寻路测试: {status}（点选起点、终点两个节点）")
+            # F 键切换列车模式
+            self.train_mode_enabled = not self.train_mode_enabled
+            if not self.train_mode_enabled:
+                self.train_place_node = None
+                self.train_path = None
+            status = "开启" if self.train_mode_enabled else "关闭"
+            print(f"列车模式: {status}（第一次点击放置列车，第二次点击选择目标）")
         elif event.key == pygame.K_c:
             # C 键切换相机跟随（A1）
             self.camera.follow_enabled = not self.camera.follow_enabled
             status = "开启" if self.camera.follow_enabled else "关闭"
             print(f"相机跟随: {status}")
         elif event.key == pygame.K_SPACE:
-            # 空格键重置列车到起点
-            if self.debug_train_active and self.debug_train_kinematics:
-                self.debug_train_s = 0.0
-                self.debug_train_v = 0.0
-                self.debug_train_a = 0.0
-                self.debug_train_v_target = 0.0
-                if self.debug_train_controller:
-                    self.debug_train_controller.reset()
-                self.debug_train_active = True
-                print("列车已重置到起点")
+            # 空格键：列车紧急停止（emergency_stop）
+            if self.train is not None:
+                self.train.emergency_stop()
+                self.train_v_target = 0.0
+                print("列车紧急停止")
     def _handle_mouse_down(self, event: pygame.event.Event) -> None:
         # 滚轮先处理（不参与平移逻辑）
         if event.button in (4, 5):
@@ -287,9 +254,9 @@ class GameLoop:
             self.editor.handle_cancel()
             return
 
-        # 寻路测试态：左键专用于选点，优先于平移拦截（否则 IDLE 下左键会被平移分支吃掉）
-        if event.button == 1 and self.pathtest_enabled:
-            self._pathtest_click(self._mouse_world_pos())
+        # 列车模式：左键专用于选点，优先于平移拦截
+        if event.button == 1 and self.train_mode_enabled:
+            self._train_mode_click(self._mouse_world_pos())
             return
 
         pan_buttons = self._pan_buttons_for_mode()
@@ -351,90 +318,76 @@ class GameLoop:
         )
         return Vec3(wx, wy, 0.0)
 
-    # ===== 寻路测试（F 键叠加态，debug） =====
-
-    def _reset_pathtest(self) -> None:
-        self.pathtest_start_node = None
-        self.pathtest_goal_node = None
-        self.pathtest_path = None
-        # 重置时停止 debug 列车
-        self.debug_train_active = False
-        self.debug_train_kinematics = None
-        self.debug_train_physics = None
-        self.debug_train_s = 0.0
-        self.debug_train_v = 0.0
-        self.debug_train_a = 0.0
+    # ===== 列车模式（F 键叠加态）=====
 
     def _snap_node_at(self, world_pos: Vec3) -> int | None:
         """复用编辑器吸附系统，返回点击命中的节点 ID（未命中节点返回 None）。"""
         snap = self.editor._snap(world_pos)
         return snap.snapped_node_id
 
-    def _pathtest_click(self, world_pos: Vec3) -> None:
+    def _train_mode_click(self, world_pos: Vec3) -> None:
         from model.pathfinding import find_path_between_nodes
-
-        # 已有完整结果 → 第三次点击重置，重新开始
-        if self.pathtest_start_node is not None and self.pathtest_goal_node is not None:
-            self._reset_pathtest()
+        from model.train_physics import RealisticElectric
+        from model.wagon import create_simple_wagon, Consist
+        from model.train_entity import TrainEntity, TrainState
+        from model.pathfinding import Path
 
         node_id = self._snap_node_at(world_pos)
         if node_id is None:
-            print("寻路测试：未点中节点（请点选轨道节点）")
+            print("列车模式：未点中节点（请点选轨道节点）")
             return
 
-        if self.pathtest_start_node is None:
-            self.pathtest_start_node = node_id
-            print(f"寻路测试：起点 = 节点 {node_id}")
+        # 第一次点击：放置列车
+        if self.train is None or self.train_place_node is None:
+            locomotive = create_simple_wagon(length=20.0, mass=50.0, P_rated=3000.0)
+            coach1    = create_simple_wagon(length=18.0, mass=45.0, P_rated=None)
+            coach2    = create_simple_wagon(length=22.0, mass=60.0, P_rated=None)
+            consist   = Consist(wagons=[locomotive, coach1, coach2])
+            physics   = RealisticElectric()
+
+            # 停放用的最短 Path：从该节点出发的第一条边
+            node = self.network.nodes.get(node_id)
+            if not node or not node.incident_edge_ids:
+                print(f"列车模式：节点 {node_id} 无关联边，无法放置")
+                return
+            edge_id = next(iter(node.incident_edge_ids))
+            from model.pathfinding import _directed_from
+            park_directed = _directed_from(self.network, edge_id, node_id)
+            park_path = Path(edges=[park_directed],
+                             total_cost=self.network.edges[edge_id].length)
+
+            state = TrainState(path=park_path, s=0.0, v=0.0, consist=consist)
+            self.train = TrainEntity(state, self.network, physics)
+            self.train_place_node = node_id
+            self.train_v_target = 0.0
+            self.camera.follow_enabled = True
+            print(f"列车模式：列车已放置在节点 {node_id}，等待选择目标节点")
             return
 
-        # 选终点并求路径
-        self.pathtest_goal_node = node_id
+        # 第二次（及以后）点击：选目标并出发
+        if node_id == self.train_place_node:
+            print("列车模式：目标节点与放置节点相同，请选择不同节点")
+            return
+
         path = find_path_between_nodes(
-            self.network, self.pathtest_start_node, self.pathtest_goal_node,
+            self.network, self.train_place_node, node_id,
             allow_reversal=True,
         )
-        self.pathtest_path = path
         if path is None:
-            print(
-                f"寻路测试：节点 {self.pathtest_start_node} → {node_id} 不可达"
-            )
-            # 不可达，停止 debug 列车
-            self.debug_train_active = False
-            self.debug_train_kinematics = None
-            self.debug_train_physics = None
-        else:
-            seq = " → ".join(f"e{eid}({'+' if d > 0 else '-'})" for eid, d in path.edges)
-            print(
-                f"寻路测试：节点 {self.pathtest_start_node} → {node_id} "
-                f"共 {len(path.edges)} 段，总长 {path.total_cost:.2f}\n  {seq}"
-            )
-            # 自动启动 debug 列车（物理层 + 状态初始化）
-            from model.kinematics import PathKinematics
-            from model.train_physics import RealisticElectric
-            from model.rigid_kinematics import RigidWagonKinematics
-            from model.wagon import create_simple_wagon, Consist
-            from model.train_controller import BrakingController
+            print(f"列车模式：节点 {self.train_place_node} → {node_id} 不可达")
+            return
 
-            # 阶段 2 测试：1 节动力车 + 2 节拖车
-            locomotive = create_simple_wagon(length=20.0, mass=50.0, P_rated=3000.0)
-            coach1 = create_simple_wagon(length=18.0, mass=45.0, P_rated=None)
-            coach2 = create_simple_wagon(length=22.0, mass=60.0, P_rated=None)
-            consist = Consist(wagons=[locomotive, coach1, coach2])
-            self.debug_train_kinematics = RigidWagonKinematics(self.network, path, consist)
-            self.debug_train_physics = RealisticElectric()
-            self.debug_train_consist = consist
-            self.debug_train_controller = BrakingController(self.debug_train_physics, consist)
-            self.debug_train_s = 0.0
-            self.debug_train_v = 0.0
-            self.debug_train_a = 0.0
-            self.debug_train_v_target = 0.0
-            self.debug_train_active = True
-            # 相机跟随（A1）
-            self.camera.follow_enabled = True
-            print(f"  → Debug 列车已启动，路径总长 {self.debug_train_kinematics.total_length:.2f} m")
-            print(f"  → 编组: {len(consist.wagons)} 节车厢，总质量 {consist.total_mass:.1f} 吨，总长 {consist.total_length:.1f} m")
-            print(f"  → 控制：方向键 ↑ 加速，↓ 制动，空格 重置")
-            print(f"  → 相机自动跟随（拖动暂停，C 键切换）")
+        self.train_path = path
+        self.train_place_node = node_id   # 下次点击以当前终点为新起点
+        self.train.assign_path(path)
+        self.train_v_target = 0.0
+
+        seq = " → ".join(f"e{eid}({'+' if d > 0 else '-'})" for eid, d in path.edges)
+        print(
+            f"列车模式：→ 节点 {node_id}，共 {len(path.edges)} 段，"
+            f"总长 {path.total_cost:.1f} m\n  {seq}"
+        )
+        print(f"  → 按住 ↑ 加速，↓ 减速，空格 紧急停止")
 
 
 def run_game(geo_path: str) -> None:

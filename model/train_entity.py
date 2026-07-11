@@ -1,0 +1,135 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+from model.pathfinding import Path
+from model.wagon import Consist
+from model.rigid_kinematics import RigidWagonKinematics
+from model.train_physics import TrainPhysics
+from model.train_controller import BrakingController
+from model.rail_network import RailNetwork
+
+
+@dataclass
+class TrainState:
+    """列车持久化状态（纯数据，几何优先）。
+
+    path + s 唯一确定列车在轨道上的几何位置，包括跨道岔情况。
+    v 为速度，停放时为 0。
+    """
+    path: Path
+    s: float        # 首节前转向架在 path 上的弧长（米）
+    v: float        # 当前速度（m/s），0 = 停放
+    consist: Consist
+
+
+class TrainEntity:
+    """游戏内列车对象（持久存在，不因路径结束而删除）。
+
+    几何逻辑高于物理逻辑：
+    - emergency_stop() 可随时强制归零速度，忽略物理层
+    - controller 为 None 时列车停放，不接受物理更新
+
+    状态机：
+        停放（controller=None）→ 收到指令 → 行驶 → 到达 → 停放
+    """
+
+    def __init__(
+        self,
+        state: TrainState,
+        network: RailNetwork,
+        physics: TrainPhysics,
+    ) -> None:
+        self.state = state
+        self.network = network
+        self.physics = physics
+        self.controller: BrakingController | None = None
+        self.last_a: float = 0.0        # 上一帧加速度（HUD 显示用）
+        self.v_target: float = 0.0      # 玩家设定的巡航速度
+
+        # 从 state 派生的运动学对象
+        self.kinematics = RigidWagonKinematics(
+            network, state.path, state.consist
+        )
+
+    # ------------------------------------------------------------------
+    # 调度接口
+    # ------------------------------------------------------------------
+
+    def assign_path(
+        self,
+        path: Path,
+        start_offset: float = 0.0,
+        end_offset: float = 0.0,
+    ) -> None:
+        """分配新行驶路径，重建运动学对象，启动 BrakingController。
+
+        start_offset / end_offset 来自 find_path_from_point 的返回值。
+        s 从 start_offset 处出发（保持车头位置连续）。
+        """
+        self.state.path = path
+        self.state.s = start_offset
+        self.kinematics = RigidWagonKinematics(
+            self.network, path, self.state.consist,
+            initial_offset=start_offset,
+            end_offset=end_offset,
+        )
+        self.controller = BrakingController(self.physics, self.state.consist)
+        self.controller.reset()
+
+    def emergency_stop(self) -> None:
+        """调度层强制停车：忽略物理，直接归零速度，清除控制器。
+
+        几何状态（path + s）保持不变，列车停在当前位置。
+        """
+        self.state.v = 0.0
+        self.last_a = 0.0
+        self.controller = None
+
+    # ------------------------------------------------------------------
+    # 每帧更新
+    # ------------------------------------------------------------------
+
+    def update(self, dt: float, v_target: float) -> None:
+        """推进一帧物理状态。停放中（controller=None）时跳过。
+
+        参数:
+            dt: 时间步长（秒）
+            v_target: 玩家当前设定的巡航速度（m/s）
+        """
+        if self.controller is None or dt <= 0:
+            return
+
+        self.v_target = v_target
+
+        throttle, brake = self.controller.update(
+            self.state.v,
+            self.state.s,
+            self.kinematics.total_length,
+            v_target,
+            dt,
+        )
+
+        self.last_a = self.physics.compute_acceleration(
+            self.state.v, throttle, brake, self.state.consist
+        )
+
+        self.state.v = max(0.0, self.state.v + self.last_a * dt)
+        self.state.s = max(
+            0.0,
+            min(self.state.s + self.state.v * dt, self.kinematics.total_length),
+        )
+
+        # 到达终点：停放，保留几何状态
+        if self.controller.stopped:
+            self.emergency_stop()
+
+    # ------------------------------------------------------------------
+    # 几何查询（委托给 kinematics）
+    # ------------------------------------------------------------------
+
+    def is_parked(self) -> bool:
+        return self.controller is None
+
+    def is_moving(self) -> bool:
+        return self.controller is not None
