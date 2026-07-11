@@ -90,9 +90,13 @@ class GameLoop:
                 elif keys[pygame.K_DOWN]:
                     self.debug_train_v_target = max(0.0, self.debug_train_v_target - V_STEP * dt)
 
-                # PID：目标速度 → throttle/brake
+                # PID + 制动曲线：目标速度 → throttle/brake
                 throttle, brake = self.debug_train_controller.update(
-                    self.debug_train_v_target, self.debug_train_v, dt
+                    self.debug_train_v,
+                    self.debug_train_s,
+                    self.debug_train_kinematics.total_length,
+                    self.debug_train_v_target,
+                    dt,
                 )
 
                 # 物理层：计算加速度（无状态）
@@ -106,8 +110,8 @@ class GameLoop:
                 self.debug_train_s += self.debug_train_v * dt
                 self.debug_train_s = max(0.0, min(self.debug_train_s, self.debug_train_kinematics.total_length))
 
-                # 到达终点停止
-                if self.debug_train_s >= self.debug_train_kinematics.total_length:
+                # 到达终点停止（由 BrakingController 判断）
+                if self.debug_train_controller.stopped:
                     self.debug_train_v = 0.0
                     self.debug_train_a = 0.0
                     self.debug_train_active = False
@@ -157,7 +161,14 @@ class GameLoop:
                         self.debug_train_kinematics,
                         self.debug_train_s,
                     )
-                    # 列车状态 HUD（A2）
+                    # 制动区判断（用于 HUD 显示）
+                    _a_b = abs(self.debug_train_physics.compute_acceleration(
+                        self.debug_train_v, 0.0, 1.0, self.debug_train_consist))
+                    _d_stop = (self.debug_train_v ** 2) / max(1e-6, 2 * _a_b) \
+                              * self.debug_train_controller.safety_margin
+                    _in_braking = (self.debug_train_kinematics.total_length
+                                   - self.debug_train_s) <= _d_stop
+                    # 列车状态 HUD
                     draw_train_hud(
                         self.renderer.surface,
                         self.renderer._font,
@@ -166,6 +177,7 @@ class GameLoop:
                         self.debug_train_a,
                         self.debug_train_kinematics.total_length,
                         self.debug_train_v_target,
+                        braking=_in_braking,
                     )
             pygame.display.flip()
             self.clock.tick(60)
@@ -259,7 +271,6 @@ class GameLoop:
                     self.debug_train_controller.reset()
                 self.debug_train_active = True
                 print("列车已重置到起点")
-
     def _handle_mouse_down(self, event: pygame.event.Event) -> None:
         # 滚轮先处理（不参与平移逻辑）
         if event.button in (4, 5):
@@ -402,7 +413,7 @@ class GameLoop:
             from model.train_physics import RealisticElectric
             from model.rigid_kinematics import RigidWagonKinematics
             from model.wagon import create_simple_wagon, Consist
-            from model.train_controller import SimpleSpeedController
+            from model.train_controller import BrakingController
 
             # 阶段 2 测试：1 节动力车 + 2 节拖车
             locomotive = create_simple_wagon(length=20.0, mass=50.0, P_rated=3000.0)
@@ -412,7 +423,7 @@ class GameLoop:
             self.debug_train_kinematics = RigidWagonKinematics(self.network, path, consist)
             self.debug_train_physics = RealisticElectric()
             self.debug_train_consist = consist
-            self.debug_train_controller = SimpleSpeedController()
+            self.debug_train_controller = BrakingController(self.debug_train_physics, consist)
             self.debug_train_s = 0.0
             self.debug_train_v = 0.0
             self.debug_train_a = 0.0

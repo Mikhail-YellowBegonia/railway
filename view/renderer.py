@@ -691,15 +691,16 @@ def draw_train_hud(
     v: float,
     a: float,
     total_length: float,
+    v_target: float = 0.0,
+    braking: bool = False,
 ) -> None:
-    """绘制列车状态 HUD（A2 交互优化）：速度、弧长、加速度。
-
-    显示在屏幕左上角，半透明黑色背景 + 白色文本。
-    """
-    # HUD 内容
-    v_kmh = v * 3.6  # m/s → km/h
+    """绘制列车状态 HUD：速度、目标速度、弧长、加速度、制动状态。"""
+    v_kmh = v * 3.6
+    v_target_kmh = v_target * 3.6
+    phase = "【制动】" if braking else "巡航"
     lines = [
-        f"速度: {v_kmh:6.1f} km/h",
+        f"速度:    {v_kmh:6.1f} km/h  {phase}",
+        f"目标:    {v_target_kmh:6.1f} km/h  (↑/↓ 调节)",
         f"弧长: {s:7.1f} / {total_length:.1f} m",
         f"加速度: {a:+5.2f} m/s²",
     ]
