@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 
 import pygame
 
@@ -38,6 +39,24 @@ COLOR_BALLAST = (72, 66, 58)          # 道床带填充（暖灰，衬于逻辑�
 COLOR_TILE_BOUNDARY = (60, 60, 60)    # 瓦片边界（淡灰）
 COLOR_TILE_QUERY = (120, 120, 60)     # 查询邻域高亮（黄灰）
 
+
+def _load_font(size: int) -> pygame.font.Font:
+    """尝试按候选路径加载支持中文的系统字体，失败回退默认字体。"""
+    for path in (
+        "/System/Library/Fonts/STHeiti Light.ttc",          # macOS
+        "/System/Library/Fonts/Supplemental/Songti.ttc",
+        "/Library/Fonts/Arial Unicode MS.ttf",
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",  # Linux
+        "C:/Windows/Fonts/msyh.ttc",                        # Windows
+    ):
+        if os.path.exists(path):
+            try:
+                return pygame.font.Font(path, size)
+            except Exception:
+                continue
+    return pygame.font.Font(None, size)
+
+
 MODE_NAMES: dict[EditMode, str] = {
     EditMode.IDLE: "IDLE",
     EditMode.BUILD: "BUILD (B)",
@@ -49,7 +68,7 @@ class Renderer:
     def __init__(self, surface: pygame.Surface, camera: Camera) -> None:
         self.surface = surface
         self.camera = camera
-        self._font = pygame.font.Font(None, 20)
+        self._font = _load_font(18)
 
     def clear(self) -> None:
         self.surface.fill(COLOR_BG)
@@ -726,4 +745,30 @@ def draw_train_hud(
     for i, line in enumerate(lines):
         text = font.render(line, True, (255, 255, 255))
         surface.blit(text, (10 + padding, 10 + padding + i * line_height))
+
+
+def draw_console_log(
+    surface: pygame.Surface,
+    font: pygame.font.Font,
+    messages: list[str],
+    max_lines: int = 18,
+) -> None:
+    """右下角半透明控制台回显（最近 max_lines 条）。"""
+    if not messages:
+        return
+    w, h = surface.get_width(), surface.get_height()
+    visible = messages[-max_lines:]
+    line_h = font.get_linesize()
+    pad = 5
+    surfs = [font.render(m[:90], True, (180, 190, 175)) for m in visible]
+    box_w = min(max(s.get_width() for s in surfs) + pad * 2, w - 16)
+    box_h = line_h * len(surfs) + pad * 2
+    bx = w - box_w - 8
+    by = h - box_h - 8
+    bg = pygame.Surface((box_w, box_h))
+    bg.set_alpha(110)
+    bg.fill((8, 8, 8))
+    surface.blit(bg, (bx, by))
+    for i, s in enumerate(surfs):
+        surface.blit(s, (bx + pad, by + pad + i * line_h))
 

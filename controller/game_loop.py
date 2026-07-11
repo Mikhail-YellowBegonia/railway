@@ -15,16 +15,41 @@ from controller.editor import Editor, EditMode, BuildState
 WINDOW_W = 1024
 WINDOW_H = 768
 
-# 固定存档文件名：S 键保存到此，启动时若存在则优先加载（方便反复启停调试）。
 SAVE_PATH = "manual_track.geojson"
 
-# 平移触发集：IDLE 模式下左/右/中键都可平移；其它模式仅中键
 PAN_BUTTONS_IDLE = {1, 2, 3}
 PAN_BUTTONS_OTHER = {2}
+
+# 控制台回显缓冲（最近 N 条，显示在游戏右下角）
+_console_messages: list[str] = []
+
+
+class _TeeLogger:
+    """把 stdout 写入同时追加到消息缓冲，保留最近 max 条。"""
+    MAX = 60
+
+    def __init__(self, lines: list[str], orig) -> None:
+        self._lines = lines
+        self._orig = orig
+        self._buf = ""
+
+    def write(self, s: str) -> None:
+        self._orig.write(s)
+        self._buf += s
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            if line.strip():
+                self._lines.append(line)
+                if len(self._lines) > self.MAX:
+                    self._lines.pop(0)
+
+    def flush(self) -> None:
+        self._orig.flush()
 
 
 class GameLoop:
     def __init__(self, geo_path: str) -> None:
+        sys.stdout = _TeeLogger(_console_messages, sys.stdout)
         pygame.init()
         self.surface = pygame.display.set_mode((WINDOW_W, WINDOW_H), pygame.RESIZABLE)
         pygame.display.set_caption("Railway")
@@ -212,6 +237,9 @@ class GameLoop:
                     self.train_v_target,
                     braking=_in_braking,
                 )
+            # 右下角控制台回显
+            from view.renderer import draw_console_log
+            draw_console_log(self.renderer.surface, self.renderer._font, _console_messages)
             pygame.display.flip()
             self.clock.tick(60)
 

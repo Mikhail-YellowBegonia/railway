@@ -2,6 +2,8 @@
 __pycache__/
 *.pyc
 .uv/
+.DS_Store
+.claude/
 
 # PhotoRec recovery artifacts (not part of this project)
 photorec.*
