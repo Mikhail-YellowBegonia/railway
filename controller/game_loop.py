@@ -481,8 +481,21 @@ class GameLoop:
             # 记录虚拟节点位置（调试可视化）
             start_edge = self.network.edges[start_edge_id]
             goal_edge = self.network.edges[goal_edge_id]
-            start_virtual_pos = start_edge.position_at(start_t, self.network)
-            goal_virtual_pos = goal_edge.position_at(goal_t, self.network)
+
+            # 手动插值计算虚拟节点位置
+            def edge_position_at(edge, t):
+                node_a = self.network.nodes[edge.node_a_id]
+                node_b = self.network.nodes[edge.node_b_id]
+                if not edge.is_arc:
+                    return node_a.position + (node_b.position - node_a.position) * t
+                # 圆弧
+                angle_at_t = edge.arc_angle_rad * t
+                from model.geom_utils import rotate_around_axis
+                rotated_dir = rotate_around_axis(edge.arc_start_dir, edge.arc_normal, angle_at_t)
+                return edge.arc_center + rotated_dir * edge.arc_radius
+
+            start_virtual_pos = edge_position_at(start_edge, start_t)
+            goal_virtual_pos = edge_position_at(goal_edge, goal_t)
             self.train_path_virtual_points = [start_virtual_pos, goal_virtual_pos]
 
             # 拼接车尾路径到新路径前（保证覆盖整列车身）
@@ -546,8 +559,21 @@ class GameLoop:
         # 记录虚拟节点位置（调试可视化）
         start_edge = self.network.edges[start_edge_id]
         goal_edge = self.network.edges[goal_edge_id]
-        start_virtual_pos = start_edge.position_at(start_t, self.network)
-        goal_virtual_pos = goal_edge.position_at(goal_t, self.network)
+
+        # 手动插值计算虚拟节点位置
+        def edge_position_at(edge, t):
+            node_a = self.network.nodes[edge.node_a_id]
+            node_b = self.network.nodes[edge.node_b_id]
+            if not edge.is_arc:
+                return node_a.position + (node_b.position - node_a.position) * t
+            # 圆弧
+            angle_at_t = edge.arc_angle_rad * t
+            from model.geom_utils import rotate_around_axis
+            rotated_dir = rotate_around_axis(edge.arc_start_dir, edge.arc_normal, angle_at_t)
+            return edge.arc_center + rotated_dir * edge.arc_radius
+
+        start_virtual_pos = edge_position_at(start_edge, start_t)
+        goal_virtual_pos = edge_position_at(goal_edge, goal_t)
         self.train_path_virtual_points = [start_virtual_pos, goal_virtual_pos]
 
         # 拼接车尾路径到新路径前
