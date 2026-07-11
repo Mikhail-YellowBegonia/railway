@@ -55,6 +55,7 @@ class GameLoop:
         #   后续点击   = 选择目标（节点或 Edge 途中），自动寻路并出发
         self.train_mode_enabled = False
         self.train_path = None                     # 当前可视化路径
+        self.train_path_virtual_points = []        # 寻路虚拟节点位置（调试用）
 
         # 列车实体（持久存在，停放时 controller=None）
         self.train: "TrainEntity | None" = None
@@ -133,6 +134,16 @@ class GameLoop:
                         preview_kin,
                         0.0,
                         occupied=False,
+                    )
+                # 绘制虚拟节点（黄色圆圈，调试用）
+                for vpos in self.train_path_virtual_points:
+                    screen_pos = self.camera.world_to_screen(vpos)
+                    pygame.draw.circle(
+                        self.renderer.surface,
+                        (255, 255, 0),  # 黄色
+                        (int(screen_pos.x), int(screen_pos.y)),
+                        6,  # 半径
+                        2,  # 线宽（空心圆）
                     )
             if self.train is not None:
                 from view.renderer import draw_debug_train, draw_train_hud
@@ -416,6 +427,13 @@ class GameLoop:
                 return
             path, start_offset, end_offset = result
 
+            # 记录虚拟节点位置（调试可视化）
+            start_edge = self.network.edges[start_edge_id]
+            goal_edge = self.network.edges[goal_edge_id]
+            start_virtual_pos = start_edge.position_at(start_t, self.network)
+            goal_virtual_pos = goal_edge.position_at(goal_t, self.network)
+            self.train_path_virtual_points = [start_virtual_pos, goal_virtual_pos]
+
             # 拼接车尾路径到新路径前（保证覆盖整列车身）
             from model.pathfinding import Path
 
@@ -473,6 +491,13 @@ class GameLoop:
             print(f"列车模式：节点 {node_id} 不可达")
             return
         path, start_offset, end_offset = result
+
+        # 记录虚拟节点位置（调试可视化）
+        start_edge = self.network.edges[start_edge_id]
+        goal_edge = self.network.edges[goal_edge_id]
+        start_virtual_pos = start_edge.position_at(start_t, self.network)
+        goal_virtual_pos = goal_edge.position_at(goal_t, self.network)
+        self.train_path_virtual_points = [start_virtual_pos, goal_virtual_pos]
 
         # 拼接车尾路径到新路径前
         from model.pathfinding import Path
