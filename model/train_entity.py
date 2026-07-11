@@ -179,16 +179,19 @@ class TrainEntity:
         _, direction = self.state.path.edges[0]
         return direction
 
-    def tail_coverage_path(self) -> tuple[Path, float]:
+    def tail_coverage_path(self) -> tuple[Path, float, float]:
         """返回覆盖车尾到车头的路径片段（用于路径拼接）。
 
         返回:
-            (tail_path, head_offset)
-            - tail_path: 从车尾位置开始到车头位置的子路径
-            - head_offset: 车头在 tail_path 末端的偏移（= tail_path.total_cost - head_offset 即为车头绝对位置）
+            (tail_path, initial_offset_tail, s_head_in_tail_path)
+            - tail_path: 从车尾位置开始到车头位置的子路径（包含完整 edge）
+            - initial_offset_tail: 车尾在 tail_path 首段的局部偏移（米）
+            - s_head_in_tail_path: 车头在 tail_path 上的绝对弧长（米，= s_head - s_tail）
 
         用于换路径时保持车尾连续性。
         """
         s_head = self.kinematics.initial_offset + self.state.s
         s_tail = max(0.0, s_head - self.state.consist.total_length)
-        return self.kinematics._path_kin.sub_path(s_tail, s_head)
+        tail_path, initial_offset_tail = self.kinematics._path_kin.sub_path(s_tail, s_head)
+        s_head_in_tail_path = s_head - s_tail
+        return tail_path, initial_offset_tail, s_head_in_tail_path

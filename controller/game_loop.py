@@ -387,7 +387,7 @@ class GameLoop:
         start_direction = self.train.current_direction()
 
         # 提取车尾覆盖路径（用于拼接到新路径前，保持车尾连续）
-        tail_path, tail_head_offset = self.train.tail_coverage_path()
+        tail_path, initial_offset_tail, s_head_in_tail = self.train.tail_coverage_path()
 
         # 优先尝试 snap 到 Edge 途中
         goal = self._snap_edge_at(world_pos)
@@ -411,10 +411,15 @@ class GameLoop:
                 edges=tail_path.edges + path.edges,
                 total_cost=tail_path.total_cost + path.total_cost
             )
-            full_start_offset = tail_path.total_cost - tail_head_offset + start_offset
+            # full_start_offset = 车尾在完整路径首段的偏移
+            full_start_offset = initial_offset_tail
+            # 注意：assign_path 会重置 state.s = 0，所以需要立即调整为车头位置
+            # 但 assign_path 内部已经设置 state.s = 0，我们需要在外部调整
 
             self.train_path = full_path
             self.train.assign_path(full_path, full_start_offset, end_offset)
+            # 手动调整 state.s 为车头在新路径上的位置
+            self.train.state.s = s_head_in_tail
             self.train_v_target = 0.0
             print(
                 f"列车模式：→ edge {goal_edge_id} t={goal_t:.2f}，"
@@ -455,10 +460,12 @@ class GameLoop:
             edges=tail_path.edges + path.edges,
             total_cost=tail_path.total_cost + path.total_cost
         )
-        full_start_offset = tail_path.total_cost - tail_head_offset + start_offset
+        full_start_offset = initial_offset_tail
 
         self.train_path = full_path
         self.train.assign_path(full_path, full_start_offset, end_offset)
+        # 手动调整 state.s 为车头在新路径上的位置
+        self.train.state.s = s_head_in_tail
         self.train_v_target = 0.0
         seq = " → ".join(f"e{eid}({'+' if d > 0 else '-'})" for eid, d in full_path.edges)
         print(
