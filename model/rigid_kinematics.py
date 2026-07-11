@@ -18,6 +18,10 @@ class RigidWagonKinematics:
     多节编组：
     - 第 i 节后转向架 = 第 i+1 节前转向架（车钩连接假设为刚性）
     - 性能：O(2n)，n = 车厢数，链式调用 solve_rear_bogie_s
+
+    参数:
+        initial_offset: 起点偏移（米），列车从路径上该弧长处出发（默认 0）
+        end_offset: 终点裁剪（米），路径末尾截去该长度作为有效终点（默认 0）
     """
 
     def __init__(
@@ -25,28 +29,32 @@ class RigidWagonKinematics:
         network: RailNetwork,
         path: Path,
         consist: Consist,
+        initial_offset: float = 0.0,
+        end_offset: float = 0.0,
     ) -> None:
         self.network = network
         self.path = path
         self.consist = consist
+        self.initial_offset = initial_offset
+        self.end_offset = end_offset
         self._path_kin = PathKinematics(network, path)
 
     @property
     def total_length(self) -> float:
-        """路径总长（米），与质点模型一致。"""
-        return self._path_kin.total_length
+        """可行驶路径长度（米），已扣除起点偏移和终点裁剪。"""
+        return self._path_kin.total_length - self.initial_offset - self.end_offset
 
     def get_all_wagon_poses(self, front_bogie_s: float) -> list[Pose]:
         """查询所有车厢位姿（给定首节前转向架弧长）。
 
         参数:
-            front_bogie_s: 首节车厢前转向架在路径上的弧长（米）
+            front_bogie_s: 可行驶区间内的弧长（米），0 = 起点偏移处
 
         返回:
             所有车厢 Pose 列表（顺序同 consist.wagons）
         """
         poses = []
-        current_s = front_bogie_s
+        current_s = front_bogie_s + self.initial_offset
 
         for i, wagon in enumerate(self.consist.wagons):
             front_s = current_s
@@ -82,7 +90,7 @@ class RigidWagonKinematics:
             [(前 Bogie Pose, 后 Bogie Pose), ...] 列表（顺序同 consist.wagons）
         """
         bogie_pairs = []
-        current_s = front_bogie_s
+        current_s = front_bogie_s + self.initial_offset
 
         for i, wagon in enumerate(self.consist.wagons):
             front_s = current_s
