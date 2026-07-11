@@ -65,10 +65,10 @@ class TrainEntity:
         """分配新行驶路径，重建运动学对象，启动 BrakingController。
 
         start_offset / end_offset 来自 find_path_from_point 的返回值。
-        s 从 start_offset 处出发（保持车头位置连续）。
+        列车从新路径的起点（initial_offset 处）出发，state.s 初始化为 0。
         """
         self.state.path = path
-        self.state.s = start_offset
+        self.state.s = 0.0  # 可行驶区间起点
         self.kinematics = RigidWagonKinematics(
             self.network, path, self.state.consist,
             initial_offset=start_offset,
