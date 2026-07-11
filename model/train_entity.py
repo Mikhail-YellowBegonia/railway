@@ -160,3 +160,11 @@ class TrainEntity:
 
     def is_moving(self) -> bool:
         return self.controller is not None
+
+    def current_edge_and_t(self) -> tuple[int, float]:
+        """返回车头当前所在的 Edge ID 和边内参数 t ∈ [0, 1]。
+
+        用于从当前位置发起新一次寻路（find_path_from_point 的输入）。
+        """
+        abs_s = self.kinematics.initial_offset + self.state.s
+        return self.kinematics._path_kin.edge_at(abs_s)

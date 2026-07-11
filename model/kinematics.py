@@ -107,6 +107,22 @@ class PathKinematics:
                 return i
         return len(self._segments) - 1  # s 在最后一段或越界
 
+    def edge_at(self, s: float) -> tuple[int, float]:
+        """返回弧长 s 处所在的 Edge ID 和边内参数 t ∈ [0, 1]。
+
+        t 的方向与有向边一致（dir=+1 时 t=0 为 node_a，dir=-1 时 t=0 为 node_b）。
+        用于从当前位置发起新一次寻路。
+        """
+        s = max(0.0, min(s, self._total_length))
+        idx = self._locate_segment(s)
+        directed, s_start, seg_length = self._segments[idx]
+        edge_id, direction = directed
+        t_local = (s - s_start) / seg_length if seg_length > 0 else 0.0
+        t_local = max(0.0, min(t_local, 1.0))
+        # 转换为 Edge 自身的 t（node_a → node_b 方向）
+        t_edge = t_local if direction > 0 else (1.0 - t_local)
+        return edge_id, t_edge
+
     def sub_path(self, s_tail: float, s_head: float) -> tuple[Path, float]:
         """提取 [s_tail, s_head] 范围的子路径。
 
