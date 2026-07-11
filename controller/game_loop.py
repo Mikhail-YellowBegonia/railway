@@ -408,9 +408,10 @@ class GameLoop:
             # 拼接车尾路径到新路径前（保证覆盖整列车身）
             from model.pathfinding import Path
 
-            # 去重：如果 tail_path 的最后一条 Edge 和 path 的第一条 Edge 相同，跳过 path 的第一条
-            if tail_path.edges and path.edges and tail_path.edges[-1][0] == path.edges[0][0]:
-                # Edge 重复，只保留一份
+            # 去重：如果 tail_path 的最后一条 Edge 和 path 的第一条 Edge 完全相同（edge_id + direction），跳过 path 的第一条
+            if (tail_path.edges and path.edges and
+                tail_path.edges[-1] == path.edges[0]):  # 比较 (edge_id, direction) 元组
+                # Edge 完全重复，只保留一份
                 full_path = Path(
                     edges=tail_path.edges + path.edges[1:],
                     total_cost=tail_path.total_cost + path.total_cost - self.network.edges[path.edges[0][0]].length
@@ -465,8 +466,9 @@ class GameLoop:
         # 拼接车尾路径到新路径前
         from model.pathfinding import Path
 
-        # 去重：如果 tail_path 的最后一条 Edge 和 path 的第一条 Edge 相同，跳过 path 的第一条
-        if tail_path.edges and path.edges and tail_path.edges[-1][0] == path.edges[0][0]:
+        # 去重：如果 tail_path 的最后一条 Edge 和 path 的第一条 Edge 完全相同（edge_id + direction），跳过 path 的第一条
+        if (tail_path.edges and path.edges and
+            tail_path.edges[-1] == path.edges[0]):  # 比较 (edge_id, direction) 元组
             full_path = Path(
                 edges=tail_path.edges + path.edges[1:],
                 total_cost=tail_path.total_cost + path.total_cost - self.network.edges[path.edges[0][0]].length

@@ -253,7 +253,10 @@ def find_path_from_point(
             end_offset = goal_t * goal_edge.length
             path = Path(edges=[directed], total_cost=goal_edge.length)
             return path, start_offset, end_offset
-        # 否则目标在反方向，需要绕路（或不可达）
+        # 否则目标在反方向，不允许折返，返回 None
+        if not allow_reversal:
+            return None
+        # allow_reversal=True 时才尝试绕路
 
     # 在临时网络副本中分割起始和目标 Edge
     tmp_network = copy.deepcopy(network)
