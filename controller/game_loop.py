@@ -370,7 +370,18 @@ class GameLoop:
             if not node or not node.incident_edge_ids:
                 print(f"列车模式：节点 {node_id} 无关联边，无法放置")
                 return
-            edge_id = next(iter(node.incident_edge_ids))
+
+            # 优先选择正方向的边（node 是 node_a）
+            edge_id = None
+            for eid in node.incident_edge_ids:
+                edge = self.network.edges[eid]
+                if edge.node_a_id == node_id:
+                    edge_id = eid
+                    break
+            # 如果没有正向边，选择任意一条（反向）
+            if edge_id is None:
+                edge_id = next(iter(node.incident_edge_ids))
+
             park_directed = _directed_from(self.network, edge_id, node_id)
             park_path = Path(edges=[park_directed],
                              total_cost=self.network.edges[edge_id].length)

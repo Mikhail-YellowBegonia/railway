@@ -172,12 +172,22 @@ class TrainEntity:
     def current_direction(self) -> int:
         """返回列车当前行驶方向（+1 或 -1）。
 
-        从当前 path 的第一条有向边推断（停放时也有方向）。
+        从车头当前所在的有向边推断方向。
         """
         if not self.state.path.edges:
             return 1  # 默认正方向
-        _, direction = self.state.path.edges[0]
-        return direction
+
+        # 找到车头当前所在的 edge
+        abs_s = self.kinematics.initial_offset + self.state.s
+        current_edge_id, _ = self.kinematics._path_kin.edge_at(abs_s)
+
+        # 在 path 中查找对应的有向边
+        for eid, direction in self.state.path.edges:
+            if eid == current_edge_id:
+                return direction
+
+        # 降级：返回第一条边的方向（理论上不应该到这里）
+        return self.state.path.edges[0][1]
 
     def tail_coverage_path(self) -> tuple[Path, float, float]:
         """返回覆盖车尾到车头的路径片段（用于路径拼接）。
