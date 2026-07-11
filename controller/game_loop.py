@@ -57,6 +57,10 @@ class GameLoop:
         self.train_path = None                     # 当前可视化路径
         self.train_path_virtual_points = []        # 寻路虚拟节点位置（调试用）
 
+        # 放置列车的两步流程
+        self.train_placement_node_id = None        # 第一步：选中的放置节点
+        self.train_placement_consist = None        # 待放置的车组
+
         # 列车实体（持久存在，停放时 controller=None）
         self.train: "TrainEntity | None" = None
         self.train_v_target: float = 0.0           # 玩家设定的巡航速度（m/s）
@@ -145,6 +149,35 @@ class GameLoop:
                         6,  # 半径
                         2,  # 线宽（空心圆）
                     )
+            # 放置虚影：显示所有可能方向的列车预览（半透明灰色）
+            if self.train_placement_node_id is not None and self.train_placement_consist is not None:
+                from view.renderer import draw_debug_train
+                from model.rigid_kinematics import RigidWagonKinematics
+                from model.pathfinding import Path, _directed_from
+
+                placement_node = self.network.nodes[self.train_placement_node_id]
+                for eid in placement_node.incident_edge_ids:
+                    # 为每条关联边创建临时路径和运动学
+                    park_directed = _directed_from(self.network, eid, self.train_placement_node_id)
+                    temp_path = Path(edges=[park_directed], total_cost=self.network.edges[eid].length)
+
+                    try:
+                        temp_kin = RigidWagonKinematics(
+                            self.network, temp_path, self.train_placement_consist
+                        )
+                        # 绘制半透明虚影（灰色，occupied=False 会用橙色，这里需要自定义颜色）
+                        # 暂时用橙色表示虚影，后续可以添加颜色参数
+                        draw_debug_train(
+                            self.renderer.surface,
+                            self.camera,
+                            temp_kin,
+                            0.0,
+                            occupied=False,  # 橙色虚影
+                        )
+                    except Exception:
+                        # 如果路径太短无法容纳列车，跳过
+                        pass
+
             if self.train is not None:
                 from view.renderer import draw_debug_train, draw_train_hud
                 # 实时占位列车（红色）
@@ -364,44 +397,62 @@ class GameLoop:
         from model.wagon import create_simple_wagon, Consist
         from model.train_entity import TrainEntity, TrainState
 
-        # 第一次点击：放置列车（必须点在节点上）
-        if self.train is None:
+        # 第一步：选择放置节点
+        if self.train is None and self.train_placement_node_id is None:
             node_id = self._snap_node_at(world_pos)
             if node_id is None:
                 print("列车模式：请点选节点放置列车")
                 return
-
-            locomotive = create_simple_wagon(length=20.0, mass=50.0, P_rated=3000.0)
-            coach1     = create_simple_wagon(length=18.0, mass=45.0, P_rated=None)
-            coach2     = create_simple_wagon(length=22.0, mass=60.0, P_rated=None)
-            consist    = Consist(wagons=[locomotive, coach1, coach2])
-            physics    = RealisticElectric()
 
             node = self.network.nodes.get(node_id)
             if not node or not node.incident_edge_ids:
                 print(f"列车模式：节点 {node_id} 无关联边，无法放置")
                 return
 
-            # 优先选择正方向的边（node 是 node_a）
+            # 保存放置节点和车组，进入"选择朝向"状态
+            locomotive = create_simple_wagon(length=20.0, mass=50.0, P_rated=3000.0)
+            coach1     = create_simple_wagon(length=18.0, mass=45.0, P_rated=None)
+            coach2     = create_simple_wagon(length=22.0, mass=60.0, P_rated=None)
+            self.train_placement_consist = Consist(wagons=[locomotive, coach1, coach2])
+            self.train_placement_node_id = node_id
+            print(f"列车模式：已选择节点 {node_id}，点击相邻节点指定朝向")
+            return
+
+        # 第二步：选择朝向（点击相邻节点）
+        if self.train is None and self.train_placement_node_id is not None:
+            target_node_id = self._snap_node_at(world_pos)
+            if target_node_id is None:
+                print("列车模式：请点选相邻节点指定朝向")
+                return
+
+            # 检查两节点是否相邻
+            placement_node = self.network.nodes[self.train_placement_node_id]
             edge_id = None
-            for eid in node.incident_edge_ids:
+            for eid in placement_node.incident_edge_ids:
                 edge = self.network.edges[eid]
-                if edge.node_a_id == node_id:
+                if edge.node_a_id == target_node_id or edge.node_b_id == target_node_id:
                     edge_id = eid
                     break
-            # 如果没有正向边，选择任意一条（反向）
-            if edge_id is None:
-                edge_id = next(iter(node.incident_edge_ids))
 
-            park_directed = _directed_from(self.network, edge_id, node_id)
+            if edge_id is None:
+                print(f"列车模式：节点 {target_node_id} 与放置节点 {self.train_placement_node_id} 不相邻")
+                return
+
+            # 创建朝向目标节点的有向边
+            park_directed = _directed_from(self.network, edge_id, self.train_placement_node_id)
             park_path = Path(edges=[park_directed],
                              total_cost=self.network.edges[edge_id].length)
 
-            state = TrainState(path=park_path, s=0.0, v=0.0, consist=consist)
+            state = TrainState(path=park_path, s=0.0, v=0.0, consist=self.train_placement_consist)
+            physics = RealisticElectric()
             self.train = TrainEntity(state, self.network, physics)
             self.train_v_target = 0.0
             self.camera.follow_enabled = True
-            print(f"列车模式：列车已放置在节点 {node_id}，点击目标位置出发")
+
+            # 清除放置状态
+            self.train_placement_node_id = None
+            self.train_placement_consist = None
+            print(f"列车模式：列车已放置，朝向节点 {target_node_id}，点击目标位置出发")
             return
 
         # 后续点击：从当前位置寻路到目标（支持 Edge 途中）
