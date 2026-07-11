@@ -141,11 +141,15 @@ class GameLoop:
                     )
                 # 绘制虚拟节点（黄色圆圈，调试用）
                 for vpos in self.train_path_virtual_points:
-                    screen_pos = self.camera.world_to_screen(vpos)
+                    sx, sy = self.camera.world_to_screen(
+                        vpos.x, vpos.y,
+                        self.renderer.surface.get_width(),
+                        self.renderer.surface.get_height()
+                    )
                     pygame.draw.circle(
                         self.renderer.surface,
                         (255, 255, 0),  # 黄色
-                        (int(screen_pos.x), int(screen_pos.y)),
+                        (int(sx), int(sy)),
                         6,  # 半径
                         2,  # 线宽（空心圆）
                     )
