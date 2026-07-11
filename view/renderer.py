@@ -773,3 +773,59 @@ def draw_console_log(
     for i, s in enumerate(surfs):
         surface.blit(s, (bx + pad, by + pad + i * line_h))
 
+
+def draw_train_tooltip(
+    surface: pygame.Surface,
+    font: pygame.font.Font,
+    screen_pos: tuple[float, float],
+    train_idx: int,
+    v: float,
+) -> None:
+    """鼠标悬停列车时的浮动提示（跟随鼠标屏幕坐标）。"""
+    text = f"Train #{train_idx}  {v * 3.6:.1f} km/h"
+    surf = font.render(text, True, (220, 230, 220))
+    pad = 4
+    w, h = surface.get_width(), surface.get_height()
+    mx, my = screen_pos
+    bx = int(mx) + 12
+    by = int(my) - surf.get_height() - 8
+    bx = max(0, min(bx, w - surf.get_width() - pad * 2))
+    by = max(0, by)
+    bg = pygame.Surface((surf.get_width() + pad * 2, surf.get_height() + pad * 2))
+    bg.set_alpha(160)
+    bg.fill((20, 20, 20))
+    surface.blit(bg, (bx, by))
+    surface.blit(surf, (bx + pad, by + pad))
+
+
+def draw_consist_panel(
+    surface: pygame.Surface,
+    font: pygame.font.Font,
+    train_idx: int,
+    train,  # TrainEntity
+) -> None:
+    """编组详情面板（WIP 占位）。选中列车后按 I 显示。"""
+    # ponytail: 占位实现，WagonConfig 数据填充留待正式数据接入后完成
+    consist = train.state.consist
+    lines = [f"=== Train #{train_idx} Consist ==="]
+    for i, w in enumerate(consist.wagons):
+        role = "Loco" if w.is_powered else "Coach"
+        lines.append(f"  [{i+1}] {role}  {w.length:.0f}m  {w.mass:.0f}t")
+    lines.append("--- WIP: more fields TBD ---")
+
+    line_h = font.get_linesize()
+    pad = 8
+    box_w = max(font.size(l)[0] for l in lines) + pad * 2
+    box_h = line_h * len(lines) + pad * 2
+    w_scr, h_scr = surface.get_width(), surface.get_height()
+    bx = w_scr - box_w - 8
+    by = h_scr // 2 - box_h // 2  # 屏幕垂直居中右侧
+
+    bg = pygame.Surface((box_w, box_h))
+    bg.set_alpha(200)
+    bg.fill((15, 15, 25))
+    surface.blit(bg, (bx, by))
+    for i, line in enumerate(lines):
+        color = (180, 220, 255) if i == 0 else (200, 200, 200)
+        surface.blit(font.render(line, True, color), (bx + pad, by + pad + i * line_h))
+

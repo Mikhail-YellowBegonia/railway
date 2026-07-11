@@ -205,3 +205,74 @@ class TrainEntity:
         tail_path, initial_offset_tail = self.kinematics._path_kin.sub_path(s_tail, s_head)
         s_head_in_tail_path = s_head - s_tail
         return tail_path, initial_offset_tail, s_head_in_tail_path
+
+    def decouple_at(self, wagon_idx: int) -> tuple["TrainEntity", "TrainEntity"]:
+        """在第 wagon_idx 节车厢后解挂，返回 (前段, 后段) 两个停放实体。
+
+        当前阶段：强制两段都停车（v=0）。
+        wagon_idx: 0-indexed，前段保留 wagons[0..wagon_idx]，后段 wagons[wagon_idx+1..]。
+
+        几何约定：
+        - 前段：沿用当前 sub_path（车尾～车头），重建 Consist
+        - 后段：以后段首节前转向架位置为起点，截取停放 Path
+
+        注意：Path/位置拼接在极端情况下可能有轻微误差（已知 glitch）。
+        """
+        wagons = self.state.consist.wagons
+        if wagon_idx < 0 or wagon_idx >= len(wagons) - 1:
+            raise ValueError(f"decouple_at: wagon_idx={wagon_idx} 越界，编组共 {len(wagons)} 节")
+
+        # ── 1. 算出各节转向架绝对 s（复用 get_all_bogie_poses 的链式逻辑）
+        from model.wagon import solve_rear_bogie_s
+        path_kin = self.kinematics._path_kin
+        abs_s_head = self.kinematics.initial_offset + self.state.s
+
+        bogie_s: list[tuple[float, float]] = []  # [(front_s, rear_s), ...]
+        current_s = abs_s_head
+        for i, wagon in enumerate(wagons):
+            front_s = current_s
+            rear_s = solve_rear_bogie_s(front_s, wagon.bogie_spacing, path_kin)
+            bogie_s.append((front_s, rear_s))
+            if i < len(wagons) - 1:
+                next_wagon = wagons[i + 1]
+                gap = (wagon.coupler_2_pos - wagon.bogies[1].pos) + \
+                      (next_wagon.bogies[0].pos - next_wagon.coupler_1_pos)
+                current_s = solve_rear_bogie_s(rear_s, gap, path_kin)
+
+        # 后段车头前转向架的绝对 s
+        rear_head_s = bogie_s[wagon_idx + 1][0]
+
+        # ── 2. 前段：sub_path 从车尾到当前车头
+        s_tail_front = max(0.0, abs_s_head - sum(w.length for w in wagons[:wagon_idx + 1]))
+        front_path, front_offset = path_kin.sub_path(s_tail_front, abs_s_head)
+        front_consist = Consist(wagons=wagons[:wagon_idx + 1])
+        front_state = TrainState(
+            path=front_path,
+            s=abs_s_head - s_tail_front,
+            v=0.0,
+            consist=front_consist,
+        )
+        front_entity = TrainEntity(front_state, self.network, self.physics)
+        front_entity.kinematics = RigidWagonKinematics(
+            self.network, front_path, front_consist,
+            initial_offset=front_offset,
+        )
+
+        # ── 3. 后段：sub_path 从后段车尾到后段车头
+        rear_wagons = wagons[wagon_idx + 1:]
+        rear_tail_s = max(0.0, rear_head_s - sum(w.length for w in rear_wagons))
+        rear_path, rear_offset = path_kin.sub_path(rear_tail_s, rear_head_s)
+        rear_consist = Consist(wagons=rear_wagons)
+        rear_state = TrainState(
+            path=rear_path,
+            s=rear_head_s - rear_tail_s,
+            v=0.0,
+            consist=rear_consist,
+        )
+        rear_entity = TrainEntity(rear_state, self.network, self.physics)
+        rear_entity.kinematics = RigidWagonKinematics(
+            self.network, rear_path, rear_consist,
+            initial_offset=rear_offset,
+        )
+
+        return front_entity, rear_entity

@@ -87,6 +87,7 @@ class GameLoop:
         self.trains: list["TrainEntity"] = []
         self.active_train: "TrainEntity | None" = None
         self.train_v_target: float = 0.0           # 焦点列车的巡航速度（m/s）
+        self.inspect_train: "TrainEntity | None" = None  # 编组面板目标（I 键切换）
 
     def run(self) -> None:
         while self.running:
@@ -251,8 +252,25 @@ class GameLoop:
                     braking=_in_braking,
                 )
             # 右下角控制台回显
-            from view.renderer import draw_console_log
+            from view.renderer import draw_console_log, draw_train_tooltip, draw_consist_panel
             draw_console_log(self.renderer.surface, self.renderer._font, _console_messages)
+            # PLAY 模式：悬停 tooltip
+            if self.editor.mode == EditMode.PLAY:
+                hovered = self._hit_test_train(mouse_world)
+                if hovered is not None:
+                    idx = self.trains.index(hovered) + 1
+                    mx, my = pygame.mouse.get_pos()
+                    draw_train_tooltip(
+                        self.renderer.surface, self.renderer._font,
+                        (mx, my), idx, hovered.state.v,
+                    )
+            # 编组面板（I 键触发）
+            if self.inspect_train is not None and self.inspect_train in self.trains:
+                idx = self.trains.index(self.inspect_train) + 1
+                draw_consist_panel(
+                    self.renderer.surface, self.renderer._font,
+                    idx, self.inspect_train,
+                )
             pygame.display.flip()
             self.clock.tick(60)
 
@@ -339,10 +357,16 @@ class GameLoop:
             write_geojson(self.editor.network, SAVE_PATH)
             print(f"已保存 {len(self.editor.network.edges)} 条边到 {SAVE_PATH}")
         elif event.key == pygame.K_i:
-            # I 键切换空间索引可视化（debug 用）
-            self.debug_show_tiles = not self.debug_show_tiles
-            status = "开启" if self.debug_show_tiles else "关闭"
-            print(f"空间索引可视化: {status}")
+            if self.editor.mode == EditMode.PLAY:
+                # PLAY 模式：I 键切换焦点列车编组面板
+                if self.active_train is not None:
+                    self.inspect_train = None if self.inspect_train is self.active_train \
+                                               else self.active_train
+            else:
+                # 其他模式：I 键切换空间索引可视化（debug 用）
+                self.debug_show_tiles = not self.debug_show_tiles
+                status = "开启" if self.debug_show_tiles else "关闭"
+                print(f"空间索引可视化: {status}")
         elif event.key == pygame.K_c:
             # C 键切换相机跟随（A1）
             self.camera.follow_enabled = not self.camera.follow_enabled
