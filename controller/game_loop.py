@@ -317,6 +317,11 @@ class GameLoop:
 
     # ===== 列车模式（F 键叠加态）=====
 
+    def _snap_node_at(self, world_pos: Vec3) -> int | None:
+        """返回点击命中的节点 ID，未命中返回 None。"""
+        snap = self.editor._snap(world_pos)
+        return snap.snapped_node_id
+
     def _snap_edge_at(self, world_pos: Vec3) -> tuple[int, float] | None:
         """返回点击命中的 (edge_id, t) ∈ [0,1]，未命中返回 None。"""
         snap = self.editor._snap(world_pos)
