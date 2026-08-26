@@ -57,6 +57,32 @@ class WagonConfig:
         """是否为动力车（有额定功率）。"""
         return self.P_rated is not None
 
+    def reversed_config(self) -> "WagonConfig":
+        """返回车厢物理掉头后的等价配置（车厢没有旋转，只是重新定义哪端朝前）。
+
+        用于列车折返（reverse_in_place）：整节车厢的几何量相对车厢中点镜像。
+        - 车钩位置互换：new_coupler_1 = length - old_coupler_2，反之同理
+        - 转向架位置镜像 + 前后角色互换，顺序反转（保持"新前"在 bogies[0]）
+        """
+        new_bogies = [
+            BogieConfig(
+                geometric_role=(GeometricRole.TRAILING if b.geometric_role == GeometricRole.LEADING
+                                else GeometricRole.LEADING),
+                pos=self.length - b.pos,
+                load_share=b.load_share,
+                axle_count=b.axle_count,
+            )
+            for b in reversed(self.bogies)
+        ]
+        return WagonConfig(
+            length=self.length,
+            mass=self.mass,
+            bogies=new_bogies,
+            coupler_1_pos=self.length - self.coupler_2_pos,
+            coupler_2_pos=self.length - self.coupler_1_pos,
+            P_rated=self.P_rated,
+        )
+
 
 @dataclass
 class Consist:
@@ -73,6 +99,17 @@ class Consist:
     def total_mass(self) -> float:
         """编组总质量（吨）。"""
         return sum(w.mass for w in self.wagons)
+
+    def reversed_consist(self) -> "Consist":
+        """返回整个编组折返后的等价配置（车厢顺序反转 + 每节车厢自身镜像）。
+
+        用于列车原地折返：新 wagons[0] = 原 wagons[-1] 的镜像配置，
+        这样 RigidWagonKinematics.get_all_wagon_poses 仍可直接从 wagons[0]
+        开始链式求解，无需改动运动学层代码。
+        """
+        return Consist(
+            wagons=[w.reversed_config() for w in reversed(self.wagons)],
+        )
 
     @property
     def total_length(self) -> float:

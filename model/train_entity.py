@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 
 from model.pathfinding import DirectedEdge, Path
 from model.wagon import Consist
-from model.occupancy import OccupancyState, advance_occupied_path, occupied_as_path
+from model.occupancy import OccupancyState, advance_occupied_path, occupied_as_path, reverse_occupancy
 from model.rigid_kinematics import RigidWagonKinematics
 from model.train_physics import TrainPhysics
 from model.train_controller import BrakingController
@@ -108,6 +108,29 @@ class TrainEntity:
         self.controller = None
         self.state.occupancy.route = []
         self.state.remaining_to_goal = 0.0
+
+    def reverse_in_place(self) -> None:
+        """原地折返：车头车尾互换，车身占用的物理边集合不变。
+
+        只允许停车时调用（折返不是物理倒车，是逻辑方向翻转，要求先静止）。
+        调用后 route 清空、remaining_to_goal 归零——旧指令基于旧车头方向，
+        折返后必须重新寻路才有意义，不会自动继续。
+
+        车厢本身没有物理旋转（车厢没有转身，只是重新定义哪端朝前），所以
+        必须同步反转 Consist（reversed_consist），否则 get_all_wagon_poses
+        仍按旧的 wagons[0] 链式求解，会在几何上出现车厢错位/重叠——这正是
+        最初报告的"转向架反弹"bug 的根源。
+        """
+        if not self.is_parked():
+            raise RuntimeError("reverse_in_place: 只能在停车状态下折返")
+        real_tail_bogie_abs_s = self.kinematics.real_tail_bogie_abs_s(self.state.s)
+        self.state.occupancy = reverse_occupancy(
+            self.network, self.state.occupancy,
+            real_tail_bogie_abs_s, self.state.consist.total_length,
+        )
+        self.state.consist = self.state.consist.reversed_consist()
+        self.state.remaining_to_goal = 0.0
+        self.kinematics = self._build_kinematics()
 
     # ------------------------------------------------------------------
     # 每帧更新
