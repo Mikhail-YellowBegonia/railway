@@ -30,6 +30,10 @@ def advance_occupied_path(
 ) -> tuple[OccupancyState, bool]:
     """推进车头弧长 delta_s，消费 route，滑动裁剪 occupied 头部。
 
+    坐标约定：state.s 是相对 state.occupied_offset 的坐标（0 = 车尾偏移点，
+    与 RigidWagonKinematics.initial_offset 语义一致）。内部换算成绝对坐标
+    （x=0 在 occupied[0] 当前真实起点）做边界比较和裁剪，最后再换算回来。
+
     不做任何道岔判断——走哪条边由 route 提前给定，这里只处理边界越过
     （occupied 追加）和窗口裁剪（occupied 头部弹出）。
 
@@ -39,41 +43,44 @@ def advance_occupied_path(
     """
     occupied = list(state.occupied)
     route = list(state.route)
-    s = state.s + delta_s
-    occupied_offset = state.occupied_offset
-    reached_end = False
 
     def edge_len(directed: DirectedEdge) -> float:
         return network.edges[directed[0]].length
 
+    # 换算到绝对坐标：head 的绝对弧长
+    abs_head = state.s + state.occupied_offset + delta_s
     total_len = sum(edge_len(d) for d in occupied)
+    reached_end = False
 
     # head 越过 occupied 末端：从 route 消费新边
-    while s > total_len + 1e-9:
+    while abs_head > total_len + 1e-9:
         if not route:
-            s = total_len
+            abs_head = total_len
             reached_end = True
             break
         next_edge = route.pop(0)
         occupied.append(next_edge)
         total_len += edge_len(next_edge)
 
-    # 滑动裁剪：从 occupied 头部移除已经甩出车尾的边
-    tail_s = s - consist_length
+    # 滑动裁剪：从 occupied 头部移除已经甩出车尾的边（绝对坐标原点跟着右移）
+    abs_tail = abs_head - consist_length
     while len(occupied) > 1:
-        first_end_s = edge_len(occupied[0]) - occupied_offset
-        if tail_s > first_end_s + 1e-9:
+        first_len = edge_len(occupied[0])
+        if abs_tail > first_len + 1e-9:
             occupied.pop(0)
-            s -= first_end_s
-            tail_s -= first_end_s
-            occupied_offset = 0.0
+            abs_head -= first_len
+            abs_tail -= first_len
         else:
             break
 
+    # 换算回 (occupied_offset, s) 表示：offset = tail 的绝对位置（clamp >= 0）
+    new_offset = max(0.0, abs_tail)
+    new_s = abs_head - new_offset
+
     new_state = OccupancyState(
         occupied=occupied,
-        occupied_offset=occupied_offset,
-        s=s,
+        occupied_offset=new_offset,
+        s=new_s,
         route=route,
     )
     return new_state, reached_end
