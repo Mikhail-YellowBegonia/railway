@@ -655,6 +655,27 @@ class GameLoop:
             return
         self._issue_path_order(world_pos)
 
+    def _find_path_any_goal_direction(
+        self, start_edge_id, start_t, start_direction, goal_edge_id, goal_t, *, allow_reversal, debug,
+    ):
+        """玩家点击目标点时不指定到达方向，分别尝试 +1/-1，取代价更低者。
+
+        Step 2：find_path_from_point 现在要求显式 goal_direction（消除到达
+        方向歧义），但 PLAY 模式下玩家右键点选轨道并不表达"以哪个方向进站"
+        的意图，所以在这一层统一枚举两个方向。
+        """
+        from model.pathfinding import find_path_from_point
+        best = None
+        for gd in (1, -1):
+            result = find_path_from_point(
+                self.network, start_edge_id, start_t, start_direction,
+                goal_edge_id, goal_t, gd,
+                allow_reversal=allow_reversal, debug=debug,
+            )
+            if result is not None and (best is None or result[0].total_cost < best[0].total_cost):
+                best = result
+        return best
+
     def _apply_route_result(self, train, path, start_offset: float, end_offset: float) -> None:
         """将 find_path_from_point 的结果转换为 route + remaining_to_goal，下达给 train。
 
@@ -679,7 +700,6 @@ class GameLoop:
 
         右键目标会先检查是否吸附到其他列车的端头车钩（5m 范围内）。
         """
-        from model.pathfinding import find_path_from_point
 
         # Couple-2：检查是否吸附到其他列车端头车钩
         COUPLE_SNAP = 5.0
@@ -714,9 +734,9 @@ class GameLoop:
         goal = snapped_goal if snapped_goal is not None else self._snap_edge_at(world_pos)
         if goal is not None:
             goal_edge_id, goal_t = goal
-            result = find_path_from_point(
-                self.network, start_edge_id, start_t, goal_edge_id, goal_t,
-                start_direction=start_direction, allow_reversal=True, debug=True,
+            result = self._find_path_any_goal_direction(
+                start_edge_id, start_t, start_direction, goal_edge_id, goal_t,
+                allow_reversal=True, debug=True,
             )
             if result is None:
                 print(f"PLAY: 不可达 (edge {start_edge_id} → edge {goal_edge_id})")
@@ -743,9 +763,9 @@ class GameLoop:
         goal_edge_id = next(iter(goal_node.incident_edge_ids))
         goal_edge = self.network.edges[goal_edge_id]
         goal_t = 0.0 if goal_edge.node_a_id == node_id else 1.0
-        result = find_path_from_point(
-            self.network, start_edge_id, start_t, goal_edge_id, goal_t,
-            start_direction=start_direction, allow_reversal=True, debug=True,
+        result = self._find_path_any_goal_direction(
+            start_edge_id, start_t, start_direction, goal_edge_id, goal_t,
+            allow_reversal=True, debug=True,
         )
         if result is None:
             print(f"PLAY: 节点 {node_id} 不可达")
