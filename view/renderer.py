@@ -597,6 +597,9 @@ def draw_pathfinding_debug(
 COLOR_TRAIN = (255, 140, 0)          # 列车方块（橙）
 COLOR_TRAIN_OCCUPIED = (220, 20, 60) # 实时占位（红）
 COLOR_TRAIN_HEADING = (255, 220, 80)  # heading 箭头（亮黄）
+COLOR_COUPLER = (140, 140, 140)       # 车钩常亮（灰）
+COLOR_COUPLER_HOVER = (255, 235, 60)  # 车钩悬停高亮（黄）
+COUPLER_RADIUS_PX = 5                 # 车钩圆圈屏幕半径（像素）
 
 
 def draw_debug_train(
@@ -673,6 +676,13 @@ def draw_debug_train(
             # 后转向架（红色圆圈）
             pygame.draw.circle(surface, (255, 60, 60), (int(rx), int(ry)), 5)
             pygame.draw.circle(surface, (255, 255, 255), (int(rx), int(ry)), 5, 1)
+
+        # 车钩连接点（常亮灰色，N-1 个）
+        coupler_positions = kinematics.get_coupler_positions(s)
+        for cp in coupler_positions:
+            cx, cy = camera.world_to_screen(cp.x, cp.y, w, h)
+            pygame.draw.circle(surface, COLOR_COUPLER, (int(cx), int(cy)), COUPLER_RADIUS_PX)
+            pygame.draw.circle(surface, (200, 200, 200), (int(cx), int(cy)), COUPLER_RADIUS_PX, 1)
 
     else:
         # 质点模型可视化（原有方块+箭头）
@@ -772,6 +782,19 @@ def draw_console_log(
     surface.blit(bg, (bx, by))
     for i, s in enumerate(surfs):
         surface.blit(s, (bx + pad, by + pad + i * line_h))
+
+
+def draw_coupler_highlight(
+    surface: pygame.Surface,
+    camera: Camera,
+    world_pos: Vec3,
+    w: int,
+    h: int,
+) -> None:
+    """在指定车钩位置画高亮圆圈（悬停时调用）。"""
+    cx, cy = camera.world_to_screen(world_pos.x, world_pos.y, w, h)
+    pygame.draw.circle(surface, COLOR_COUPLER_HOVER, (int(cx), int(cy)), COUPLER_RADIUS_PX + 3)
+    pygame.draw.circle(surface, (255, 255, 255), (int(cx), int(cy)), COUPLER_RADIUS_PX + 3, 1)
 
 
 def draw_train_tooltip(

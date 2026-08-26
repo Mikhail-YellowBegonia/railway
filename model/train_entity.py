@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from model.pathfinding import Path
+from model.pathfinding import DirectedEdge, Path
 from model.wagon import Consist
+from model.occupancy import OccupancyState, advance_occupied_path, occupied_as_path
 from model.rigid_kinematics import RigidWagonKinematics
 from model.train_physics import TrainPhysics
 from model.train_controller import BrakingController
@@ -14,13 +15,23 @@ from model.rail_network import RailNetwork
 class TrainState:
     """列车持久化状态（纯数据，几何优先）。
 
-    path + s 唯一确定列车在轨道上的几何位置，包括跨道岔情况。
-    v 为速度，停放时为 0。
+    三段式设计（Step 1 重构）：
+    - occupancy: 车身占用轨迹（滑动窗口，权威几何状态，唯一真源）
+    - route: 待走的有向边（寻路结果未消费部分），为空 = 无指令，随占用推进逐边消耗
+    - remaining_to_goal: 距离本次指令终点的剩余弧长（米），与 occupancy 的边界无关，
+      纯粹按 delta_s 递减；供 BrakingController 判断制动/停车，不依赖 occupancy 内部坐标
+
+    寻路只应读取车头位置 (edge_id, t, direction)，不应引用 occupancy 或 route 本身。
     """
-    path: Path
-    s: float        # 首节前转向架在 path 上的弧长（米）
+    occupancy: OccupancyState
+    remaining_to_goal: float
     v: float        # 当前速度（m/s），0 = 停放
     consist: Consist
+
+    @property
+    def s(self) -> float:
+        """车头在 occupancy 路径上的绝对弧长（只读，向后兼容旧引用语义）。"""
+        return self.occupancy.s
 
 
 class TrainEntity:
@@ -31,7 +42,7 @@ class TrainEntity:
     - controller 为 None 时列车停放，不接受物理更新
 
     状态机：
-        停放（controller=None）→ 收到指令 → 行驶 → 到达 → 停放
+        停放（controller=None）→ 收到指令（assign_route）→ 行驶 → 到达 → 停放
     """
 
     def __init__(
@@ -47,71 +58,41 @@ class TrainEntity:
         self.last_a: float = 0.0        # 上一帧加速度（HUD 显示用）
         self.v_target: float = 0.0      # 玩家设定的巡航速度
 
-        # 从 state 派生的运动学对象
-        self.kinematics = RigidWagonKinematics(
-            network, state.path, state.consist
+        self.kinematics = self._build_kinematics()
+
+    def _build_kinematics(self) -> RigidWagonKinematics:
+        """从 state.occupancy 重建运动学对象（occupied 边列表 → Path）。"""
+        path = occupied_as_path(self.state.occupancy, self.network)
+        return RigidWagonKinematics(
+            self.network, path, self.state.consist,
+            initial_offset=self.state.occupancy.occupied_offset,
         )
 
     # ------------------------------------------------------------------
     # 调度接口
     # ------------------------------------------------------------------
 
-    def assign_path(
-        self,
-        path: Path,
-        start_offset: float = 0.0,
-        end_offset: float = 0.0,
-    ) -> None:
-        """分配新行驶路径，重建运动学对象，启动 BrakingController。
+    def assign_route(self, route: list[DirectedEdge], remaining_to_goal: float) -> None:
+        """分配新的行驶指令：只设置 route，不改动 occupancy（车身位置/历史不受影响）。
 
-        start_offset / end_offset 来自 find_path_from_point 的返回值。
-        列车从新路径的起点（initial_offset 处）出发，state.s 初始化为 0。
+        route: 从当前车头位置出发、尚待走的有向边序列（不含车头当前所在边）。
+        remaining_to_goal: 从车头当前位置到指令终点的剩余弧长（米）。
         """
-        self.state.path = path
-        self.state.s = 0.0  # 可行驶区间起点
-        self.kinematics = RigidWagonKinematics(
-            self.network, path, self.state.consist,
-            initial_offset=start_offset,
-            end_offset=end_offset,
-        )
+        self.state.occupancy.route = list(route)
+        self.state.remaining_to_goal = remaining_to_goal
         self.controller = BrakingController(self.physics, self.state.consist)
         self.controller.reset()
 
     def emergency_stop(self) -> None:
-        """调度层强制停车：忽略物理，直接归零速度，清除控制器。
+        """调度层强制停车：忽略物理，直接归零速度，清空待走指令。
 
-        截取覆盖车身的最小 Path 作为停放 Path，保持几何位置连续。
+        occupancy 不需要额外裁剪——它本身就是滑动窗口，持续保持车身覆盖。
         """
         self.state.v = 0.0
         self.last_a = 0.0
         self.controller = None
-        self._trim_to_parking_path()
-
-    def _trim_to_parking_path(self) -> None:
-        """截取覆盖车身的最小 Path，更新 state.path / state.s / kinematics。
-
-        停放 Path 覆盖范围：[s_head - consist.total_length - margin, s_head]
-        margin = 25m（最长单节车厢估计值），防止边界误差导致车厢悬空。
-        """
-        MARGIN = 25.0
-        # s_head：车头在底层（未裁剪）path_kin 上的绝对弧长
-        s_head = self.kinematics.initial_offset + self.state.s
-        s_tail = max(0.0, s_head - self.state.consist.total_length - MARGIN)
-
-        base_kin = self.kinematics._path_kin
-        park_path, initial_offset = base_kin.sub_path(s_tail, s_head)
-
-        if not park_path.edges:
-            return
-
-        self.state.path = park_path
-        # seg_start = s_tail - initial_offset（sub_path 第一段在 base_kin 上的起点）
-        seg_start = s_tail - initial_offset
-        self.state.s = (s_head - seg_start) - initial_offset
-        self.kinematics = RigidWagonKinematics(
-            self.network, park_path, self.state.consist,
-            initial_offset=initial_offset,
-        )
+        self.state.occupancy.route = []
+        self.state.remaining_to_goal = 0.0
 
     # ------------------------------------------------------------------
     # 每帧更新
@@ -129,10 +110,11 @@ class TrainEntity:
 
         self.v_target = v_target
 
+        # BrakingController 只需要“剩余距离”这个标量，与 occupancy 边界无关
         throttle, brake = self.controller.update(
             self.state.v,
-            self.state.s,
-            self.kinematics.total_length,
+            0.0,
+            self.state.remaining_to_goal,
             v_target,
             dt,
         )
@@ -142,17 +124,22 @@ class TrainEntity:
         )
 
         self.state.v = max(0.0, self.state.v + self.last_a * dt)
-        self.state.s = max(
-            0.0,
-            min(self.state.s + self.state.v * dt, self.kinematics.total_length),
+        delta_s = self.state.v * dt
+
+        consist_length = self.state.consist.total_length
+        new_occ, reached_end = advance_occupied_path(
+            self.network, self.state.occupancy, delta_s, consist_length,
         )
+        self.state.occupancy = new_occ
+        self.state.remaining_to_goal = max(0.0, self.state.remaining_to_goal - delta_s)
+        self.kinematics = self._build_kinematics()
 
         # 到达终点：停放，保留几何状态
-        if self.controller.stopped:
+        if reached_end or self.controller.stopped:
             self.emergency_stop()
 
     # ------------------------------------------------------------------
-    # 几何查询（委托给 kinematics）
+    # 几何查询
     # ------------------------------------------------------------------
 
     def is_parked(self) -> bool:
@@ -166,68 +153,37 @@ class TrainEntity:
 
         用于从当前位置发起新一次寻路（find_path_from_point 的输入）。
         """
-        abs_s = self.kinematics.initial_offset + self.state.s
-        return self.kinematics._path_kin.edge_at(abs_s)
+        return self.kinematics._path_kin.edge_at(self.state.occupancy.s)
 
     def current_direction(self) -> int:
-        """返回列车当前行驶方向（+1 或 -1）。
+        """返回列车当前行驶方向（+1 或 -1）：occupied 最后一条边的方向。"""
+        if not self.state.occupancy.occupied:
+            return 1
+        return self.state.occupancy.occupied[-1][1]
 
-        从车头当前所在的有向边推断方向。
-        """
-        if not self.state.path.edges:
-            return 1  # 默认正方向
+    def head_directed_edge(self) -> DirectedEdge:
+        """车头当前所在的有向边（occupied 最后一条）。"""
+        return self.state.occupancy.occupied[-1]
 
-        # 找到车头当前所在的 edge
-        abs_s = self.kinematics.initial_offset + self.state.s
-        current_edge_id, _ = self.kinematics._path_kin.edge_at(abs_s)
-
-        # 在 path 中查找对应的有向边
-        for eid, direction in self.state.path.edges:
-            if eid == current_edge_id:
-                return direction
-
-        # 降级：返回第一条边的方向（理论上不应该到这里）
-        return self.state.path.edges[0][1]
-
-    def tail_coverage_path(self) -> tuple[Path, float, float]:
-        """返回覆盖车尾到车头的路径片段（用于路径拼接）。
-
-        返回:
-            (tail_path, initial_offset_tail, s_head_in_tail_path)
-            - tail_path: 从车尾位置开始到车头位置的子路径（包含完整 edge）
-            - initial_offset_tail: 车尾在 tail_path 首段的局部偏移（米）
-            - s_head_in_tail_path: 车头在 tail_path 上的绝对弧长（米，= s_head - s_tail）
-
-        用于换路径时保持车尾连续性。
-        """
-        s_head = self.kinematics.initial_offset + self.state.s
-        s_tail = max(0.0, s_head - self.state.consist.total_length)
-        tail_path, initial_offset_tail = self.kinematics._path_kin.sub_path(s_tail, s_head)
-        s_head_in_tail_path = s_head - s_tail
-        return tail_path, initial_offset_tail, s_head_in_tail_path
+    # ------------------------------------------------------------------
+    # Couple / Decouple
+    # ------------------------------------------------------------------
 
     def decouple_at(self, wagon_idx: int) -> tuple["TrainEntity", "TrainEntity"]:
         """在第 wagon_idx 节车厢后解挂，返回 (前段, 后段) 两个停放实体。
 
-        当前阶段：强制两段都停车（v=0）。
+        当前阶段：强制两段都停车（v=0，route 清空）。
         wagon_idx: 0-indexed，前段保留 wagons[0..wagon_idx]，后段 wagons[wagon_idx+1..]。
-
-        几何约定：
-        - 前段：沿用当前 sub_path（车尾～车头），重建 Consist
-        - 后段：以后段首节前转向架位置为起点，截取停放 Path
-
-        注意：Path/位置拼接在极端情况下可能有轻微误差（已知 glitch）。
         """
         wagons = self.state.consist.wagons
         if wagon_idx < 0 or wagon_idx >= len(wagons) - 1:
             raise ValueError(f"decouple_at: wagon_idx={wagon_idx} 越界，编组共 {len(wagons)} 节")
 
-        # ── 1. 算出各节转向架绝对 s（复用 get_all_bogie_poses 的链式逻辑）
         from model.wagon import solve_rear_bogie_s
         path_kin = self.kinematics._path_kin
-        abs_s_head = self.kinematics.initial_offset + self.state.s
+        abs_s_head = self.state.occupancy.s
 
-        bogie_s: list[tuple[float, float]] = []  # [(front_s, rear_s), ...]
+        bogie_s: list[tuple[float, float]] = []
         current_s = abs_s_head
         for i, wagon in enumerate(wagons):
             front_s = current_s
@@ -239,40 +195,65 @@ class TrainEntity:
                       (next_wagon.bogies[0].pos - next_wagon.coupler_1_pos)
                 current_s = solve_rear_bogie_s(rear_s, gap, path_kin)
 
-        # 后段车头前转向架的绝对 s
         rear_head_s = bogie_s[wagon_idx + 1][0]
 
-        # ── 2. 前段：sub_path 从车尾到当前车头
+        # 前段：sub_path 从车尾到当前车头
         s_tail_front = max(0.0, abs_s_head - sum(w.length for w in wagons[:wagon_idx + 1]))
         front_path, front_offset = path_kin.sub_path(s_tail_front, abs_s_head)
         front_consist = Consist(wagons=wagons[:wagon_idx + 1])
-        front_state = TrainState(
-            path=front_path,
+        front_occ = OccupancyState(
+            occupied=list(front_path.edges),
+            occupied_offset=front_offset,
             s=abs_s_head - s_tail_front,
-            v=0.0,
-            consist=front_consist,
+            route=[],
+        )
+        front_state = TrainState(
+            occupancy=front_occ, remaining_to_goal=0.0, v=0.0, consist=front_consist,
         )
         front_entity = TrainEntity(front_state, self.network, self.physics)
-        front_entity.kinematics = RigidWagonKinematics(
-            self.network, front_path, front_consist,
-            initial_offset=front_offset,
-        )
 
-        # ── 3. 后段：sub_path 从后段车尾到后段车头
+        # 后段：sub_path 从后段车尾到后段车头
         rear_wagons = wagons[wagon_idx + 1:]
         rear_tail_s = max(0.0, rear_head_s - sum(w.length for w in rear_wagons))
         rear_path, rear_offset = path_kin.sub_path(rear_tail_s, rear_head_s)
         rear_consist = Consist(wagons=rear_wagons)
-        rear_state = TrainState(
-            path=rear_path,
+        rear_occ = OccupancyState(
+            occupied=list(rear_path.edges),
+            occupied_offset=rear_offset,
             s=rear_head_s - rear_tail_s,
-            v=0.0,
-            consist=rear_consist,
+            route=[],
+        )
+        rear_state = TrainState(
+            occupancy=rear_occ, remaining_to_goal=0.0, v=0.0, consist=rear_consist,
         )
         rear_entity = TrainEntity(rear_state, self.network, self.physics)
-        rear_entity.kinematics = RigidWagonKinematics(
-            self.network, rear_path, rear_consist,
-            initial_offset=rear_offset,
-        )
 
         return front_entity, rear_entity
+
+    def couple_with(self, rear: "TrainEntity") -> "TrainEntity":
+        """将 rear 连挂到本列车车尾，返回合并后的新停放实体。
+
+        调用方负责：
+        - 确认两车已停车且满足几何条件（couple 条件检查在 GameLoop 层）
+        - 从 trains 列表移除 self 和 rear，加入返回的新实体
+        """
+        new_wagons = self.state.consist.wagons + rear.state.consist.wagons
+        new_consist = Consist(wagons=new_wagons)
+
+        self_path_kin = self.kinematics._path_kin
+        abs_s_head = self.state.occupancy.s
+        combined_length = sum(w.length for w in new_wagons)
+        s_tail_new = max(0.0, abs_s_head - combined_length)
+        new_path, new_initial_offset = self_path_kin.sub_path(s_tail_new, abs_s_head)
+
+        new_occ = OccupancyState(
+            occupied=list(new_path.edges),
+            occupied_offset=new_initial_offset,
+            s=abs_s_head - s_tail_new,
+            route=[],
+        )
+        new_state = TrainState(
+            occupancy=new_occ, remaining_to_goal=0.0, v=0.0, consist=new_consist,
+        )
+        new_entity = TrainEntity(new_state, self.network, self.physics)
+        return new_entity

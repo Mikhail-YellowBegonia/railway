@@ -109,3 +109,86 @@ class RigidWagonKinematics:
                 current_s = rear_s
 
         return bogie_pairs
+
+    def get_coupler_positions(self, front_bogie_s: float) -> list[Vec3]:
+        """返回所有节间连接点的世界坐标（N-1 个，N=车厢数）。coupler_idx i 对应 decouple_at(i)。"""
+        return [pos for pos, _eid, _t in self.get_coupler_data(front_bogie_s)]
+
+    def get_coupler_data(self, front_bogie_s: float) -> list[tuple[Vec3, int, float]]:
+        """返回所有节间连接点的 (世界坐标, edge_id, t)（N-1 个）。
+
+        供寻路终点吸附使用：edge_id + t 直接作为 find_path_from_point 的目标。
+        """
+        wagons = self.consist.wagons
+        if len(wagons) < 2:
+            return []
+
+        result = []
+        current_s = front_bogie_s + self.initial_offset
+
+        for i, wagon in enumerate(wagons):
+            rear_s = solve_rear_bogie_s(current_s, wagon.bogie_spacing, self._path_kin)
+
+            if i < len(wagons) - 1:
+                next_wagon = wagons[i + 1]
+                rear_coupler_offset = wagon.coupler_2_pos - wagon.bogies[1].pos
+                rear_coupler_s = solve_rear_bogie_s(rear_s, rear_coupler_offset, self._path_kin)
+                front_coupler_offset = next_wagon.bogies[0].pos - next_wagon.coupler_1_pos
+                gap = rear_coupler_offset + front_coupler_offset
+                next_front_s = solve_rear_bogie_s(rear_s, gap, self._path_kin)
+                front_coupler_s = solve_rear_bogie_s(rear_s, front_coupler_offset, self._path_kin)
+
+                mid_s = (rear_coupler_s + front_coupler_s) * 0.5
+                pos = self._path_kin.pose_at(mid_s).position
+                edge_id, t = self._path_kin.edge_at(mid_s)
+                result.append((pos, edge_id, t))
+                current_s = next_front_s
+            else:
+                current_s = rear_s
+
+        return result
+
+    def get_end_coupler_data(self, front_bogie_s: float) -> tuple[
+        tuple[Vec3, int, float],
+        tuple[Vec3, int, float],
+    ]:
+        """返回首尾端头车钩的 (世界坐标, edge_id, t)。
+
+        用于 couple 条件检查：
+        - [0] = 车头前车钩（首节 coupler_1_pos 端）
+        - [1] = 车尾后车钩（末节 coupler_2_pos 端）
+        """
+        wagons = self.consist.wagons
+        abs_s = front_bogie_s + self.initial_offset
+
+        # 车头前车钩：首节前转向架向前偏移 bogie[0].pos - coupler_1_pos
+        head_wagon = wagons[0]
+        head_offset = head_wagon.bogies[0].pos - head_wagon.coupler_1_pos
+        # 车头方向是正向（abs_s 本身是前转向架），前车钩在前转向架更前方
+        # 用 pose_at 的 heading 外推
+        head_pose = self._path_kin.pose_at(abs_s)
+        head_pos = head_pose.position + head_pose.heading * head_offset
+        head_edge_id, head_t = self._path_kin.edge_at(abs_s)
+
+        # 车尾后车钩：链式求解到末节后转向架，再偏移
+        current_s = abs_s
+        for i, wagon in enumerate(wagons):
+            rear_s = solve_rear_bogie_s(current_s, wagon.bogie_spacing, self._path_kin)
+            if i < len(wagons) - 1:
+                next_wagon = wagons[i + 1]
+                gap = (wagon.coupler_2_pos - wagon.bogies[1].pos) + \
+                      (next_wagon.bogies[0].pos - next_wagon.coupler_1_pos)
+                current_s = solve_rear_bogie_s(rear_s, gap, self._path_kin)
+            else:
+                current_s = rear_s  # 末节后转向架
+
+        tail_wagon = wagons[-1]
+        tail_coupler_offset = tail_wagon.coupler_2_pos - tail_wagon.bogies[1].pos
+        tail_s = solve_rear_bogie_s(current_s, tail_coupler_offset, self._path_kin)
+        tail_pos = self._path_kin.pose_at(tail_s).position
+        tail_edge_id, tail_t = self._path_kin.edge_at(tail_s)
+
+        return (
+            (head_pos, head_edge_id, head_t),
+            (tail_pos, tail_edge_id, tail_t),
+        )

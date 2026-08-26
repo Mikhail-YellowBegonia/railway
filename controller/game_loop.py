@@ -88,6 +88,8 @@ class GameLoop:
         self.active_train: "TrainEntity | None" = None
         self.train_v_target: float = 0.0           # 焦点列车的巡航速度（m/s）
         self.inspect_train: "TrainEntity | None" = None  # 编组面板目标（I 键切换）
+        # 车钩悬停状态：(列车, coupler_idx) 或 None
+        self._hovered_coupler: tuple["TrainEntity", int] | None = None
 
     def run(self) -> None:
         while self.running:
@@ -143,33 +145,21 @@ class GameLoop:
                 )
             self.renderer.draw_network(self.network, self.editor)
             self.renderer.draw_overlay(self.network, self.editor, mouse_world)
-            # PLAY 模式可视化
-            if self.editor.mode == EditMode.PLAY and self.train_path is not None:
-                from view.renderer import draw_pathfinding_debug, draw_debug_train
-                # 路径预览（橙色）：从起点到终点的完整路径
-                draw_pathfinding_debug(
-                    self.renderer.surface,
-                    self.camera,
-                    self.network,
-                    self.renderer._font,
-                    None,
-                    None,
-                    self.train_path,
+            # PLAY 模式可视化：路径预览按需从 occupancy+route 现拼，不缓存
+            if (self.editor.mode == EditMode.PLAY and self.active_train is not None
+                    and self.active_train.state.occupancy.route):
+                from view.renderer import draw_pathfinding_debug
+                from model.pathfinding import Path as _Path
+                occ = self.active_train.state.occupancy
+                preview_path = _Path(
+                    edges=list(occ.occupied) + list(occ.route),
+                    total_cost=sum(self.network.edges[e[0]].length
+                                  for e in occ.occupied + occ.route),
                 )
-                # 路径上的预览列车（橙色，s=0 起点）
-                # 只在停放时显示（出发后隐藏，避免与红色实时列车混淆）
-                from model.rigid_kinematics import RigidWagonKinematics
-                if self.active_train is not None and self.active_train.is_parked():
-                    preview_kin = RigidWagonKinematics(
-                        self.network, self.train_path, self.active_train.state.consist
-                    )
-                    draw_debug_train(
-                        self.renderer.surface,
-                        self.camera,
-                        preview_kin,
-                        0.0,
-                        occupied=False,
-                    )
+                draw_pathfinding_debug(
+                    self.renderer.surface, self.camera, self.network,
+                    self.renderer._font, None, None, preview_path,
+                )
                 # 绘制虚拟节点（黄色圆圈，调试用）
                 for vpos in self.train_path_virtual_points:
                     sx, sy = self.camera.world_to_screen(
@@ -252,18 +242,32 @@ class GameLoop:
                     braking=_in_braking,
                 )
             # 右下角控制台回显
-            from view.renderer import draw_console_log, draw_train_tooltip, draw_consist_panel
+            from view.renderer import (draw_console_log, draw_train_tooltip,
+                                       draw_consist_panel, draw_coupler_highlight)
             draw_console_log(self.renderer.surface, self.renderer._font, _console_messages)
-            # PLAY 模式：悬停 tooltip
+            # PLAY 模式：车钩悬停检测 + tooltip
             if self.editor.mode == EditMode.PLAY:
-                hovered = self._hit_test_train(mouse_world)
-                if hovered is not None:
-                    idx = self.trains.index(hovered) + 1
-                    mx, my = pygame.mouse.get_pos()
-                    draw_train_tooltip(
-                        self.renderer.surface, self.renderer._font,
-                        (mx, my), idx, hovered.state.v,
-                    )
+                self._hovered_coupler = self._hit_test_coupler(mouse_world)
+                if self._hovered_coupler is not None:
+                    _, cp_idx = self._hovered_coupler
+                    cp_train = self._hovered_coupler[0]
+                    couplers = cp_train.kinematics.get_coupler_positions(cp_train.state.s)
+                    if cp_idx < len(couplers):
+                        w_s = self.renderer.surface.get_width()
+                        h_s = self.renderer.surface.get_height()
+                        draw_coupler_highlight(
+                            self.renderer.surface, self.camera,
+                            couplers[cp_idx], w_s, h_s,
+                        )
+                else:
+                    hovered = self._hit_test_train(mouse_world)
+                    if hovered is not None:
+                        idx = self.trains.index(hovered) + 1
+                        mx, my = pygame.mouse.get_pos()
+                        draw_train_tooltip(
+                            self.renderer.surface, self.renderer._font,
+                            (mx, my), idx, hovered.state.v,
+                        )
             # 编组面板（I 键触发）
             if self.inspect_train is not None and self.inspect_train in self.trains:
                 idx = self.trains.index(self.inspect_train) + 1
@@ -372,6 +376,10 @@ class GameLoop:
             self.camera.follow_enabled = not self.camera.follow_enabled
             status = "开启" if self.camera.follow_enabled else "关闭"
             print(f"相机跟随: {status}")
+        elif event.key == pygame.K_k:
+            # K 键：解挂（临时调试，固定在第一节后分割）
+            # ponytail: 临时交互，F 阶段替换为完整 UI
+            self._debug_decouple()
         elif event.key == pygame.K_SPACE:
             # 空格键：列车紧急停止（emergency_stop）
             if self.active_train is not None:
@@ -463,6 +471,35 @@ class GameLoop:
 
     # ===== PLAY 模式（P 键叠加态）=====
 
+    def _debug_decouple(self) -> None:
+        """K 键：悬停车钩 → 解挂；未悬停 → couple 条件检查。"""
+        if self.editor.mode != EditMode.PLAY:
+            return
+
+        # 悬停在车钩上：执行解挂
+        if self._hovered_coupler is not None:
+            train, coupler_idx = self._hovered_coupler
+            if not train.is_parked():
+                print("PLAY: 请先停车再解挂（空格键）")
+                return
+            try:
+                front, rear = train.decouple_at(coupler_idx)
+            except Exception as e:
+                print(f"PLAY: 解挂失败 — {e}")
+                return
+            idx = self.trains.index(train)
+            self.trains[idx:idx+1] = [front, rear]
+            self.active_train = front
+            self.train_path = None
+            self.inspect_train = None
+            self._hovered_coupler = None
+            fn, rn = len(front.state.consist.wagons), len(rear.state.consist.wagons)
+            print(f"PLAY: Decouple #{idx+1} | {fn+rn}→{fn}+{rn}")
+            return
+
+        # 未悬停：尝试 couple
+        self._try_couple()
+
     def _hit_test_train(self, world_pos: Vec3) -> "TrainEntity | None":
         """返回点击命中的列车，未命中返回 None。判定：任意 wagon 中心 < 5m。"""
         HIT_RADIUS = 5.0
@@ -472,6 +509,78 @@ class GameLoop:
                 if (pose.position - world_pos).length() < HIT_RADIUS:
                     return train
         return None
+
+    def _hit_test_coupler(self, world_pos: Vec3) -> tuple["TrainEntity", int] | None:
+        """返回鼠标命中的 (列车, coupler_idx)，未命中返回 None。命中半径 1.5m。"""
+        HIT_RADIUS = 1.5
+        for train in self.trains:
+            couplers = train.kinematics.get_coupler_positions(train.state.s)
+            for i, cp in enumerate(couplers):
+                if (cp - world_pos).length() < HIT_RADIUS:
+                    return train, i
+        return None
+
+    def _try_couple(self) -> None:
+        """检查焦点列车端头车钩是否与其他列车端头车钩足够近，满足则连挂。
+
+        条件：两车都停车，端头车钩距离 < 1m，朝向一致（heading 点积 > 0.9）。
+        """
+        COUPLE_DIST = 1.0
+        HEADING_DOT  = 0.9
+
+        front = self.active_train
+        if front is None:
+            print("PLAY: 未选中列车")
+            return
+        if not front.is_parked():
+            print("PLAY: 请先停车再连挂（空格键）")
+            return
+
+        front_head_data, front_tail_data = \
+            front.kinematics.get_end_coupler_data(front.state.s)
+
+        for other in self.trains:
+            if other is front or not other.is_parked():
+                continue
+            other_head_data, other_tail_data = \
+                other.kinematics.get_end_coupler_data(other.state.s)
+
+            # 检查所有端头组合：自身车尾 ↔ 对方车头（最常见），或自身车头 ↔ 对方车尾
+            for (a_pos, _ae, _at), (b_pos, _be, _bt), a_is_tail in (
+                (front_tail_data, other_head_data, True),
+                (front_head_data, other_tail_data, False),
+            ):
+                if (a_pos - b_pos).length() > COUPLE_DIST:
+                    continue
+                # 朝向检查：两车 heading 点积
+                front_poses = front.kinematics.get_all_wagon_poses(front.state.s)
+                other_poses = other.kinematics.get_all_wagon_poses(other.state.s)
+                if not front_poses or not other_poses:
+                    continue
+                fh = front_poses[0].heading
+                oh = other_poses[0].heading
+                if fh.dot(oh) < HEADING_DOT:
+                    continue
+
+                # 满足条件：连挂
+                if a_is_tail:
+                    new_train = front.couple_with(other)
+                    label = f"#{self.trains.index(front)+1}+#{self.trains.index(other)+1}"
+                else:
+                    new_train = other.couple_with(front)
+                    label = f"#{self.trains.index(other)+1}+#{self.trains.index(front)+1}"
+
+                self.trains.remove(front)
+                self.trains.remove(other)
+                self.trains.append(new_train)
+                self.active_train = new_train
+                self.train_path = None
+                self.inspect_train = None
+                n = len(new_train.state.consist.wagons)
+                print(f"PLAY: Couple {label} → {n} 节")
+                return
+
+        print("PLAY: 未找到可连挂的列车（需停车且端头车钩 < 1m）")
 
     def _play_left_click(self, world_pos: Vec3) -> None:
         """左键：切换焦点列车 / 放置新列车（两步流程）。"""
@@ -524,10 +633,11 @@ class GameLoop:
         if edge_id is None:
             print(f"PLAY: 节点 {target_node_id} 与放置节点不相邻")
             return
+        from model.occupancy import OccupancyState
         park_directed = _directed_from(self.network, edge_id, self.train_placement_node_id)
-        park_path = Path(edges=[park_directed],
-                         total_cost=self.network.edges[edge_id].length)
-        state = TrainState(path=park_path, s=0.0, v=0.0, consist=self.train_placement_consist)
+        park_occ = OccupancyState(occupied=[park_directed], occupied_offset=0.0, s=0.0, route=[])
+        state = TrainState(occupancy=park_occ, remaining_to_goal=0.0, v=0.0,
+                           consist=self.train_placement_consist)
         new_train = TrainEntity(state, self.network, RealisticElectric())
         self.trains.append(new_train)
         self.active_train = new_train
@@ -545,14 +655,51 @@ class GameLoop:
             return
         self._issue_path_order(world_pos)
 
+    def _apply_route_result(self, train, path, start_offset: float, end_offset: float) -> None:
+        """将 find_path_from_point 的结果转换为 route + remaining_to_goal，下达给 train。
+
+        occupancy 本身不动（车身位置/历史不受影响），只设置待走的 route。
+
+        已知限制（Step 1，折返场景在 Step 3 处理）：若 path.edges[0] 与车头当前
+        所在有向边不一致（即寻路判定需要原地折返），这里暂不做正确的状态翻转，
+        仅整体接续 route，可能出现车厢位置 glitch。
+        """
+        head_directed = train.head_directed_edge()
+        if path.edges and path.edges[0] == head_directed:
+            route = path.edges[1:]
+        else:
+            print("PLAY: [已知限制] 寻路结果首边与车头方向不一致（折返场景），"
+                  "Step 1 暂不处理，可能出现车厢位置异常")
+            route = path.edges
+        remaining_to_goal = path.total_cost - start_offset - end_offset
+        train.assign_route(route, max(0.0, remaining_to_goal))
+
     def _issue_path_order(self, world_pos: Vec3) -> None:
-        """对 active_train 下达寻路指令（Edge 途中或 Node）。"""
-        from model.pathfinding import find_path_from_point, Path
+        """对 active_train 下达寻路指令（Edge 途中或 Node）。
+
+        右键目标会先检查是否吸附到其他列车的端头车钩（5m 范围内）。
+        """
+        from model.pathfinding import find_path_from_point
+
+        # Couple-2：检查是否吸附到其他列车端头车钩
+        COUPLE_SNAP = 5.0
+        snapped_goal: tuple[int, float] | None = None
+        for other in self.trains:
+            if other is self.active_train:
+                continue
+            head_data, tail_data = other.kinematics.get_end_coupler_data(other.state.s)
+            for cp_pos, cp_edge_id, cp_t in (head_data, tail_data):
+                if (cp_pos - world_pos).length() < COUPLE_SNAP:
+                    snapped_goal = (cp_edge_id, cp_t)
+                    print(f"PLAY: 吸附到列车 #{self.trains.index(other)+1} 车钩 "
+                          f"(edge {cp_edge_id} t={cp_t:.2f})")
+                    break
+            if snapped_goal:
+                break
 
         train = self.active_train
         start_edge_id, start_t = train.current_edge_and_t()
         start_direction = train.current_direction()
-        tail_path, initial_offset_tail, s_head_in_tail = train.tail_coverage_path()
 
         def _edge_pos(edge, t):
             na = self.network.nodes[edge.node_a_id].position
@@ -564,18 +711,7 @@ class GameLoop:
                 edge.arc_start_dir, edge.arc_normal, edge.arc_angle_rad * t
             ) * edge.arc_radius
 
-        def _merge(tail, new_path):
-            from model.pathfinding import Path
-            if tail.edges and new_path.edges and tail.edges[-1] == new_path.edges[0]:
-                return Path(
-                    edges=tail.edges + new_path.edges[1:],
-                    total_cost=tail.total_cost + new_path.total_cost
-                              - self.network.edges[new_path.edges[0][0]].length
-                )
-            return Path(edges=tail.edges + new_path.edges,
-                        total_cost=tail.total_cost + new_path.total_cost)
-
-        goal = self._snap_edge_at(world_pos)
+        goal = snapped_goal if snapped_goal is not None else self._snap_edge_at(world_pos)
         if goal is not None:
             goal_edge_id, goal_t = goal
             result = find_path_from_point(
@@ -585,17 +721,16 @@ class GameLoop:
             if result is None:
                 print(f"PLAY: 不可达 (edge {start_edge_id} → edge {goal_edge_id})")
                 return
-            path, _, end_offset = result
+            path, start_offset, end_offset = result
             se = self.network.edges[start_edge_id]
             ge = self.network.edges[goal_edge_id]
             self.train_path_virtual_points = [_edge_pos(se, start_t), _edge_pos(ge, goal_t)]
-            full = _merge(tail_path, path)
-            self.train_path = full
-            train.assign_path(full, initial_offset_tail, end_offset)
-            train.state.s = s_head_in_tail
+            self._apply_route_result(train, path, start_offset, end_offset)
+            self.train_path = None  # 可视化路径按需从 occupancy+route 重建，不再缓存
             self.train_v_target = 0.0
             idx = self.trains.index(train) + 1
-            print(f"PLAY: 列车 #{idx} → edge {goal_edge_id} t={goal_t:.2f}，{len(full.edges)} 段 {full.total_cost:.0f} m")
+            print(f"PLAY: 列车 #{idx} → edge {goal_edge_id} t={goal_t:.2f}，"
+                  f"剩余 {train.state.remaining_to_goal:.0f} m")
             return
 
         node_id = self._snap_node_at(world_pos)
@@ -615,18 +750,16 @@ class GameLoop:
         if result is None:
             print(f"PLAY: 节点 {node_id} 不可达")
             return
-        path, _, end_offset = result
+        path, start_offset, end_offset = result
         se = self.network.edges[start_edge_id]
         ge = self.network.edges[goal_edge_id]
         self.train_path_virtual_points = [_edge_pos(se, start_t), _edge_pos(ge, goal_t)]
-        full = _merge(tail_path, path)
-        self.train_path = full
-        train.assign_path(full, initial_offset_tail, end_offset)
-        train.state.s = s_head_in_tail
+        self._apply_route_result(train, path, start_offset, end_offset)
+        self.train_path = None
         self.train_v_target = 0.0
         idx = self.trains.index(train) + 1
-        seq = " → ".join(f"e{eid}({'+' if d > 0 else '-'})" for eid, d in full.edges)
-        print(f"PLAY: 列车 #{idx} → 节点 {node_id}，{len(full.edges)} 段 {full.total_cost:.0f} m\n  {seq}")
+        seq = " → ".join(f"e{eid}({'+' if d > 0 else '-'})" for eid, d in path.edges)
+        print(f"PLAY: 列车 #{idx} → 节点 {node_id}，剩余 {train.state.remaining_to_goal:.0f} m\n  {seq}")
 
     def _snap_node_at(self, world_pos: Vec3) -> int | None:
         """返回点击命中的节点 ID，未命中返回 None。"""
