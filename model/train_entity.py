@@ -30,8 +30,23 @@ class TrainState:
 
     @property
     def s(self) -> float:
-        """车头在 occupancy 路径上的绝对弧长（只读，向后兼容旧引用语义）。"""
+        """车头在 occupancy 路径上的绝对弧长（只读，向后兼容旧引用语义）。
+
+        注意：这是相对 occupancy.occupied_offset 的坐标（= kinematics.get_all_wagon_poses
+        等方法期望的 front_bogie_s 参数）。若要直接对 self.kinematics._path_kin 取值
+        （绕过 initial_offset 自动加成），必须用 abs_s，不能直接用这个属性。
+        """
         return self.occupancy.s
+
+    @property
+    def abs_s(self) -> float:
+        """车头在底层 _path_kin 坐标系下的绝对弧长（= occupancy.s + occupied_offset）。
+
+        直接调用 self.kinematics._path_kin.* 时必须用这个值，不能用 occupancy.s——
+        后者是相对 occupied_offset 的坐标，kinematics 高层方法（get_all_wagon_poses
+        等）会自动加上 initial_offset，但 _path_kin 是底层对象，不会自动加。
+        """
+        return self.occupancy.s + self.occupancy.occupied_offset
 
 
 class TrainEntity:
@@ -153,7 +168,7 @@ class TrainEntity:
 
         用于从当前位置发起新一次寻路（find_path_from_point 的输入）。
         """
-        return self.kinematics._path_kin.edge_at(self.state.occupancy.s)
+        return self.kinematics._path_kin.edge_at(self.state.abs_s)
 
     def current_direction(self) -> int:
         """返回列车当前行驶方向（+1 或 -1）：occupied 最后一条边的方向。"""
@@ -181,7 +196,7 @@ class TrainEntity:
 
         from model.wagon import solve_rear_bogie_s
         path_kin = self.kinematics._path_kin
-        abs_s_head = self.state.occupancy.s
+        abs_s_head = self.state.abs_s
 
         bogie_s: list[tuple[float, float]] = []
         current_s = abs_s_head
@@ -241,7 +256,7 @@ class TrainEntity:
         new_consist = Consist(wagons=new_wagons)
 
         self_path_kin = self.kinematics._path_kin
-        abs_s_head = self.state.occupancy.s
+        abs_s_head = self.state.abs_s
         combined_length = sum(w.length for w in new_wagons)
         s_tail_new = max(0.0, abs_s_head - combined_length)
         new_path, new_initial_offset = self_path_kin.sub_path(s_tail_new, abs_s_head)
