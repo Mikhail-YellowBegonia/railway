@@ -656,13 +656,18 @@ class GameLoop:
         self._issue_path_order(world_pos)
 
     def _find_path_any_goal_direction(
-        self, start_edge_id, start_t, start_direction, goal_edge_id, goal_t, *, allow_reversal, debug,
+        self, start_edge_id, start_t, start_direction, goal_edge_id, goal_t,
+        *, allow_reversal, debug, consist_length,
     ):
         """玩家点击目标点时不指定到达方向，分别尝试 +1/-1，取代价更低者。
 
         Step 2：find_path_from_point 现在要求显式 goal_direction（消除到达
         方向歧义），但 PLAY 模式下玩家右键点选轨道并不表达"以哪个方向进站"
         的意图，所以在这一层统一枚举两个方向。
+
+        consist_length 必须传真实列车长度（Step 3 阶段 B）：决定折返在
+        哪些 endpoint 可行——simple_segment 长度不足的死端会被寻路层直接
+        排除，避免"折返后车尾越过 turnout"或"死端间无限振荡"的问题。
 
         返回 (path, start_offset, end_offset, goal_direction) 或 None——
         goal_direction 需要一并带出，供 assign_route 记录 state.goal
@@ -675,7 +680,7 @@ class GameLoop:
             result = find_path_from_point(
                 self.network, start_edge_id, start_t, start_direction,
                 goal_edge_id, goal_t, gd,
-                allow_reversal=allow_reversal, debug=debug,
+                allow_reversal=allow_reversal, consist_length=consist_length, debug=debug,
             )
             if result is not None and (best is None or result[0].total_cost < best[0].total_cost):
                 best = result
@@ -754,6 +759,7 @@ class GameLoop:
             result = self._find_path_any_goal_direction(
                 start_edge_id, start_t, start_direction, goal_edge_id, goal_t,
                 allow_reversal=True, debug=True,
+                consist_length=train.state.consist.total_length,
             )
             if result is None:
                 print(f"PLAY: 不可达 (edge {start_edge_id} → edge {goal_edge_id})")
@@ -784,6 +790,7 @@ class GameLoop:
         result = self._find_path_any_goal_direction(
             start_edge_id, start_t, start_direction, goal_edge_id, goal_t,
             allow_reversal=True, debug=True,
+            consist_length=train.state.consist.total_length,
         )
         if result is None:
             print(f"PLAY: 节点 {node_id} 不可达")
