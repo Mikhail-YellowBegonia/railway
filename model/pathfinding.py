@@ -68,17 +68,82 @@ def _directed_from(network: RailNetwork, edge_id: int, entry_node_id: int) -> Di
 REVERSAL_PENALTY = 200.0
 
 
+def simple_segment_from_endpoint(
+    network: RailNetwork, endpoint_node_id: int
+) -> tuple[float, int | None, list[int]]:
+    """从 endpoint（连接数=1 的节点）沿连接数=2 的节点链走，直到遇到
+    turnout（连接数>=3）或另一个 endpoint，得到这段 simple_segment。
+
+    simple_segment：不含任何分歧点的一段轨道，一端是 endpoint，另一端是
+    turnout（或另一个 endpoint，此时整段孤立、没有 turnout）。折返是否
+    允许取决于这段总长是否 >= 列车长度（见 pathfinding.neighbors）。
+
+    参数:
+        endpoint_node_id: 起点节点 ID，必须 connection_count() == 1，
+                          否则返回 (0.0, None, [])
+
+    返回:
+        (total_length, turnout_node_id, edge_ids)
+        - total_length: 这段轨道的总弧长（米）
+        - turnout_node_id: 终止于的 turnout 节点 ID；若终止于另一个
+          endpoint（孤立段，两端都是死端），则为 None
+        - edge_ids: 途经的所有 edge_id（按遍历顺序，供调用方需要时使用）
+    """
+    start_node = network.nodes.get(endpoint_node_id)
+    if start_node is None or start_node.connection_count() != 1:
+        return 0.0, None, []
+
+    total_length = 0.0
+    edge_ids: list[int] = []
+    prev_edge_id: int | None = None
+    current_node_id = endpoint_node_id
+
+    while True:
+        node = network.nodes[current_node_id]
+        remaining = node.incident_edge_ids - ({prev_edge_id} if prev_edge_id is not None else set())
+        if not remaining:
+            # connection_count()==1 且已经是走进来的那条边：说明current_node是死端且已到达
+            break
+        next_edge_id = next(iter(remaining))
+        edge = network.edges[next_edge_id]
+        total_length += edge.length
+        edge_ids.append(next_edge_id)
+
+        next_node_id = edge.node_b_id if edge.node_a_id == current_node_id else edge.node_a_id
+        next_node = network.nodes[next_node_id]
+        count = next_node.connection_count()
+
+        if count >= 3:
+            return total_length, next_node_id, edge_ids
+        if count == 1:
+            # 另一端也是 endpoint：孤立段，没有 turnout
+            return total_length, None, edge_ids
+        # count == 2：继续沿链走
+        prev_edge_id = next_edge_id
+        current_node_id = next_node_id
+
+
 def neighbors(
     network: RailNetwork,
     directed: DirectedEdge,
     passable_fn: PassableFn,
     allow_reversal: bool = False,
+    consist_length: float = 0.0,
 ) -> list[tuple[DirectedEdge, float]]:
     """当前有向边在其 head 节点处的所有合法后继有向边及附加代价。
 
     合法 = turn_allowed（几何转向许可）且 passable_fn 通过。
-    allow_reversal=True 时，在连接数=1 的终端节点处额外注入反向同 Edge
-    作为折返选项，附加 REVERSAL_PENALTY 代价。
+
+    折返约束（既有规定）：列车能且仅能在 endpoint（connection_count()==1）
+    处折返，不允许在中间节点/turnout 折返——这不只是简化，是刚体列车的
+    物理限制：折返需要车身整体原地翻转，只有死端才有意义，中间节点折返
+    在几何上无法定义"车身占用哪一侧"。
+
+    进一步地，即使在 endpoint，也要求该 endpoint 的 simple_segment（到最近
+    turnout 之间的无分歧路段）总长 >= consist_length，否则车身放不下这段
+    死端，折返会导致车尾越过 turnout（引发"人"字形道岔连通性歧义，寻路时
+    不知道列车从哪一撇进入，见折返设计讨论）。simple_segment 长度不足时
+    直接不插入折返边，寻路层面就排除这种不可行方案。
 
     返回: list of (DirectedEdge, extra_cost)，extra_cost 通常为 0，折返时为惩罚值。
     """
@@ -94,12 +159,15 @@ def neighbors(
             continue
         result.append((nxt, 0.0))
 
-    # 折返：allow_reversal=True 时允许在任意节点沿原边反向出发
-    # （不限于终端节点，支持复杂场景下的中途折返）
-    if allow_reversal:
-        reversed_dir = (edge_id, -direction)
-        if passable_fn(network.edges[edge_id], -direction):
-            result.append((reversed_dir, REVERSAL_PENALTY))
+    # 折返：仅在 endpoint（connection_count()==1）且 simple_segment 长度
+    # 足够容纳车身时插入，不再允许中间节点折返。
+    if allow_reversal and network.nodes[node_id].connection_count() == 1:
+        seg_length, _turnout, _edges = simple_segment_from_endpoint(network, node_id)
+        if seg_length >= consist_length:
+            reversed_dir = (edge_id, -direction)
+            if passable_fn(network.edges[edge_id], -direction):
+                overflow = max(0.0, seg_length - consist_length)
+                result.append((reversed_dir, REVERSAL_PENALTY + overflow))
 
     return result
 
@@ -113,6 +181,7 @@ def find_path(
     passable_fn: PassableFn = _default_passable,
     allow_reversal: bool = False,
     goal_directed: DirectedEdge | None = None,
+    consist_length: float = 0.0,
 ) -> Path | None:
     """edge-based Dijkstra：从有向边 start 出发，到达 goal_node_id。
 
@@ -152,7 +221,7 @@ def find_path(
         if _is_goal(cur):
             goal = cur
             break
-        for nxt, extra in neighbors(network, cur, passable_fn, allow_reversal):
+        for nxt, extra in neighbors(network, cur, passable_fn, allow_reversal, consist_length):
             nd = d + cost_fn(network.edges[nxt[0]], nxt[1]) + extra
             if nd < dist.get(nxt, float("inf")):
                 dist[nxt] = nd
@@ -180,12 +249,14 @@ def find_path_between_nodes(
     cost_fn: CostFn = _default_cost,
     passable_fn: PassableFn = _default_passable,
     allow_reversal: bool = False,
+    consist_length: float = 0.0,
 ) -> Path | None:
     """在两个节点间寻路（交互测试的自然入口）。
 
     从 start_node_id 枚举所有出发有向边（离开该节点的方向），分别寻路到
     goal_node_id，取总代价最小者。起点终点相同或不可达返回 None。
-    allow_reversal=True 时支持在终端节点处折返。
+    allow_reversal=True 时支持在 endpoint 处折返（需 simple_segment 长度
+    >= consist_length，默认 0 表示不限制，兼容旧的调试用法）。
     """
     if start_node_id == goal_node_id:
         return None
@@ -200,6 +271,7 @@ def find_path_between_nodes(
             network, directed, goal_node_id,
             cost_fn=cost_fn, passable_fn=passable_fn,
             allow_reversal=allow_reversal,
+            consist_length=consist_length,
         )
         if p is not None and (best is None or p.total_cost < best.total_cost):
             best = p
@@ -218,6 +290,7 @@ def find_path_from_point(
     cost_fn: CostFn = _default_cost,
     passable_fn: PassableFn = _default_passable,
     allow_reversal: bool = False,
+    consist_length: float = 0.0,
     debug: bool = False,
 ) -> tuple[Path, float, float] | None:
     """从 Edge 途中的点寻路到另一 Edge 途中的点。
@@ -232,6 +305,11 @@ def find_path_from_point(
 
     调用方若不关心到达方向（比如玩家随手点了一个轨道点），应分别用
     goal_direction=+1 和 -1 各调用一次，取代价更低者。
+
+    consist_length: 列车总长（米），决定折返在哪些 endpoint 可行——仅
+    simple_segment 长度 >= consist_length 的 endpoint 才允许折返（既有
+    规定：只能在 endpoint 折返，且需容纳车身，否则车尾会越过 turnout，
+    引发"人"字形道岔连通性歧义）。默认 0.0 = 不限制（旧行为，调试用）。
 
     返回:
         (path, start_offset, end_offset) 或 None（不可达）
@@ -376,6 +454,7 @@ def find_path_from_point(
         cost_fn=cost_fn, passable_fn=passable_fn,
         allow_reversal=allow_reversal,
         goal_directed=goal_directed,
+        consist_length=consist_length,
     )
     if path is None:
         if debug:

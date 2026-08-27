@@ -663,9 +663,14 @@ class GameLoop:
         Step 2：find_path_from_point 现在要求显式 goal_direction（消除到达
         方向歧义），但 PLAY 模式下玩家右键点选轨道并不表达"以哪个方向进站"
         的意图，所以在这一层统一枚举两个方向。
+
+        返回 (path, start_offset, end_offset, goal_direction) 或 None——
+        goal_direction 需要一并带出，供 assign_route 记录 state.goal
+        （中途折返重新寻路时要用同一个到达方向，不能再重新枚举一次）。
         """
         from model.pathfinding import find_path_from_point
         best = None
+        best_gd = None
         for gd in (1, -1):
             result = find_path_from_point(
                 self.network, start_edge_id, start_t, start_direction,
@@ -674,26 +679,38 @@ class GameLoop:
             )
             if result is not None and (best is None or result[0].total_cost < best[0].total_cost):
                 best = result
-        return best
+                best_gd = gd
+        if best is None:
+            return None
+        return (*best, best_gd)
 
-    def _apply_route_result(self, train, path, start_offset: float, end_offset: float) -> None:
+    def _apply_route_result(
+        self, train, path, start_offset: float, end_offset: float,
+        goal_edge_id: int, goal_t: float, goal_direction: int,
+    ) -> None:
         """将 find_path_from_point 的结果转换为 route + remaining_to_goal，下达给 train。
 
         occupancy 本身不动（车身位置/历史不受影响），只设置待走的 route。
-
-        已知限制（Step 1，折返场景在 Step 3 处理）：若 path.edges[0] 与车头当前
-        所在有向边不一致（即寻路判定需要原地折返），这里暂不做正确的状态翻转，
-        仅整体接续 route，可能出现车厢位置 glitch。
+        goal 三元组一并记录到 state.goal，供 route 中途出现折返点时
+        （TrainEntity._do_auto_reversal）从新车头位置重新寻路，见 Step 3。
         """
         head_directed = train.head_directed_edge()
         if path.edges and path.edges[0] == head_directed:
             route = path.edges[1:]
         else:
-            print("PLAY: [已知限制] 寻路结果首边与车头方向不一致（折返场景），"
-                  "Step 1 暂不处理，可能出现车厢位置异常")
-            route = path.edges
+            # 首边不匹配代表当前就需要原地折返才能出发；直接走通用的
+            # 折返重寻路路径：先清空 route 触发不了 needs_reversal（那是
+            # advance_occupied_path 的中途检测），这里改为显式调用
+            # reverse_in_place 后再走一次 assign_route。
+            if train.is_parked():
+                train.reverse_in_place()
+                head_directed = train.head_directed_edge()
+                route = path.edges[1:] if (path.edges and path.edges[0] == head_directed) else path.edges
+            else:
+                print("PLAY: 需要折返才能出发，请先停车")
+                return
         remaining_to_goal = path.total_cost - start_offset - end_offset
-        train.assign_route(route, max(0.0, remaining_to_goal))
+        train.assign_route(route, max(0.0, remaining_to_goal), (goal_edge_id, goal_t, goal_direction))
 
     def _issue_path_order(self, world_pos: Vec3) -> None:
         """对 active_train 下达寻路指令（Edge 途中或 Node）。
@@ -741,11 +758,12 @@ class GameLoop:
             if result is None:
                 print(f"PLAY: 不可达 (edge {start_edge_id} → edge {goal_edge_id})")
                 return
-            path, start_offset, end_offset = result
+            path, start_offset, end_offset, goal_direction = result
             se = self.network.edges[start_edge_id]
             ge = self.network.edges[goal_edge_id]
             self.train_path_virtual_points = [_edge_pos(se, start_t), _edge_pos(ge, goal_t)]
-            self._apply_route_result(train, path, start_offset, end_offset)
+            self._apply_route_result(train, path, start_offset, end_offset,
+                                     goal_edge_id, goal_t, goal_direction)
             self.train_path = None  # 可视化路径按需从 occupancy+route 重建，不再缓存
             self.train_v_target = 0.0
             idx = self.trains.index(train) + 1
@@ -770,11 +788,12 @@ class GameLoop:
         if result is None:
             print(f"PLAY: 节点 {node_id} 不可达")
             return
-        path, start_offset, end_offset = result
+        path, start_offset, end_offset, goal_direction = result
         se = self.network.edges[start_edge_id]
         ge = self.network.edges[goal_edge_id]
         self.train_path_virtual_points = [_edge_pos(se, start_t), _edge_pos(ge, goal_t)]
-        self._apply_route_result(train, path, start_offset, end_offset)
+        self._apply_route_result(train, path, start_offset, end_offset,
+                                 goal_edge_id, goal_t, goal_direction)
         self.train_path = None
         self.train_v_target = 0.0
         idx = self.trains.index(train) + 1

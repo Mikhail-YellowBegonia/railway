@@ -4,7 +4,10 @@ from dataclasses import dataclass, field
 
 from model.pathfinding import DirectedEdge, Path
 from model.wagon import Consist
-from model.occupancy import OccupancyState, advance_occupied_path, occupied_as_path, reverse_occupancy
+from model.occupancy import (
+    OccupancyState, advance_occupied_path, occupied_as_path,
+    reverse_occupancy, truncate_to_segment,
+)
 from model.rigid_kinematics import RigidWagonKinematics
 from model.train_physics import TrainPhysics
 from model.train_controller import BrakingController
@@ -20,6 +23,11 @@ class TrainState:
     - route: 待走的有向边（寻路结果未消费部分），为空 = 无指令，随占用推进逐边消耗
     - remaining_to_goal: 距离本次指令终点的剩余弧长（米），与 occupancy 的边界无关，
       纯粹按 delta_s 递减；供 BrakingController 判断制动/停车，不依赖 occupancy 内部坐标
+    - goal: 本次指令的最终目标 (edge_id, t, direction)，为空 = 无指令。
+      Step 3 part2：route 中若含中途折返点，寻路阶段按"点模型"铺设的剩余
+      路径无法直接拼接刚体列车折返后的新车头位置（折返需要额外走完"车身
+      长度"才能重新抵达折返节点，寻路结果没有算这段），所以折返触发时不
+      复用旧 route，而是从新车头位置对 goal 重新寻路。
 
     寻路只应读取车头位置 (edge_id, t, direction)，不应引用 occupancy 或 route 本身。
     """
@@ -27,6 +35,7 @@ class TrainState:
     remaining_to_goal: float
     v: float        # 当前速度（m/s），0 = 停放
     consist: Consist
+    goal: tuple[int, float, int] | None = None
 
     @property
     def s(self) -> float:
@@ -87,14 +96,22 @@ class TrainEntity:
     # 调度接口
     # ------------------------------------------------------------------
 
-    def assign_route(self, route: list[DirectedEdge], remaining_to_goal: float) -> None:
+    def assign_route(
+        self,
+        route: list[DirectedEdge],
+        remaining_to_goal: float,
+        goal: tuple[int, float, int] | None = None,
+    ) -> None:
         """分配新的行驶指令：只设置 route，不改动 occupancy（车身位置/历史不受影响）。
 
         route: 从当前车头位置出发、尚待走的有向边序列（不含车头当前所在边）。
         remaining_to_goal: 从车头当前位置到指令终点的剩余弧长（米）。
+        goal: 本次指令的最终目标 (edge_id, t, direction)，供中途折返时重新
+              寻路使用；不提供则折返触发时直接放弃剩余 route（安全兜底）。
         """
         self.state.occupancy.route = list(route)
         self.state.remaining_to_goal = remaining_to_goal
+        self.state.goal = goal
         self.controller = BrakingController(self.physics, self.state.consist)
         self.controller.reset()
 
@@ -123,6 +140,20 @@ class TrainEntity:
         """
         if not self.is_parked():
             raise RuntimeError("reverse_in_place: 只能在停车状态下折返")
+
+        # 折返前先截断掉 occupied 中不属于当前 simple_segment 的前缀
+        # （turnout 背面的边）——否则反转会把这些边也带上，车头折返后
+        # 会沿着错误方向走上原路径（Step3 死循环 bug 的真正成因）。
+        from model.pathfinding import head_node, simple_segment_from_endpoint
+        endpoint_node_id = head_node(self.network, self.state.occupancy.occupied[-1])
+        _seg_len, _turnout, segment_edge_ids = simple_segment_from_endpoint(
+            self.network, endpoint_node_id,
+        )
+        self.state.occupancy = truncate_to_segment(
+            self.state.occupancy, set(segment_edge_ids), self.network,
+        )
+        self.kinematics = self._build_kinematics()
+
         real_tail_bogie_abs_s = self.kinematics.real_tail_bogie_abs_s(self.state.s)
         self.state.occupancy = reverse_occupancy(
             self.network, self.state.occupancy,
@@ -165,16 +196,56 @@ class TrainEntity:
         delta_s = self.state.v * dt
 
         consist_length = self.state.consist.total_length
-        new_occ, reached_end = advance_occupied_path(
+        new_occ, reached_end, needs_reversal = advance_occupied_path(
             self.network, self.state.occupancy, delta_s, consist_length,
         )
         self.state.occupancy = new_occ
         self.state.remaining_to_goal = max(0.0, self.state.remaining_to_goal - delta_s)
         self.kinematics = self._build_kinematics()
 
+        if needs_reversal:
+            self._do_auto_reversal()
+            return
+
         # 到达终点：停放，保留几何状态
         if reached_end or self.controller.stopped:
             self.emergency_stop()
+
+    def _do_auto_reversal(self) -> None:
+        """行驶到 route 中的折返点：停车、原地翻转、直接消费剩余 route 继续。
+
+        早前弯路（已废弃，不要重犯）：曾经尝试折返后重新对 state.goal 调用
+        一次寻路，理由是"寻路把列车当点，折返后车头退回车身长度，和寻路
+        结果的死端节点不是同一个位置，直接拼接会几何断裂"。这个诊断本身
+        没错，但"重新寻路"是错误的修复方向——寻路算法没有记忆，每次都从
+        当前局部拓扑重新决策，遇到"口袋型"死胡同会反复判定"这里该折返"，
+        导致折返→重新寻路→又判定折返的无限振荡（已实测复现：两个死端间
+        每 6 秒振荡一次，永远到不了终点）。
+
+        真正的修复是 Step3 阶段 C：reverse_in_place() 在反转前用
+        truncate_to_segment() 把 occupied 精确截断到 simple_segment 范围
+        （丢弃 turnout 背面的边）。只要这个截断是对的，折返后的新车头就
+        必然落在 simple_segment 内部，而 route 剩余部分（advance_occupied_path
+        已经弹出了折返标记边）本来就是 Dijkstra 一次性算好的、从 turnout
+        出发的正确路径——不需要重算，直接接上即可，这样"重新寻路"带来的
+        振荡风险完全消失（寻路只发生一次，折返只是几何操作）。
+
+        remaining_to_goal 保留：reverse_in_place() 作为通用原语会把它清零
+        （孤立调用时旧目标已失效），但这里终点没变，要手动恢复已递减过的
+        剩余距离。
+        """
+        remaining_route = list(self.state.occupancy.route)
+        remaining_to_goal = self.state.remaining_to_goal
+        goal = self.state.goal
+        self.state.v = 0.0
+        self.last_a = 0.0
+        self.controller = None  # reverse_in_place 要求 is_parked()
+        self.reverse_in_place()
+        self.state.occupancy.route = remaining_route
+        self.state.remaining_to_goal = remaining_to_goal
+        self.state.goal = goal
+        self.controller = BrakingController(self.physics, self.state.consist)
+        self.controller.reset()
 
     # ------------------------------------------------------------------
     # 几何查询
