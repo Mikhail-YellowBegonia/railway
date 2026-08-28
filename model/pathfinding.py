@@ -291,20 +291,33 @@ def find_path_from_point(
     passable_fn: PassableFn = _default_passable,
     allow_reversal: bool = False,
     consist_length: float = 0.0,
+    commit: bool = False,
     debug: bool = False,
 ) -> tuple[Path, float, float] | None:
     """从 Edge 途中的点寻路到另一 Edge 途中的点。
 
-    不修改原网络；在内存中临时分割目标 Edge，寻路完成后丢弃临时副本。
+    起点不分割：Dijkstra 只关心走哪个方向、到哪个节点，不关心站在边上
+    具体哪个点；start_offset 单独修正这段精度。这是有意的设计（而非疏漏）
+    ——起点边正是列车 occupancy.occupied 里记录的那条边，分割它会在还原
+    虚拟子边时产生"同一 edge_id 重复出现"的错误路径（已复现：路径需要
+    连续走完两段虚拟子边时，映射回同一原始 edge_id，车厢位移计算出的
+    距离变成真实值两倍）。
+
+    终点分割由 commit 控制：
+    - commit=False（默认，探路模式）：在临时网络副本上分割，仅用于比较
+      不同 goal_direction 的代价，不应采用返回的 path.edges 去下达指令
+    - commit=True（正式提交，玩家已确定要走这条路）：直接在传入的 network
+      上永久分割 goal_edge，返回的 path.edges 全部是真实 edge_id，可以
+      放心用于 assign_route。分割点即为路径终点，end_offset 恒为 0
+
+    调用方典型用法：先两次 commit=False 调用比较 +1/-1 哪个方向代价更低，
+    对选中的方向再发起一次 commit=True 调用取得可下达的干净路径。
 
     start_direction / goal_direction 均为必填（+1 = node_a → node_b，-1 = 反向），
     不再允许隐式猜测方向。理由：目标点若无方向约束，Dijkstra 可能从虚拟节点的
     任一侧到达，而 end_offset 的计算依赖到达方向——方向不定则 end_offset 可能
     算错（表现为列车停止位置轻微偏移的 glitch）。goal_direction 精确锁定寻路
     要到达的有向边，end_offset 据此计算，不再假设固定方向。
-
-    调用方若不关心到达方向（比如玩家随手点了一个轨道点），应分别用
-    goal_direction=+1 和 -1 各调用一次，取代价更低者。
 
     consist_length: 列车总长（米），决定折返在哪些 endpoint 可行——仅
     simple_segment 长度 >= consist_length 的 endpoint 才允许折返（既有
@@ -315,7 +328,7 @@ def find_path_from_point(
         (path, start_offset, end_offset) 或 None（不可达）
 
         - start_offset: 列车在起始 Edge 上已走过的弧长（= start_t × edge.length）
-        - end_offset: 终止 Edge 末尾需截去的弧长（按 goal_direction 正确计算）
+        - end_offset: 终止 Edge 末尾需截去的弧长（commit=True 时恒为 0）
 
         调用方使用方式：
             kin = RigidWagonKinematics(network, path, consist,
@@ -336,13 +349,6 @@ def find_path_from_point(
     # 计算起点偏移（弧长）
     start_offset = start_t * start_edge.length
 
-    # 起点节点：列车当前所在节点（用于端点附近的 fallback）
-    # 注意：这里不是"朝向的节点"，而是"当前位置最近的节点"
-    if start_t < 0.5:
-        start_node_id = start_edge.node_a_id
-    else:
-        start_node_id = start_edge.node_b_id
-
     # 目标 Edge 与起始 Edge 相同、且到达方向也相同时的直接处理
     # （方向不同 = 需要经过网络绕路或折返才能反向进入同一条边，落到下方通用分支处理）
     if start_edge_id == goal_edge_id and start_direction == goal_direction:
@@ -362,95 +368,63 @@ def find_path_from_point(
         if debug:
             print(f"[寻路] 同 Edge 同方向但目标在身后，尝试绕路/折返")
 
-    # 在临时网络副本中分割起始和目标 Edge
-    tmp_network = copy.deepcopy(network)
-    original_edge_ids_before_split = set(tmp_network.edges.keys())
-
-    # 分割起始 edge（如果不在端点）
-    start_directed: DirectedEdge | None = None
-    if 0.01 < start_t < 0.99:
-        start_virtual_node = tmp_network.split_edge_at(start_edge_id, start_t)
-        if start_virtual_node is not None:
-            # 找到虚拟节点出发、沿 start_direction 方向的边
-            vnode = tmp_network.nodes[start_virtual_node]
-            for eid in vnode.incident_edge_ids:
-                edge = tmp_network.edges[eid]
-                if start_direction > 0 and edge.node_a_id == start_virtual_node:
-                    # 正方向：vnode → node_b（原 edge 的 node_b）
-                    start_directed = (eid, 1)
-                    break
-                elif start_direction < 0 and edge.node_b_id == start_virtual_node:
-                    # 负方向：vnode → node_a（原 edge 的 node_a）
-                    start_directed = (eid, -1)
-                    break
-
-    # 如果没有分割（端点附近）或分割失败，从端点出发
-    if start_directed is None:
-        # 根据 start_t 和 start_direction 确定起始有向边
-        if start_t < 0.5:
-            # 靠近 node_a
-            if start_direction > 0:
-                # 正方向：node_a → node_b
-                start_directed = (start_edge_id, 1)
-            else:
-                # 负方向：需要从 node_a 继续向前（沿反向）
-                # 但这需要找到 node_a 的其他邻接边，暂时用当前边反向
-                start_directed = (start_edge_id, -1)
-        else:
-            # 靠近 node_b
-            if start_direction > 0:
-                # 正方向：需要从 node_b 继续向前
-                # 这种情况下应该从 node_b 的邻接边出发，但简化为当前边正向
-                start_directed = (start_edge_id, 1)
-            else:
-                # 负方向：node_b → node_a
-                start_directed = (start_edge_id, -1)
-
-    # 记录起始edge分割后产生的新边
-    new_edges_from_start = set(tmp_network.edges.keys()) - original_edge_ids_before_split
+    # 起点不分割，统一按"整条边+方向"出发——edge-based Dijkstra 只关心走哪个
+    # 方向、到哪个节点，不关心站在边上具体哪个点，start_offset 已经单独修正
+    # 了这段精度（total_cost 会包含整条 start_edge，调用方用 total_cost -
+    # start_offset - end_offset 抵消，结果等价）。
+    #
+    # 之所以不分割起点：起点边此刻正是列车 occupancy.occupied 里记录的
+    # 那条边，若在临时网络里分割它，映射回原 edge_id 会在"路径需要连续
+    # 走完两段虚拟子边"时把它们压扁成两条重复的完整边（已复现：一段完整
+    # 穿越 + 后续绕路回来又走后半段，还原后变成同一个 edge_id 出现两次，
+    # 车厢位移计算出的距离变成真实值两倍，即用户报告的跳变）。终点边没有
+    # 这个问题（不属于当前占用范围），仍然分割，只是分割现在改为在提交时
+    # 永久生效（见下方 commit 分支），不再需要虚拟子边还原逻辑。
+    start_directed = (start_edge_id, start_direction)
 
     # 同 edge_id 场景（start_edge_id == goal_edge_id 但方向不同，需绕路/折返）：
-    # 上面已对 start_edge_id 做过 split_edge_at，该 edge_id 已从 tmp_network 中
-    # 被移除，goal_edge_id（同一个 ID）此时不存在。这是折返场景，Step 3 处理，
-    # 这里先诚实返回不可达，不强行拼凑（避免用已删除的 edge_id 崩溃）。
-    if goal_edge_id not in tmp_network.edges:
-        if debug:
-            print(f"[寻路失败] goal_edge_id={goal_edge_id} 与 start_edge_id 相同且已被拆分"
-                  f"（同边反方向折返场景，暂不支持，见 Step 3）")
-        return None
+    # 起点不再分割，goal_edge_id 与 start_edge_id 相同时该边仍完整存在；
+    # Dijkstra 从整条 start_edge 出发本来就无法在同一条边内部反向掉头
+    # （那需要折返，是终端节点的行为），落到通用搜索也会得到正确的
+    # 绕路/折返结果，不需要再特殊拒绝。
 
-    # 分割目标 edge，并按 goal_direction 精确定位目标有向边（消除到达方向歧义）
-    virtual_node_id = tmp_network.split_edge_at(goal_edge_id, goal_t)
-    new_edges_from_goal: set[int] = set()
+    # 终点 edge 的分割：commit=False（默认，探路模式）在临时副本上分割，
+    # 只用来算 total_cost 这个数字（调用方在两个 goal_direction 间比较
+    # 代价，不会真的采用这次返回的 path.edges）；commit=True（正式提交，
+    # 玩家已经选定要走这条路）直接在传入的真实 network 上永久分割，
+    # 分割点本身就是新节点端点，返回的 path.edges 全是真实 edge_id，
+    # 不需要任何"虚拟子边还原"逻辑——这正是消除重复插入 bug 的关键：
+    # 之前还原逻辑把虚拟子边压扁回原 edge_id 时，会在"路径连续走完两段
+    # 虚拟子边"的场景下产生同一 edge_id 重复出现的错误路径。
+    work_network = network if commit else copy.deepcopy(network)
+    virtual_node_id = work_network.split_edge_at(goal_edge_id, goal_t)
 
     if virtual_node_id is None:
-        # 分割失败（t 极端，边未被拆分）：原边仍完整存在于 tmp_network，
-        # 直接把目标钉死为 (goal_edge_id, goal_direction)
+        # 分割失败（t 极端，边未被拆分）：原边仍完整存在，直接钉死目标
         goal_directed = (goal_edge_id, goal_direction)
+        end_offset = (1.0 - goal_t) * goal_edge.length if goal_direction > 0 else goal_t * goal_edge.length
     else:
-        new_edges_from_goal = set(tmp_network.edges.keys()) - original_edge_ids_before_split - new_edges_from_start
-        vnode = tmp_network.nodes[virtual_node_id]
+        vnode = work_network.nodes[virtual_node_id]
         goal_directed = None
         for eid in vnode.incident_edge_ids:
-            edge = tmp_network.edges[eid]
+            edge = work_network.edges[eid]
             if goal_direction > 0 and edge.node_b_id == virtual_node_id:
-                # 正方向到达：车头从 node_a 侧走到虚拟节点，即该边的 node_a→node_b（+1）
                 goal_directed = (eid, 1)
                 break
             elif goal_direction < 0 and edge.node_a_id == virtual_node_id:
-                # 负方向到达：车头从 node_b 侧走到虚拟节点，即该边的 node_b→node_a（-1）
                 goal_directed = (eid, -1)
                 break
         if goal_directed is None:
             if debug:
                 print(f"[寻路失败] 无法按 goal_direction={goal_direction} 定位目标有向边")
             return None
+        # 分割后目标边就是虚拟子边本身，t=0 处即终点，end_offset 恒为 0
+        end_offset = 0.0
 
-    # 在临时网络上寻路：从有向边 start_directed 精确到达有向边 goal_directed
     if debug:
-        print(f"[寻路] 调用 find_path：start_directed={start_directed}, goal_directed={goal_directed}")
+        print(f"[寻路] 调用 find_path：start_directed={start_directed}, goal_directed={goal_directed}, commit={commit}")
     path = find_path(
-        tmp_network, start_directed, head_node(tmp_network, goal_directed),
+        work_network, start_directed, head_node(work_network, goal_directed),
         cost_fn=cost_fn, passable_fn=passable_fn,
         allow_reversal=allow_reversal,
         goal_directed=goal_directed,
@@ -460,26 +434,6 @@ def find_path_from_point(
         if debug:
             print(f"[寻路失败] find_path 返回 None")
         return None
-
-    # end_offset 按 goal_direction 计算：+1 时终点到 node_b 的剩余弧长，
-    # -1 时终点到 node_a 的剩余弧长（此前假设固定 +1 是 glitch 根源之一）
-    if goal_direction > 0:
-        end_offset = (1.0 - goal_t) * goal_edge.length
-    else:
-        end_offset = goal_t * goal_edge.length
-
-    # 将临时网络路径映射回原网络的 edge_id
-    restored_edges: list[DirectedEdge] = []
-    for eid, d in path.edges:
-        if eid in new_edges_from_start:
-            # 起始edge的虚拟边，还原为 start_edge_id
-            restored_edges.append((start_edge_id, d))
-        elif eid in new_edges_from_goal:
-            # 目标edge的虚拟边，还原为 goal_edge_id
-            restored_edges.append((goal_edge_id, d))
-        else:
-            restored_edges.append((eid, d))
-    path = Path(edges=restored_edges, total_cost=path.total_cost)
 
     if debug:
         print(f"[寻路成功] 路径长度 {len(path.edges)} 段，总代价 {path.total_cost:.1f}")

@@ -669,25 +669,28 @@ class GameLoop:
         哪些 endpoint 可行——simple_segment 长度不足的死端会被寻路层直接
         排除，避免"折返后车尾越过 turnout"或"死端间无限振荡"的问题。
 
-        返回 (path, start_offset, end_offset, goal_direction) 或 None——
-        goal_direction 需要一并带出，供 assign_route 记录 state.goal
-        （中途折返重新寻路时要用同一个到达方向，不能再重新枚举一次）。
+        两次探路调用都用 commit=False（终点边在临时副本上分割，不改动
+        真实网络）——这里只关心 total_cost 用于比较，选中方向后由调用方
+        另发一次 commit=True 的正式调用取得可下达的干净路径（见
+        _issue_path_order）。不能对探路阶段返回的 path.edges 直接下达
+        指令：这条路径含的是临时虚拟 edge_id，不在真实 network 里。
+
+        返回 goal_direction（选中的到达方向）或 None（两个方向都不可达）。
         """
         from model.pathfinding import find_path_from_point
-        best = None
+        best_cost = None
         best_gd = None
         for gd in (1, -1):
             result = find_path_from_point(
                 self.network, start_edge_id, start_t, start_direction,
                 goal_edge_id, goal_t, gd,
-                allow_reversal=allow_reversal, consist_length=consist_length, debug=debug,
+                allow_reversal=allow_reversal, consist_length=consist_length,
+                commit=False, debug=debug,
             )
-            if result is not None and (best is None or result[0].total_cost < best[0].total_cost):
-                best = result
+            if result is not None and (best_cost is None or result[0].total_cost < best_cost):
+                best_cost = result[0].total_cost
                 best_gd = gd
-        if best is None:
-            return None
-        return (*best, best_gd)
+        return best_gd
 
     def _apply_route_result(
         self, train, path, start_offset: float, end_offset: float,
@@ -753,18 +756,28 @@ class GameLoop:
                 edge.arc_start_dir, edge.arc_normal, edge.arc_angle_rad * t
             ) * edge.arc_radius
 
-        goal = snapped_goal if snapped_goal is not None else self._snap_edge_at(world_pos)
-        if goal is not None:
-            goal_edge_id, goal_t = goal
-            result = self._find_path_any_goal_direction(
+        def _issue_to_goal(goal_edge_id: int, goal_t: float, label: str) -> None:
+            """探路选方向 -> commit=True 正式提交 -> 下达指令。共用两处调用点。"""
+            from model.pathfinding import find_path_from_point
+            consist_length = train.state.consist.total_length
+            goal_direction = self._find_path_any_goal_direction(
                 start_edge_id, start_t, start_direction, goal_edge_id, goal_t,
-                allow_reversal=True, debug=True,
-                consist_length=train.state.consist.total_length,
+                allow_reversal=True, debug=True, consist_length=consist_length,
+            )
+            if goal_direction is None:
+                print(f"PLAY: 不可达 ({label})")
+                return
+            # 正式提交：在真实 network 上永久分割 goal_edge，取得可下达的干净路径
+            result = find_path_from_point(
+                self.network, start_edge_id, start_t, start_direction,
+                goal_edge_id, goal_t, goal_direction,
+                allow_reversal=True, consist_length=consist_length,
+                commit=True, debug=True,
             )
             if result is None:
-                print(f"PLAY: 不可达 (edge {start_edge_id} → edge {goal_edge_id})")
+                print(f"PLAY: 不可达 ({label})，提交阶段异常")
                 return
-            path, start_offset, end_offset, goal_direction = result
+            path, start_offset, end_offset = result
             se = self.network.edges[start_edge_id]
             ge = self.network.edges[goal_edge_id]
             self.train_path_virtual_points = [_edge_pos(se, start_t), _edge_pos(ge, goal_t)]
@@ -773,8 +786,12 @@ class GameLoop:
             self.train_path = None  # 可视化路径按需从 occupancy+route 重建，不再缓存
             self.train_v_target = 0.0
             idx = self.trains.index(train) + 1
-            print(f"PLAY: 列车 #{idx} → edge {goal_edge_id} t={goal_t:.2f}，"
-                  f"剩余 {train.state.remaining_to_goal:.0f} m")
+            print(f"PLAY: 列车 #{idx} → {label}，剩余 {train.state.remaining_to_goal:.0f} m")
+
+        goal = snapped_goal if snapped_goal is not None else self._snap_edge_at(world_pos)
+        if goal is not None:
+            goal_edge_id, goal_t = goal
+            _issue_to_goal(goal_edge_id, goal_t, f"edge {goal_edge_id} t={goal_t:.2f}")
             return
 
         node_id = self._snap_node_at(world_pos)
@@ -787,22 +804,7 @@ class GameLoop:
         goal_edge_id = next(iter(goal_node.incident_edge_ids))
         goal_edge = self.network.edges[goal_edge_id]
         goal_t = 0.0 if goal_edge.node_a_id == node_id else 1.0
-        result = self._find_path_any_goal_direction(
-            start_edge_id, start_t, start_direction, goal_edge_id, goal_t,
-            allow_reversal=True, debug=True,
-            consist_length=train.state.consist.total_length,
-        )
-        if result is None:
-            print(f"PLAY: 节点 {node_id} 不可达")
-            return
-        path, start_offset, end_offset, goal_direction = result
-        se = self.network.edges[start_edge_id]
-        ge = self.network.edges[goal_edge_id]
-        self.train_path_virtual_points = [_edge_pos(se, start_t), _edge_pos(ge, goal_t)]
-        self._apply_route_result(train, path, start_offset, end_offset,
-                                 goal_edge_id, goal_t, goal_direction)
-        self.train_path = None
-        self.train_v_target = 0.0
+        _issue_to_goal(goal_edge_id, goal_t, f"节点 {node_id}")
         idx = self.trains.index(train) + 1
         seq = " → ".join(f"e{eid}({'+' if d > 0 else '-'})" for eid, d in path.edges)
         print(f"PLAY: 列车 #{idx} → 节点 {node_id}，剩余 {train.state.remaining_to_goal:.0f} m\n  {seq}")
