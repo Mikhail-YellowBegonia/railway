@@ -767,6 +767,11 @@ class GameLoop:
             if goal_direction is None:
                 print(f"PLAY: 不可达 ({label})")
                 return
+            # 可视化坐标必须在 commit 之前算：commit=True 会把 goal_edge_id
+            # 从 network.edges 里删掉（分裂成两条新边），之后再查询会 KeyError
+            se = self.network.edges[start_edge_id]
+            ge = self.network.edges[goal_edge_id]
+            virtual_points = [_edge_pos(se, start_t), _edge_pos(ge, goal_t)]
             # 正式提交：在真实 network 上永久分割 goal_edge，取得可下达的干净路径
             result = find_path_from_point(
                 self.network, start_edge_id, start_t, start_direction,
@@ -778,9 +783,7 @@ class GameLoop:
                 print(f"PLAY: 不可达 ({label})，提交阶段异常")
                 return
             path, start_offset, end_offset = result
-            se = self.network.edges[start_edge_id]
-            ge = self.network.edges[goal_edge_id]
-            self.train_path_virtual_points = [_edge_pos(se, start_t), _edge_pos(ge, goal_t)]
+            self.train_path_virtual_points = virtual_points
             self._apply_route_result(train, path, start_offset, end_offset,
                                      goal_edge_id, goal_t, goal_direction)
             self.train_path = None  # 可视化路径按需从 occupancy+route 重建，不再缓存
