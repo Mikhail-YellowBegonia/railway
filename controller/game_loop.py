@@ -808,9 +808,6 @@ class GameLoop:
         goal_edge = self.network.edges[goal_edge_id]
         goal_t = 0.0 if goal_edge.node_a_id == node_id else 1.0
         _issue_to_goal(goal_edge_id, goal_t, f"节点 {node_id}")
-        idx = self.trains.index(train) + 1
-        seq = " → ".join(f"e{eid}({'+' if d > 0 else '-'})" for eid, d in path.edges)
-        print(f"PLAY: 列车 #{idx} → 节点 {node_id}，剩余 {train.state.remaining_to_goal:.0f} m\n  {seq}")
 
     def _snap_node_at(self, world_pos: Vec3) -> int | None:
         """返回点击命中的节点 ID，未命中返回 None。"""
