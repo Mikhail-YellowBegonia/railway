@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import heapq
 from dataclasses import dataclass
 from typing import Callable
@@ -204,14 +203,41 @@ def find_path(
 
     start_cost = cost_fn(start_edge, start[1])
 
-    dist: dict[DirectedEdge, float] = {start: start_cost}
-    prev: dict[DirectedEdge, DirectedEdge | None] = {start: None}
-    pq: list[tuple[float, DirectedEdge]] = [(start_cost, start)]
-
     def _is_goal(cur: DirectedEdge) -> bool:
         if goal_directed is not None:
             return cur == goal_directed
         return head_node(network, cur) == goal_node_id
+
+    # start 本身就等于目标有向边时：不能在第 0 步就"trivially"判定命中
+    # （那只是"还没离开起点"，不是真正到达）。必须先离开 start，找一条
+    # 真正绕回 start 的路径，再把 start 拼回路径最前面。
+    # 场景：start_edge_id == goal_edge_id 且方向相同、但目标点在"身后"
+    # （已用真实网络验证：不加这个特判，Dijkstra 会把"原地不动"错误地
+    # 当成到达，返回一条长度为 0 的假路径，而不是绕路/折返或不可达）。
+    #
+    # 实现上完全不把 start 放进 dist/prev（不是先放再删）——已用真实网络
+    # 复现过死循环：只要 start 曾经作为 key 出现在 dist 里、又被删掉腾
+    # 空位，图中所有指向 start 的边（折返场景下必然存在）会把 start 当
+    # 成"新发现的普通节点"重新塞回去，形成 prev 环，回溯永远走不出来。
+    # 这里改成 start 从头到尾都不是搜索状态空间的一员，只是搜索种子生成
+    # 时用一次的输入，回溯结果里也不会天然包含它，最后手动拼到最前面。
+    force_leave = goal_directed is not None and start == goal_directed
+
+    dist: dict[DirectedEdge, float] = {}
+    prev: dict[DirectedEdge, DirectedEdge | None] = {}
+    pq: list[tuple[float, DirectedEdge]] = []
+
+    if force_leave:
+        for nxt, extra in neighbors(network, start, passable_fn, allow_reversal, consist_length):
+            nd = start_cost + cost_fn(network.edges[nxt[0]], nxt[1]) + extra
+            if nd < dist.get(nxt, float("inf")):
+                dist[nxt] = nd
+                prev[nxt] = None
+                heapq.heappush(pq, (nd, nxt))
+    else:
+        dist[start] = start_cost
+        prev[start] = None
+        pq.append((start_cost, start))
 
     goal: DirectedEdge | None = None
     while pq:
@@ -231,13 +257,21 @@ def find_path(
     if goal is None:
         return None
 
-    # 回溯
+    # 回溯：prev[node] 链一直走到某个 node 的 prev 是 None（该 node 是
+    # 搜索种子）。force_leave 场景下种子是 start 的所有后继，它们的
+    # prev 被设为 None 作为链的终点，start 本身从未出现在 dist/prev
+    # 里，回溯结果天然不含 start，最后统一拼到最前面即可。
     chain: list[DirectedEdge] = []
-    node: DirectedEdge | None = goal
+    node = goal
     while node is not None:
         chain.append(node)
         node = prev[node]
     chain.reverse()
+    if force_leave:
+        chain.insert(0, start)
+    # 注意：force_leave 分支的种子 nd 已经把 start_cost 算进去了
+    # （nd = start_cost + edge_cost + extra），dist[goal] 本身就是
+    # 含 start 这段的总代价，不能再加一次 start_cost。
     return Path(edges=chain, total_cost=dist[goal])
 
 
@@ -291,27 +325,21 @@ def find_path_from_point(
     passable_fn: PassableFn = _default_passable,
     allow_reversal: bool = False,
     consist_length: float = 0.0,
-    commit: bool = False,
     debug: bool = False,
 ) -> tuple[Path, float, float] | None:
     """从 Edge 途中的点寻路到另一 Edge 途中的点。
 
-    起点不分割：Dijkstra 只关心走哪个方向、到哪个节点，不关心站在边上
-    具体哪个点；start_offset 单独修正这段精度。这是有意的设计（而非疏漏）
-    ——起点边正是列车 occupancy.occupied 里记录的那条边，分割它会在还原
-    虚拟子边时产生"同一 edge_id 重复出现"的错误路径（已复现：路径需要
-    连续走完两段虚拟子边时，映射回同一原始 edge_id，车厢位移计算出的
-    距离变成真实值两倍）。
+    起点/终点都不分割网络，不产生任何碎节点/碎边：Dijkstra 只关心走哪个
+    方向、到哪个节点，不关心站在边上具体哪个点；start_offset/end_offset
+    各自独立算出，作为标量修正抵消"整条边"和"精确点"之间的差值（跟喂给
+    RigidWagonKinematics 的 initial_offset/end_offset 是同一套语义）。
 
-    终点分割由 commit 控制：
-    - commit=False（默认，探路模式）：在临时网络副本上分割，仅用于比较
-      不同 goal_direction 的代价，不应采用返回的 path.edges 去下达指令
-    - commit=True（正式提交，玩家已确定要走这条路）：直接在传入的 network
-      上永久分割 goal_edge，返回的 path.edges 全部是真实 edge_id，可以
-      放心用于 assign_route。分割点即为路径终点，end_offset 恒为 0
-
-    调用方典型用法：先两次 commit=False 调用比较 +1/-1 哪个方向代价更低，
-    对选中的方向再发起一次 commit=True 调用取得可下达的干净路径。
+    早前版本曾对终点做"提交时分割"处理（commit 参数），是为了绕开虚拟
+    子边还原产生的重复边 bug；但持续分割会在网络里累积碎节点/碎边，需要
+    额外 GC 机制清理，属于治标不治本。既然搜索层面本来就能接受"整条边"
+    （起点从 Step 3 收尾起就是这么处理的），终点也没必要分割——两端一致，
+    网络从寻路阶段起永远不被修改，垃圾从源头上不会产生。commit 参数已
+    移除，调用方不再需要"先探路再提交"的两阶段流程，直接一次调用即可。
 
     start_direction / goal_direction 均为必填（+1 = node_a → node_b，-1 = 反向），
     不再允许隐式猜测方向。理由：目标点若无方向约束，Dijkstra 可能从虚拟节点的
@@ -328,7 +356,7 @@ def find_path_from_point(
         (path, start_offset, end_offset) 或 None（不可达）
 
         - start_offset: 列车在起始 Edge 上已走过的弧长（= start_t × edge.length）
-        - end_offset: 终止 Edge 末尾需截去的弧长（commit=True 时恒为 0）
+        - end_offset: 终止 Edge 末尾需截去的弧长（按 goal_direction 计算）
 
         调用方使用方式：
             kin = RigidWagonKinematics(network, path, consist,
@@ -368,63 +396,28 @@ def find_path_from_point(
         if debug:
             print(f"[寻路] 同 Edge 同方向但目标在身后，尝试绕路/折返")
 
-    # 起点不分割，统一按"整条边+方向"出发——edge-based Dijkstra 只关心走哪个
-    # 方向、到哪个节点，不关心站在边上具体哪个点，start_offset 已经单独修正
-    # 了这段精度（total_cost 会包含整条 start_edge，调用方用 total_cost -
-    # start_offset - end_offset 抵消，结果等价）。
+    # 起点/终点都不分割，统一按"整条边+方向"处理——edge-based Dijkstra 只
+    # 关心走哪个方向、到哪个节点，不关心站在边上具体哪个点。start_offset /
+    # end_offset 各自独立算出，作为标量修正抵消"整条边"和"精确点"之间的
+    # 差值（跟 initial_offset/end_offset 喂给 RigidWagonKinematics 的方式
+    # 完全一致），不需要 split_edge_at 真正切开网络。
     #
-    # 之所以不分割起点：起点边此刻正是列车 occupancy.occupied 里记录的
-    # 那条边，若在临时网络里分割它，映射回原 edge_id 会在"路径需要连续
-    # 走完两段虚拟子边"时把它们压扁成两条重复的完整边（已复现：一段完整
-    # 穿越 + 后续绕路回来又走后半段，还原后变成同一个 edge_id 出现两次，
-    # 车厢位移计算出的距离变成真实值两倍，即用户报告的跳变）。终点边没有
-    # 这个问题（不属于当前占用范围），仍然分割，只是分割现在改为在提交时
-    # 永久生效（见下方 commit 分支），不再需要虚拟子边还原逻辑。
+    # 之所以不分割：起点边正是列车 occupancy.occupied 里记录的那条边，
+    # 分割它会在还原虚拟子边时产生"同一 edge_id 重复出现"的错误路径
+    # （已复现：路径需要连续走完两段虚拟子边时，映射回同一原始 edge_id，
+    # 车厢位移计算出的距离变成真实值两倍）。终点边此前虽然改成了"提交时
+    # 永久分割"（commit 机制）来规避这个问题，但那样会持续在网络里累积
+    # 碎节点/碎边，且需要额外的 GC 机制清理，属于治标不治本。既然搜索
+    # 层面本来就能接受"整条边"，终点也没必要分割——两端保持一致，网络
+    # 从寻路阶段起就永远不被修改，垃圾从源头上不会产生。
     start_directed = (start_edge_id, start_direction)
-
-    # 同 edge_id 场景（start_edge_id == goal_edge_id 但方向不同，需绕路/折返）：
-    # 起点不再分割，goal_edge_id 与 start_edge_id 相同时该边仍完整存在；
-    # Dijkstra 从整条 start_edge 出发本来就无法在同一条边内部反向掉头
-    # （那需要折返，是终端节点的行为），落到通用搜索也会得到正确的
-    # 绕路/折返结果，不需要再特殊拒绝。
-
-    # 终点 edge 的分割：commit=False（默认，探路模式）在临时副本上分割，
-    # 只用来算 total_cost 这个数字（调用方在两个 goal_direction 间比较
-    # 代价，不会真的采用这次返回的 path.edges）；commit=True（正式提交，
-    # 玩家已经选定要走这条路）直接在传入的真实 network 上永久分割，
-    # 分割点本身就是新节点端点，返回的 path.edges 全是真实 edge_id，
-    # 不需要任何"虚拟子边还原"逻辑——这正是消除重复插入 bug 的关键：
-    # 之前还原逻辑把虚拟子边压扁回原 edge_id 时，会在"路径连续走完两段
-    # 虚拟子边"的场景下产生同一 edge_id 重复出现的错误路径。
-    work_network = network if commit else copy.deepcopy(network)
-    virtual_node_id = work_network.split_edge_at(goal_edge_id, goal_t)
-
-    if virtual_node_id is None:
-        # 分割失败（t 极端，边未被拆分）：原边仍完整存在，直接钉死目标
-        goal_directed = (goal_edge_id, goal_direction)
-        end_offset = (1.0 - goal_t) * goal_edge.length if goal_direction > 0 else goal_t * goal_edge.length
-    else:
-        vnode = work_network.nodes[virtual_node_id]
-        goal_directed = None
-        for eid in vnode.incident_edge_ids:
-            edge = work_network.edges[eid]
-            if goal_direction > 0 and edge.node_b_id == virtual_node_id:
-                goal_directed = (eid, 1)
-                break
-            elif goal_direction < 0 and edge.node_a_id == virtual_node_id:
-                goal_directed = (eid, -1)
-                break
-        if goal_directed is None:
-            if debug:
-                print(f"[寻路失败] 无法按 goal_direction={goal_direction} 定位目标有向边")
-            return None
-        # 分割后目标边就是虚拟子边本身，t=0 处即终点，end_offset 恒为 0
-        end_offset = 0.0
+    goal_directed = (goal_edge_id, goal_direction)
+    end_offset = (1.0 - goal_t) * goal_edge.length if goal_direction > 0 else goal_t * goal_edge.length
 
     if debug:
-        print(f"[寻路] 调用 find_path：start_directed={start_directed}, goal_directed={goal_directed}, commit={commit}")
+        print(f"[寻路] 调用 find_path：start_directed={start_directed}, goal_directed={goal_directed}")
     path = find_path(
-        work_network, start_directed, head_node(work_network, goal_directed),
+        network, start_directed, head_node(network, goal_directed),
         cost_fn=cost_fn, passable_fn=passable_fn,
         allow_reversal=allow_reversal,
         goal_directed=goal_directed,

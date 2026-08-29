@@ -669,28 +669,27 @@ class GameLoop:
         哪些 endpoint 可行——simple_segment 长度不足的死端会被寻路层直接
         排除，避免"折返后车尾越过 turnout"或"死端间无限振荡"的问题。
 
-        两次探路调用都用 commit=False（终点边在临时副本上分割，不改动
-        真实网络）——这里只关心 total_cost 用于比较，选中方向后由调用方
-        另发一次 commit=True 的正式调用取得可下达的干净路径（见
-        _issue_path_order）。不能对探路阶段返回的 path.edges 直接下达
-        指令：这条路径含的是临时虚拟 edge_id，不在真实 network 里。
+        find_path_from_point 不再修改网络（起点/终点都不分割），两次调用
+        可以直接复用其中一次的结果，不需要"先探路再提交"的两阶段流程。
 
-        返回 goal_direction（选中的到达方向）或 None（两个方向都不可达）。
+        返回 (path, start_offset, end_offset, goal_direction) 或 None
+        （两个方向都不可达）。
         """
         from model.pathfinding import find_path_from_point
-        best_cost = None
+        best = None
         best_gd = None
         for gd in (1, -1):
             result = find_path_from_point(
                 self.network, start_edge_id, start_t, start_direction,
                 goal_edge_id, goal_t, gd,
-                allow_reversal=allow_reversal, consist_length=consist_length,
-                commit=False, debug=debug,
+                allow_reversal=allow_reversal, consist_length=consist_length, debug=debug,
             )
-            if result is not None and (best_cost is None or result[0].total_cost < best_cost):
-                best_cost = result[0].total_cost
+            if result is not None and (best is None or result[0].total_cost < best[0].total_cost):
+                best = result
                 best_gd = gd
-        return best_gd
+        if best is None:
+            return None
+        return (*best, best_gd)
 
     def _apply_route_result(
         self, train, path, start_offset: float, end_offset: float,
@@ -757,33 +756,23 @@ class GameLoop:
             ) * edge.arc_radius
 
         def _issue_to_goal(goal_edge_id: int, goal_t: float, label: str) -> None:
-            """探路选方向 -> commit=True 正式提交 -> 下达指令。共用两处调用点。"""
-            from model.pathfinding import find_path_from_point
+            """探路选方向 -> 下达指令。共用两处调用点。
+
+            find_path_from_point 不再修改网络（起点/终点都不分割），一次
+            调用即可拿到可下达的干净路径，不再需要"探路+提交"两阶段流程。
+            """
             consist_length = train.state.consist.total_length
-            goal_direction = self._find_path_any_goal_direction(
+            result = self._find_path_any_goal_direction(
                 start_edge_id, start_t, start_direction, goal_edge_id, goal_t,
                 allow_reversal=True, debug=True, consist_length=consist_length,
             )
-            if goal_direction is None:
+            if result is None:
                 print(f"PLAY: 不可达 ({label})")
                 return
-            # 可视化坐标必须在 commit 之前算：commit=True 会把 goal_edge_id
-            # 从 network.edges 里删掉（分裂成两条新边），之后再查询会 KeyError
+            path, start_offset, end_offset, goal_direction = result
             se = self.network.edges[start_edge_id]
             ge = self.network.edges[goal_edge_id]
-            virtual_points = [_edge_pos(se, start_t), _edge_pos(ge, goal_t)]
-            # 正式提交：在真实 network 上永久分割 goal_edge，取得可下达的干净路径
-            result = find_path_from_point(
-                self.network, start_edge_id, start_t, start_direction,
-                goal_edge_id, goal_t, goal_direction,
-                allow_reversal=True, consist_length=consist_length,
-                commit=True, debug=True,
-            )
-            if result is None:
-                print(f"PLAY: 不可达 ({label})，提交阶段异常")
-                return
-            path, start_offset, end_offset = result
-            self.train_path_virtual_points = virtual_points
+            self.train_path_virtual_points = [_edge_pos(se, start_t), _edge_pos(ge, goal_t)]
             self._apply_route_result(train, path, start_offset, end_offset,
                                      goal_edge_id, goal_t, goal_direction)
             self.train_path = None  # 可视化路径按需从 occupancy+route 重建，不再缓存
