@@ -161,6 +161,15 @@ class BlockManager:
     def block_edges(self, directed: DirectedEdge) -> frozenset[int]:
         return self._blocks.get(directed, frozenset())
 
+    def held_blocks(self, train: "TrainEntity") -> set[DirectedEdge]:
+        """train 当前持有的所有 block key（预约表的反查）。"""
+        return {d for d, t in self._reservations.items() if t is train}
+
+    def all_blocks(self) -> dict[DirectedEdge, frozenset[int]]:
+        """返回当前所有信号的 block 划分（key -> 边集合），供调度层判断某条
+        边是否属于任意 block（= 受保护），从而区分无保护路段。"""
+        return dict(self._blocks)
+
     def truncate_to_next_signal(
         self, network: RailNetwork, signals: SignalTable, route: list[DirectedEdge],
     ) -> list[DirectedEdge]:

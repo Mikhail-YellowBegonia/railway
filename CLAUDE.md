@@ -237,6 +237,20 @@ OpenTTD Path Signal 调研笔记和分步实施状态。核心要点：
   边界 = 信号实际保护的 block（不是"走到信号跟前"就停——这两者错位过
   一格，是个真实 bug，教训是这类边界必须用真实 `GameLoop` 端到端验证，
   纯单元测试测不出预约集合和 block 集合对不上）。
+- **信号接入运动控制**（Step 6，2026-09 起，见 `docs/train_control.md`
+  「Step 6」完整记录）：核心是**运动授权（Movement Authority）**——列车
+  只能驶到已预约闭塞区间末端。`model/dispatch.py::TrainDispatcher` 每帧对
+  每列车做"预约推进（最多 2 个受保护区间）+ 授权边界计算 + 状态转移"，
+  写入 `TrainEntity.authority_remaining`；`update()` 制动目标改为
+  `min(remaining_to_goal, authority_remaining)`，红灯前连续制动曲线停车、
+  绿灯续约恢复。`TrainEntity.hard_stop()` 从占位实现为兜底急停（授权边界
+  落到车头之后时触发，带可见警告）。新增状态 `is_holding()`（信号前等待，
+  保留 route/goal），`is_parked()` 重定义为"无控制器且无指令"——这两者
+  必须区分，否则等待中的列车会被当作可解挂/可折返。`TrainDispatcher.tick`
+  接收 `trains` 列表，把"被其他车物理占用的 block"也判红灯（补齐
+  `reserve_path` 只看预约表的缺口）。红灯语义从 Step 4 的"下达时拒绝指令"
+  改为"接受指令、信号前等待、绿灯续行"。顺带修复 `find_path_from_point`
+  `start_offset` 未考虑 `direction=-1` 的 bug（逆向起点 remaining 算成 0）。
 
 ## 渲染约定：Layout 模式
 

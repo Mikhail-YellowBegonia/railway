@@ -81,6 +81,10 @@ class TrainEntity:
         self.controller: BrakingController | None = None
         self.last_a: float = 0.0        # 上一帧加速度（HUD 显示用）
         self.v_target: float = 0.0      # 玩家设定的巡航速度
+        # 运动授权（Step 6 信号接入）：车头到授权边界（已预约闭塞区间末端）
+        # 的剩余弧长。None = 无信号约束，授权到 goal。由调度层每帧重算后写入，
+        # update() 只读不递减。
+        self.authority_remaining: float | None = None
 
         self.kinematics = self._build_kinematics()
 
@@ -112,6 +116,7 @@ class TrainEntity:
         self.state.occupancy.route = list(route)
         self.state.remaining_to_goal = remaining_to_goal
         self.state.goal = goal
+        self.authority_remaining = None  # 新指令的授权由调度层下一帧重算
         self.controller = BrakingController(self.physics, self.state.consist)
         self.controller.reset()
 
@@ -125,25 +130,54 @@ class TrainEntity:
         self.controller = None
         self.state.occupancy.route = []
         self.state.remaining_to_goal = 0.0
+        self.authority_remaining = None
 
     def hard_stop(self) -> None:
-        """接口占位（Step 3/4 信号系统用，当前无调用点）：无视当前速度和
-        制动曲线，下一帧强制速度不连续地归零。
+        """信号/网络变更导致的兜底急停（Step 6 实现）：无视当前速度和制动
+        曲线，下一帧强制速度不连续地归零，清空指令。
 
-        与 emergency_stop 的区别：emergency_stop 是调度层主动取消指令的
-        正常操作（此刻车速可能仍在合理范围内减速）；hard_stop 对应的是
-        "信号灯突然变红，但列车已经越过安全制动距离，物理减速曲线来不及
-        让车停在信号前"这种异常场景（JGRPP 的 realistic braking 称为
-        "无法安全制动"的兜底）——本质是承认物理约束已经无法满足，用
-        牺牲连续性的方式保住"不闯红灯"这条更高优先级的不变量。
+        与 emergency_stop 的区别：emergency_stop 是调度层/玩家主动取消指令
+        的正常操作（此刻车速仍在合理范围内减速）；hard_stop 对应"信号灯
+        突然变红，但列车已经越过安全制动距离，物理减速曲线来不及让车停在
+        信号前"的异常场景（JGRPP realistic braking 的"无法安全制动"兜底）——
+        本质是承认物理约束已无法满足，用牺牲连续性的方式保住"不闯红灯"
+        这条更高优先级的不变量。
 
-        现在只占位不实现：唯一可能触发它的场景（信号强制停车）在
-        Step 3/4 才存在，没有真实调用方就没法验证"什么阈值算来不及"，
-        提前写实现等于裸测。触发时应打印可见警告（不能静默吞掉）——
-        否则玩家会把它误当成 bug，而不是"游戏在保护你"，这是 JGRPP
-        社区反馈里反复出现的抱怨。
+        触发场景（均由 model/dispatch.py 在授权边界落到车头之后时调用）：
+        运行中删除/合并挂有信号的边、或运行中放置新信号导致 block 重新划分，
+        使列车已越过的位置突然变成红灯区。正常运行时授权边界始终在车头
+        前方，本方法不会被触发。
+
+        触发时打印可见警告（不能静默吞掉）——否则玩家会把它误当成 bug，
+        而不是"游戏在保护你"，这是 JGRPP 社区反馈里反复出现的抱怨。
         """
-        raise NotImplementedError("hard_stop: Step 3/4 信号系统实现，当前无调用点")
+        print("⚠️ hard_stop：列车越过安全制动点，信号系统强制急停（放弃物理连续性）")
+        self.state.v = 0.0
+        self.last_a = 0.0
+        self.controller = None
+        self.state.occupancy.route = []
+        self.state.remaining_to_goal = 0.0
+        self.authority_remaining = None
+
+    def _hold_at_signal(self) -> None:
+        """在授权边界（信号红灯）前停车等待：保留 route/goal/remaining_to_goal，
+        只停住（controller=None）。等待调度层续约成功后 resume() 恢复行驶。
+
+        与 emergency_stop 的区别：后者清空 route/goal（彻底放弃指令），
+        这里保留（绿灯后要继续走）。
+        """
+        self.state.v = 0.0
+        self.last_a = 0.0
+        self.controller = None
+
+    def resume(self) -> None:
+        """从信号前等待恢复行驶：保留 route/goal，仅重建控制器。
+
+        调度层在成功预约下一区间后调用；随后 update() 以新的授权边界
+        为制动目标继续行驶。
+        """
+        self.controller = BrakingController(self.physics, self.state.consist)
+        self.controller.reset()
 
     def reverse_in_place(self) -> None:
         """原地折返：车头车尾互换，车身占用的物理边集合不变。
@@ -156,8 +190,12 @@ class TrainEntity:
         必须同步反转 Consist（reversed_consist），否则 get_all_wagon_poses
         仍按旧的 wagons[0] 链式求解，会在几何上出现车厢错位/重叠——这正是
         最初报告的"转向架反弹"bug 的根源。
+
+        前置条件用 `controller is None`（= 静止）而非 `is_parked()`（= 无指令）：
+        行驶途中触发折返标记（`_do_auto_reversal`）时 route 仍非空，但车已
+        静止、可以折返；这里不该因为 route 非空就拒绝。
         """
-        if not self.is_parked():
+        if self.controller is not None:
             raise RuntimeError("reverse_in_place: 只能在停车状态下折返")
 
         # 折返前先截断掉 occupied 中不属于当前 simple_segment 的前缀
@@ -192,17 +230,28 @@ class TrainEntity:
         参数:
             dt: 时间步长（秒）
             v_target: 玩家当前设定的巡航速度（m/s）
+
+        Step 6 信号接入：制动目标不再是"到 goal 的剩余距离"，而是
+        min(remaining_to_goal, authority_remaining)——authority_remaining
+        是调度层（model/dispatch.py）每帧写入的"到授权边界（已预约闭塞区间
+        末端）的距离"。列车物理上只能驶到授权边界，红灯前由 BrakingController
+        连续制动曲线平滑停车，绿灯时调度层推进授权边界实现不停车通过。
         """
         if self.controller is None or dt <= 0:
             return
 
         self.v_target = v_target
 
+        # 制动目标：min(到 goal 的剩余, 到授权边界的剩余)。
+        brake_target = self.state.remaining_to_goal
+        if self.authority_remaining is not None:
+            brake_target = min(brake_target, max(0.0, self.authority_remaining))
+
         # BrakingController 只需要“剩余距离”这个标量，与 occupancy 边界无关
         throttle, brake = self.controller.update(
             self.state.v,
             0.0,
-            self.state.remaining_to_goal,
+            brake_target,
             v_target,
             dt,
         )
@@ -226,9 +275,21 @@ class TrainEntity:
             self._do_auto_reversal()
             return
 
-        # 到达终点：停放，保留几何状态
+        # 到达授权边界（信号红灯）但未达 goal：停车等待，保留 route/goal。
+        # 到达 goal（或 route 耗尽）：真正停放。
         if reached_end or self.controller.stopped:
-            self.emergency_stop()
+            if self._stopped_at_authority():
+                self._hold_at_signal()
+            else:
+                self.emergency_stop()
+
+    def _stopped_at_authority(self) -> bool:
+        """本帧停车是否因"抵达授权边界（红灯）"而非"抵达 goal"。"""
+        return (
+            self.authority_remaining is not None
+            and self.authority_remaining <= BrakingController.STOP_EPSILON
+            and self.state.remaining_to_goal > BrakingController.STOP_EPSILON
+        )
 
     def _do_auto_reversal(self) -> None:
         """行驶到 route 中的折返点：停车、原地翻转、直接消费剩余 route 继续。
@@ -258,11 +319,12 @@ class TrainEntity:
         goal = self.state.goal
         self.state.v = 0.0
         self.last_a = 0.0
-        self.controller = None  # reverse_in_place 要求 is_parked()
+        self.controller = None  # reverse_in_place 要求静止（controller is None）
         self.reverse_in_place()
         self.state.occupancy.route = remaining_route
         self.state.remaining_to_goal = remaining_to_goal
         self.state.goal = goal
+        self.authority_remaining = None  # 折返后几何方向变了，授权由调度层重算
         self.controller = BrakingController(self.physics, self.state.consist)
         self.controller.reset()
 
@@ -271,7 +333,12 @@ class TrainEntity:
     # ------------------------------------------------------------------
 
     def is_parked(self) -> bool:
-        return self.controller is None
+        """真正停放：无控制器且无待走指令（route 空）。"""
+        return self.controller is None and not bool(self.state.occupancy.route)
+
+    def is_holding(self) -> bool:
+        """信号前等待：无控制器但仍保留待走指令（route 非空）。"""
+        return self.controller is None and bool(self.state.occupancy.route)
 
     def is_moving(self) -> bool:
         return self.controller is not None

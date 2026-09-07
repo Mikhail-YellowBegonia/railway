@@ -441,6 +441,67 @@ OpenTTD 有时会在行驶中触发重新寻路（远场重跑一次 Dijkstra）
 端烟测（两个信号场景：远场 route 是完整 4 段路径，近场只预约第一个
 区间对应的 edge，第二个区间的 edge 确认未被预约）。
 
+## Step 6：信号接入运动控制 ✅ 已完成（2026-09）
+
+这是 `roadmap.md` 待办 #1（最高优先级），也是 Step 5 明确推迟的那段
+"逐区间自动推进预约、失败就自动停车"的连续机制。Step 5 之前，灯色/预约
+算得再对也只是可视化装饰——`TrainEntity.hard_stop()` 是占位接口从未被
+调用，列车物理上按远场完整路径驱动，无视红灯/未预约区间（闯红灯、车辆
+视觉重叠都是这条缺口的直接后果）。
+
+**核心概念：运动授权（Movement Authority）**——列车只能驶到"已预约闭塞
+区间末端"（下一个信号节点），到点必须停；绿灯时向前推进预约、红灯时停
+车等待。新增纯模型模块 `model/dispatch.py::TrainDispatcher`，每帧对每列车
+tick 一次：
+
+1. **预约推进**：沿列车剩余路径逐边扫描，确定"已授权到哪"（`TrainDispatcher.
+   _frontier_edge_count`：无保护边或已持有 block 的边都算已授权），再对授权
+   边界之后的下一个受保护区间调用 `BlockManager.truncate_to_next_signal` +
+   `reserve_path` 续约。最多同时预约 2 个受保护区间（"当前段 + 前方一段"，
+   OpenTTD one-block-ahead，避免把整条线路预约死，也避免绿灯前频繁停车）。
+   预约失败（被别的车预约 or 物理占用）则边界保持，列车停车等待。
+2. **授权边界**：沿列车自身 route 计算（不是 block 的全 DFS 边集，所以
+   道岔分支不影响"车该停在哪"）——授权边界 = 最后一个已持有 block 的
+   末端（下一个信号节点）。`TrainEntity.authority_remaining` 记录车头到
+   边界的距离，`update()` 的制动目标改为 `min(remaining_to_goal,
+   authority_remaining)`，BrakingController 连续制动曲线在红灯前平滑停车。
+3. **红灯停车余量**：授权边界落在红灯区间前端时，制动目标再往回缩
+   `SIGNAL_STOP_MARGIN = 0.5m`，让车头停在信号机之前而非精确压线——否则
+   制动曲线的离散时间步过冲会让车头越过信号节点、把红灯区间的边吞进
+   occupancy（"闯红灯"的亚厘米级表现，也是车辆视觉重叠的直接原因）。
+   实测停车点在信号前 ~0.53m。
+4. **物理占用视同红灯**：`tick()` 接收 `trains` 列表，把"被其他车
+   `occupied` 覆盖的 block"也判为红灯（与 `compute_colors` 的占用语义一致），
+   弥补 Step 4 `reserve_path` 只看预约表、不查物理占用的缺口——否则用户
+   手工摆放的静止列车（无预约）会被运行中的列车无视并开进同一个 block。
+   无信号路段（不属于任何 block）仍不做碰撞避让，保持"多列车冲突/避让
+   暂不实现"的范围。
+5. **状态机扩展**：`TrainEntity` 新增 `is_holding()`（信号前等待：无控制器
+   但保留 route/goal）；`is_parked()` 重定义为"无控制器且无待走指令"。
+   `_hold_at_signal()` 停住但保留指令，绿灯续约后 `resume()` 重建控制器继续；
+   `emergency_stop()` 才是真正放弃指令。到达授权边界（红灯）→ hold，到达
+   goal → emergency_stop。
+6. **hard_stop 兜底（占位→实现）**：授权边界落到车头之后（运行中删除/合并
+   挂信号的边、或运行中放置新信号导致 block 重新划分，列车已越过的位置突然
+   变成红灯区），减速曲线已来不及，`TrainDispatcher` 调用 `TrainEntity.
+   hard_stop()` 强制速度归零并打印可见警告——牺牲物理连续性保住"不闯红灯"。
+   正常运行时边界始终在车头前方，此路径不会被触发。
+
+**行为语义变化（相对 Step 4）**：下达指令时不再"预约第一区间 + 失败直接
+拒绝"，改为"远场寻路判可达性 → 直接下达完整 route"，预约/等待完全交给
+`TrainDispatcher`。红灯不再是"指令被拒绝"，而是"接受指令、开到信号前停车
+等待、绿灯自动续行"——对应 OpenTTD/真实列车语义（用户确认采纳）。
+
+**顺带修复的 bug**：`find_path_from_point` 的 `start_offset` 无条件用
+`start_t × edge.length`，忽略了 `start_direction = -1` 的情形（此时列车从
+node_b 出发，已走过 `(1 - start_t) × length`），导致逆向起点时
+`remaining_to_goal` 算错（同 Edge 逆向场景实测算成 0，真实应为 6m）。已按
+有向边尾端点修正，回归补在 `tests/test_dispatch.py` 的 Part 0。
+
+回归测试：`tests/test_dispatch.py`（4 部分：direction=-1 起始偏移修复；红灯
+前停车等待 + 车头不越过信号 + 占用释放后自动续行到终点；绿灯连续通过全程
+不进入等待态；无信号直行不受约束）。
+
 我们遵循一个典型工作流：
 1. 拆解需求，变成可一口气实现的小步
 2. 遴选需求，砍掉多余的，补上忘记的

@@ -73,6 +73,11 @@ class GameLoop:
         from model.block import BlockManager
         self.block_manager = BlockManager()
 
+        # Step 6：信号-运动调度（授权边界 + 预约推进 + 信号前停车等待），
+        # 见 model/dispatch.py。每帧对每列车 tick 一次。
+        from model.dispatch import TrainDispatcher
+        self.dispatcher = TrainDispatcher(self.network, self.signals, self.block_manager)
+
         # 平移状态（受模式影响触发集）
         self._pan_button: int | None = None  # 当前正在按的平移按钮（None 表示未平移）
         self._pan_last_mouse: pygame.Vector2 = pygame.Vector2(0, 0)
@@ -109,11 +114,12 @@ class GameLoop:
             # 每帧同步键盘修饰键状态到 Editor（force_straight 等）
             self._sync_modifiers()
 
-            # 更新列车（物理层 + 状态积分）
-            if self.active_train is not None and self.active_train.is_moving():
-                dt = self.clock.get_time() / 1000.0
+            # 更新列车（Step 6：由调度器做授权+预约推进+物理积分；停放列车
+            # 在 tick 内直接 no-op，信号前等待的列车也在 tick 内尝试续约恢复）
+            dt = self.clock.get_time() / 1000.0
 
-                # ↑/↓ 调整目标速度
+            # ↑/↓ 调整焦点列车目标速度（无论行驶还是信号前等待都可预设）
+            if self.active_train is not None:
                 keys = pygame.key.get_pressed()
                 V_MAX = 30.0
                 V_STEP = 5.0
@@ -123,20 +129,15 @@ class GameLoop:
                     self.train_v_target = max(0.0, self.train_v_target - V_STEP * dt)
                 self.active_train.v_target = self.train_v_target
 
-                self.active_train.update(dt, self.train_v_target)
-
-                # 相机跟随列车
-                if self.camera.follow_enabled and self.active_train is not None:
-                    wagon_poses = self.active_train.kinematics.get_all_wagon_poses(self.active_train.state.s)
-                    if wagon_poses:
-                        lead_pose = wagon_poses[0]
-                        self.camera.set_center_smooth(lead_pose.position.x, lead_pose.position.y)
-
-            # 非焦点列车各自按其上次速度目标继续运行
-            dt = self.clock.get_time() / 1000.0
             for t in self.trains:
-                if t is not self.active_train and t.is_moving():
-                    t.update(dt, t.v_target)
+                self.dispatcher.tick(t, dt, t.v_target, self.trains)
+
+            # 相机跟随列车
+            if self.camera.follow_enabled and self.active_train is not None:
+                wagon_poses = self.active_train.kinematics.get_all_wagon_poses(self.active_train.state.s)
+                if wagon_poses:
+                    lead_pose = wagon_poses[0]
+                    self.camera.set_center_smooth(lead_pose.position.x, lead_pose.position.y)
 
             mouse_world = self._mouse_world_pos()
             self.editor.update_hover(mouse_world)
@@ -713,10 +714,10 @@ class GameLoop:
         只看拓扑级的单向硬性限制（One-Way PBS 背面永久禁止），不看闭塞
         占用/预约状态。判定可达性、算出的是"理论上能不能走到"和"完整
         预期路径"，不该因为"眼前有别的车"就判不可达（红灯不代表这里
-        真的走不了，只代表暂时被占用）。近场调度（预约）是级联在这个
-        结果之上的下一步，不重新跑 Dijkstra，不在这里处理，见
-        `_issue_path_order` 里 `BlockManager.truncate_to_next_signal` 的
-        调用。因此这里不再需要 `requesting_train` 参数。
+        真的走不了，只代表暂时被占用）。近场调度（预约 + 授权 + 信号前
+        停车等待）现在完全由 `model/dispatch.py::TrainDispatcher` 每帧处理
+        （Step 6），不重新跑 Dijkstra、也不在这里处理。因此这里不再需要
+        `requesting_train` 参数。
 
         返回 (path, start_offset, end_offset, goal_direction) 或 None
         （两个方向都不可达）。
@@ -804,22 +805,19 @@ class GameLoop:
             ) * edge.arc_radius
 
         def _issue_to_goal(goal_edge_id: int, goal_t: float, label: str) -> None:
-            """远场寻路（Dijkstra，只看拓扑）选方向 -> 近场预约（不重新
-            寻路，只截断+预约前方一个闭塞区间）-> 下达指令。共用两处
-            调用点。
+            """远场寻路（Dijkstra，只看拓扑 + One-Way PBS 反方向硬性禁止）
+            选方向 -> 下达完整远场 route。共用两处调用点。
 
             find_path_from_point 不再修改网络（起点/终点都不分割），一次
             调用即可拿到可下达的干净路径，不再需要"探路+提交"两阶段流程。
 
-            Step 5（远场/近场拆分，2026-09）：`_find_path_any_goal_direction`
-            算出的 path 是完整的远场路径（只受拓扑单向限制约束，不看
-            占用/预约），列车物理上按这条完整 path 驱动（本轮范围内不
-            限制列车物理越过未预约的边界，见下方 assign_route）。近场
-            这一步只做一件事：用 `BlockManager.truncate_to_next_signal`
-            把 path 截断到"前方第一个信号为止"，只预约这一段——对应
-            OpenTTD 原版逻辑（不做 JGRPP 的 Long Reserve 多区间预留）。
-            全程不重新调用 Dijkstra，只是在远场结果上做一次线性扫描+
-            预约表写入。
+            Step 6（信号接入运动控制，2026-09）：这里不再做任何预约/拒绝——
+            远场寻路只回答"理论上可达吗"，判定可达性靠 `passable_topology_only`
+            （拓扑单向限制），与闭塞占用/预约无关（红灯不代表不可达，只代表
+            暂时被占）。列车拿到完整远场 route 后，由 `TrainDispatcher` 每帧
+            推进预约：前方红灯时开到信号前停车等待、绿灯时自动续约恢复，
+            对应 OpenTTD"接受指令、信号前等待"的语义（替代 Step 4 的
+            "下达时直接拒绝"）。这里只负责可达性判定 + 下达 route。
             """
             consist_length = train.state.consist.total_length
             result = self._find_path_any_goal_direction(
@@ -830,16 +828,6 @@ class GameLoop:
                 print(f"PLAY: 不可达 ({label})")
                 return
             path, start_offset, end_offset, goal_direction = result
-
-            # 近场：截断到前方第一个信号为止，只预约这一段（全有或全无）。
-            near_field_edges = self.block_manager.truncate_to_next_signal(
-                self.network, self.signals, path.edges,
-            )
-            near_field_edge_ids = [eid for eid, _d in near_field_edges]
-            if not self.block_manager.reserve_path(train, near_field_edge_ids):
-                print(f"PLAY: 指令被拒绝 ({label})：前方闭塞区间被其他"
-                      f"列车抢先预约，请重试")
-                return
 
             se = self.network.edges[start_edge_id]
             ge = self.network.edges[goal_edge_id]

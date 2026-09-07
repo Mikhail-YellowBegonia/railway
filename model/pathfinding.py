@@ -300,7 +300,9 @@ def find_path_from_point(
     返回:
         (path, start_offset, end_offset) 或 None（不可达）
 
-        - start_offset: 列车在起始 Edge 上已走过的弧长（= start_t × edge.length）
+        - start_offset: 列车在起始 Edge 上已走过的弧长（按有向边的尾端点算：
+          direction=+1 时 = start_t × edge.length，direction=-1 时 =
+          (1 - start_t) × edge.length；start_t 恒为 node_a→node_b 参数）
         - end_offset: 终止 Edge 末尾需截去的弧长（按 goal_direction 计算）
 
         调用方使用方式：
@@ -319,8 +321,15 @@ def find_path_from_point(
             print(f"[寻路失败] edge 不存在")
         return None
 
-    # 计算起点偏移（弧长）
-    start_offset = start_t * start_edge.length
+    # 计算起点偏移（弧长）：已沿有向边走过的弧长。start_t 是 node_a→node_b
+    # 参数，方向 -1 时列车从 node_b 出发，已走过 (1 - start_t) × length。
+    # 早前这里无条件用 start_t × length，方向 -1 时会把"剩余弧长"当成
+    # "已走过弧长"，导致 remaining_to_goal 算错（同 Edge 逆向场景实测算成 0）。
+    start_offset = (
+        start_t * start_edge.length
+        if start_direction > 0
+        else (1.0 - start_t) * start_edge.length
+    )
 
     # 目标 Edge 与起始 Edge 相同、且到达方向也相同时的直接处理
     # （方向不同 = 需要经过网络绕路或折返才能反向进入同一条边，落到下方通用分支处理）
