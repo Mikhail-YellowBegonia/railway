@@ -67,61 +67,6 @@ def _directed_from(network: RailNetwork, edge_id: int, entry_node_id: int) -> Di
 REVERSAL_PENALTY = 200.0
 
 
-def simple_segment_from_endpoint(
-    network: RailNetwork, endpoint_node_id: int
-) -> tuple[float, int | None, list[int]]:
-    """从 endpoint（连接数=1 的节点）沿连接数=2 的节点链走，直到遇到
-    turnout（连接数>=3）或另一个 endpoint，得到这段 simple_segment。
-
-    simple_segment：不含任何分歧点的一段轨道，一端是 endpoint，另一端是
-    turnout（或另一个 endpoint，此时整段孤立、没有 turnout）。折返是否
-    允许取决于这段总长是否 >= 列车长度（见 pathfinding.neighbors）。
-
-    参数:
-        endpoint_node_id: 起点节点 ID，必须 connection_count() == 1，
-                          否则返回 (0.0, None, [])
-
-    返回:
-        (total_length, turnout_node_id, edge_ids)
-        - total_length: 这段轨道的总弧长（米）
-        - turnout_node_id: 终止于的 turnout 节点 ID；若终止于另一个
-          endpoint（孤立段，两端都是死端），则为 None
-        - edge_ids: 途经的所有 edge_id（按遍历顺序，供调用方需要时使用）
-    """
-    start_node = network.nodes.get(endpoint_node_id)
-    if start_node is None or start_node.connection_count() != 1:
-        return 0.0, None, []
-
-    total_length = 0.0
-    edge_ids: list[int] = []
-    prev_edge_id: int | None = None
-    current_node_id = endpoint_node_id
-
-    while True:
-        node = network.nodes[current_node_id]
-        remaining = node.incident_edge_ids - ({prev_edge_id} if prev_edge_id is not None else set())
-        if not remaining:
-            # connection_count()==1 且已经是走进来的那条边：说明current_node是死端且已到达
-            break
-        next_edge_id = next(iter(remaining))
-        edge = network.edges[next_edge_id]
-        total_length += edge.length
-        edge_ids.append(next_edge_id)
-
-        next_node_id = edge.node_b_id if edge.node_a_id == current_node_id else edge.node_a_id
-        next_node = network.nodes[next_node_id]
-        count = next_node.connection_count()
-
-        if count >= 3:
-            return total_length, next_node_id, edge_ids
-        if count == 1:
-            # 另一端也是 endpoint：孤立段，没有 turnout
-            return total_length, None, edge_ids
-        # count == 2：继续沿链走
-        prev_edge_id = next_edge_id
-        current_node_id = next_node_id
-
-
 def neighbors(
     network: RailNetwork,
     directed: DirectedEdge,
@@ -161,7 +106,7 @@ def neighbors(
     # 折返：仅在 endpoint（connection_count()==1）且 simple_segment 长度
     # 足够容纳车身时插入，不再允许中间节点折返。
     if allow_reversal and network.nodes[node_id].connection_count() == 1:
-        seg_length, _turnout, _edges = simple_segment_from_endpoint(network, node_id)
+        seg_length, _turnout, _edges = network.simple_segment_from_endpoint(node_id)
         if seg_length >= consist_length:
             reversed_dir = (edge_id, -direction)
             if passable_fn(network.edges[edge_id], -direction):

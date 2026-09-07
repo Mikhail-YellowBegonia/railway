@@ -13,6 +13,23 @@ from view.ballast import iter_ballast_polygons
 from view.build_metrics import compute_metrics, format_lines
 from controller.editor import EditMode, BuildState, Editor
 
+# ===== Layout 渲染模式（约定，2026-09） =====
+#
+# 当前没有美术素材，本模块全部渲染都归为"Layout"（极简）模式：所有游戏
+# 要素（轨道、节点、信号、列车、车钩……）依然完整可见、可交互，但表现
+# 脱离真实比例尺——线是逻辑细线，标记是几何图形（圆点/三角形），大小
+# 用固定的屏幕像素常量定义（不随 camera.scale 缩放），不追求"看起来像
+# 真实铁路"。
+#
+# 这不是临时占位，是长期共存的一套渲染方式：引入真实美术素材后不会
+# 修改/替换这套方法，而是新开一套渲染方法（比如 view/renderer_art.py），
+# 两套并存、按需切换。因此这里的图形选择可以放心用"够用就行"的标准，
+# 不需要预留"将来换皮"的抽象层。
+#
+# 换算基准：Ballast/信号偏移等少数元素仍以世界单位定义（真实宽度语义），
+# 其余交互性图标（车钩、信号三角形）用屏幕像素基准（COUPLER_RADIUS_PX、
+# SIGNAL_OFFSET_PX 等），缩放地图看全局时不会缩到看不清或反而大得离谱。
+
 COLOR_BG = (30, 30, 30)
 COLOR_EDGE_STRAIGHT = (180, 180, 180)
 COLOR_EDGE_ARC = (80, 160, 220)
@@ -38,6 +55,13 @@ COLOR_HUD_TEXT = (210, 220, 230)      # 建造 HUD 文本
 COLOR_BALLAST = (72, 66, 58)          # 道床带填充（暖灰，衬于逻辑细线之下）
 COLOR_TILE_BOUNDARY = (60, 60, 60)    # 瓦片边界（淡灰）
 COLOR_TILE_QUERY = (120, 120, 60)     # 查询邻域高亮（黄灰）
+COLOR_SIGNAL_GREEN = (60, 220, 90)    # 信号灯：绿（放行）
+COLOR_SIGNAL_RED = (230, 50, 50)      # 信号灯：红（禁止）
+# 信号图标以屏幕像素为基准（与 COUPLER_RADIUS_PX 同一约定），不随 camera.scale
+# 缩放——Layout 模式（见本文件顶部说明）的图形元素本来就跟世界尺度脱钩，
+# 缩小地图看全局时图标不能跟着缩到看不见。
+SIGNAL_OFFSET_PX = 22                 # 信号图标中心沿离开方向偏移节点的屏幕距离（像素）
+SIGNAL_TRIANGLE_RADIUS_PX = 11         # 三角形外接圆屏幕半径（像素）
 
 
 def _load_font(size: int) -> pygame.font.Font:
@@ -62,6 +86,7 @@ MODE_NAMES: dict[EditMode, str] = {
     EditMode.BUILD: "BUILD (B)",
     EditMode.DELETE: "DELETE (D)",
     EditMode.PLAY: "PLAY (P)",
+    EditMode.SIGNAL: "SIGNAL (H)",
 }
 
 
@@ -156,10 +181,17 @@ class Renderer:
             color = COLOR_NODE.get(count, COLOR_NODE[1])
             pygame.draw.circle(self.surface, color, (int(cx), int(cy)), node_radius)
 
-    def draw_overlay(self, network: RailNetwork, editor: Editor, mouse_world: Vec3) -> None:
+    def draw_overlay(
+        self, network: RailNetwork, editor: Editor, mouse_world: Vec3,
+        signals=None,          # model.signal.SignalTable | None
+        signal_colors=None,    # dict[DirectedEdge, model.block.SignalState] | None
+    ) -> None:
         w = self.surface.get_width()
         h = self.surface.get_height()
         cam = self.camera
+
+        if signals is not None:
+            self._draw_signals(network, signals, signal_colors or {}, cam, w, h)
 
         # 悬停边高亮（DELETE 模式）
         if editor.hovered_edge_id is not None:
@@ -394,6 +426,75 @@ class Renderer:
         self.surface.blit(bg, (bx, by))
         for i, s in enumerate(surfs):
             self.surface.blit(s, (bx + pad, by + pad + i * line_h))
+
+    def _draw_signals(
+        self, network: RailNetwork, signals, signal_colors: dict, cam: Camera, w: int, h: int,
+    ) -> None:
+        """绘制所有信号槛位（Layout 模式，见本文件顶部说明；One-Way PBS
+        语义，只有正面一个信号）。
+
+        每个槛位画在其所在 Node 位置、沿"该信号许可通行的方向"（即
+        leaving_dir——车驶离该节点、进入受保护 Edge 的方向）偏移
+        SIGNAL_OFFSET_PX 像素处——同一节点的多个槛位天然错开，不会重叠。
+        图标是等边三角形，顶角指向通行方向（直观区分朝向，不需要美术
+        素材）。偏移/半径都是屏幕像素常量，缩放地图时图标大小不变
+        （Layout 模式的图形元素本来就跟世界比例尺脱钩）。
+
+        Step 3：颜色不再是 SignalTable 自带的状态，改由 signal_colors
+        （BlockManager.compute_colors 的结果）按占用推导；查不到时
+        （比如 BlockManager 还没 rebuild 过）默认按 GREEN 画，不因为
+        缺一帧数据就让信号消失或崩溃。
+        """
+        from model.block import SignalState as BlockSignalState
+
+        for directed in signals.all_signals():
+            edge_id, direction = directed
+            edge = network.edges.get(edge_id)
+            if edge is None:
+                continue
+            node_id = edge.node_a_id if direction > 0 else edge.node_b_id
+            node = network.nodes.get(node_id)
+            if node is None:
+                continue
+            leaving_dir = network.leaving_direction_at(node_id, edge_id)
+            if leaving_dir is None:
+                continue
+            state = signal_colors.get(directed, BlockSignalState.GREEN)
+            color = COLOR_SIGNAL_RED if state is BlockSignalState.RED else COLOR_SIGNAL_GREEN
+            self._draw_signal_triangle(node.position, leaving_dir, color, cam, w, h)
+
+    def _draw_signal_triangle(
+        self, node_pos: Vec3, direction: Vec3, color: tuple[int, int, int],
+        cam: Camera, w: int, h: int,
+    ) -> None:
+        """在 node_pos 附近画一个等边三角形（比例尺无关，屏幕像素定size），
+        顶角指向 direction（世界空间方向向量）。
+
+        world_to_screen 是仿射变换（等比缩放 + y 轴翻转，无旋转），所以
+        把世界方向向量的 (x, -y) 分量归一化，就得到同一方向在屏幕空间的
+        单位向量——之后全部计算留在屏幕像素坐标里，不再依赖 camera.scale，
+        这样图标大小和位置偏移都不随缩放变化。
+        """
+        ncx, ncy = cam.world_to_screen(node_pos.x, node_pos.y, w, h)
+        sdx, sdy = direction.x, -direction.y
+        length = math.hypot(sdx, sdy)
+        if length < 1e-9:
+            return
+        sdx, sdy = sdx / length, sdy / length
+
+        center_x = ncx + sdx * SIGNAL_OFFSET_PX
+        center_y = ncy + sdy * SIGNAL_OFFSET_PX
+
+        angles = (0.0, 120.0, -120.0)
+        pts = []
+        for deg in angles:
+            rad = math.radians(deg)
+            rx = sdx * math.cos(rad) - sdy * math.sin(rad)
+            ry = sdx * math.sin(rad) + sdy * math.cos(rad)
+            pts.append((center_x + rx * SIGNAL_TRIANGLE_RADIUS_PX,
+                        center_y + ry * SIGNAL_TRIANGLE_RADIUS_PX))
+        pygame.draw.polygon(self.surface, color, pts)
+        pygame.draw.polygon(self.surface, (20, 20, 20), pts, 1)
 
     def _draw_warning(self, mouse_world: Vec3, cam: Camera, w: int, h: int) -> None:
         """绘制警告光标（红色圆环）"""

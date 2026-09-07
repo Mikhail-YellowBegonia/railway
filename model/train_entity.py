@@ -126,6 +126,25 @@ class TrainEntity:
         self.state.occupancy.route = []
         self.state.remaining_to_goal = 0.0
 
+    def hard_stop(self) -> None:
+        """接口占位（Step 3/4 信号系统用，当前无调用点）：无视当前速度和
+        制动曲线，下一帧强制速度不连续地归零。
+
+        与 emergency_stop 的区别：emergency_stop 是调度层主动取消指令的
+        正常操作（此刻车速可能仍在合理范围内减速）；hard_stop 对应的是
+        "信号灯突然变红，但列车已经越过安全制动距离，物理减速曲线来不及
+        让车停在信号前"这种异常场景（JGRPP 的 realistic braking 称为
+        "无法安全制动"的兜底）——本质是承认物理约束已经无法满足，用
+        牺牲连续性的方式保住"不闯红灯"这条更高优先级的不变量。
+
+        现在只占位不实现：唯一可能触发它的场景（信号强制停车）在
+        Step 3/4 才存在，没有真实调用方就没法验证"什么阈值算来不及"，
+        提前写实现等于裸测。触发时应打印可见警告（不能静默吞掉）——
+        否则玩家会把它误当成 bug，而不是"游戏在保护你"，这是 JGRPP
+        社区反馈里反复出现的抱怨。
+        """
+        raise NotImplementedError("hard_stop: Step 3/4 信号系统实现，当前无调用点")
+
     def reverse_in_place(self) -> None:
         """原地折返：车头车尾互换，车身占用的物理边集合不变。
 
@@ -144,10 +163,10 @@ class TrainEntity:
         # 折返前先截断掉 occupied 中不属于当前 simple_segment 的前缀
         # （turnout 背面的边）——否则反转会把这些边也带上，车头折返后
         # 会沿着错误方向走上原路径（Step3 死循环 bug 的真正成因）。
-        from model.pathfinding import head_node, simple_segment_from_endpoint
+        from model.pathfinding import head_node
         endpoint_node_id = head_node(self.network, self.state.occupancy.occupied[-1])
-        _seg_len, _turnout, segment_edge_ids = simple_segment_from_endpoint(
-            self.network, endpoint_node_id,
+        _seg_len, _turnout, segment_edge_ids = self.network.simple_segment_from_endpoint(
+            endpoint_node_id,
         )
         self.state.occupancy = truncate_to_segment(
             self.state.occupancy, set(segment_edge_ids), self.network,
@@ -283,7 +302,15 @@ class TrainEntity:
 
         当前阶段：强制两段都停车（v=0，route 清空）。
         wagon_idx: 0-indexed，前段保留 wagons[0..wagon_idx]，后段 wagons[wagon_idx+1..]。
+
+        前提：只能在本车已停车时调用——运行中的车身覆盖是连续物理约束，
+        切成两段会让"车身中段速度不为零"这种物理无意义状态成立。之前
+        只在 GameLoop 调用前检查过一次，这里补一道数据层断言，不依赖
+        调用方自觉（未来调度 AI/批处理脚本等新入口不会绕过这条不变量）。
         """
+        if not self.is_parked():
+            raise RuntimeError("decouple_at: 只能在停车状态下解挂")
+
         wagons = self.state.consist.wagons
         if wagon_idx < 0 or wagon_idx >= len(wagons) - 1:
             raise ValueError(f"decouple_at: wagon_idx={wagon_idx} 越界，编组共 {len(wagons)} 节")
@@ -305,11 +332,11 @@ class TrainEntity:
                 current_s = solve_rear_bogie_s(rear_s, gap, path_kin)
 
         rear_head_s = bogie_s[wagon_idx + 1][0]
+        front_consist, rear_consist = self.state.consist.split_at(wagon_idx)
 
         # 前段：sub_path 从车尾到当前车头
         s_tail_front = max(0.0, abs_s_head - sum(w.length for w in wagons[:wagon_idx + 1]))
         front_path, front_offset = path_kin.sub_path(s_tail_front, abs_s_head)
-        front_consist = Consist(wagons=wagons[:wagon_idx + 1])
         front_occ = OccupancyState(
             occupied=list(front_path.edges),
             occupied_offset=front_offset,
@@ -325,7 +352,6 @@ class TrainEntity:
         rear_wagons = wagons[wagon_idx + 1:]
         rear_tail_s = max(0.0, rear_head_s - sum(w.length for w in rear_wagons))
         rear_path, rear_offset = path_kin.sub_path(rear_tail_s, rear_head_s)
-        rear_consist = Consist(wagons=rear_wagons)
         rear_occ = OccupancyState(
             occupied=list(rear_path.edges),
             occupied_offset=rear_offset,
@@ -342,16 +368,21 @@ class TrainEntity:
     def couple_with(self, rear: "TrainEntity") -> "TrainEntity":
         """将 rear 连挂到本列车车尾，返回合并后的新停放实体。
 
+        前提：两车都必须已停车——同 decouple_at，数据层断言不依赖调用方
+        自觉。几何对齐条件（车钩距离/朝向）仍由 GameLoop 层的 _try_couple
+        负责检查，那部分是"游戏规则"而非"物理不变量"，留在 controller。
+
         调用方负责：
-        - 确认两车已停车且满足几何条件（couple 条件检查在 GameLoop 层）
         - 从 trains 列表移除 self 和 rear，加入返回的新实体
         """
-        new_wagons = self.state.consist.wagons + rear.state.consist.wagons
-        new_consist = Consist(wagons=new_wagons)
+        if not self.is_parked() or not rear.is_parked():
+            raise RuntimeError("couple_with: 两列车都必须先停车")
+
+        new_consist = self.state.consist.merged_with(rear.state.consist)
 
         self_path_kin = self.kinematics._path_kin
         abs_s_head = self.state.abs_s
-        combined_length = sum(w.length for w in new_wagons)
+        combined_length = new_consist.total_length
         s_tail_new = max(0.0, abs_s_head - combined_length)
         new_path, new_initial_offset = self_path_kin.sub_path(s_tail_new, abs_s_head)
 

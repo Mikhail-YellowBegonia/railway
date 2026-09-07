@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import uuid
 from dataclasses import dataclass, field
 from enum import Enum
+
+from model.wagon_data import ConsistDataLog, WagonDataPacket
 
 
 class GeometricRole(Enum):
@@ -36,6 +39,11 @@ class WagonConfig:
     coupler_1_pos: float = 0.0      # 前车钩位置（米，逻辑原点，通常 0）
     coupler_2_pos: float = 0.0      # 后车钩位置（米，= length 或略小）
     P_rated: float | None = None    # 额定功率（kW），None = 拖车，非 None = 动力车
+    wagon_id: str = field(default_factory=lambda: str(uuid.uuid4()))
+    # 车厢身份，与物理车厢 1:1 绑定，供 ConsistDataLog 按 id 追踪数据包。
+    # reversed_config() 必须原样传递（镜像只是重新定义朝向，不是新车厢），
+    # 不能重新生成——否则折返一次就会让车厢彻底失去身份，
+    # 外部按 wagon_id 挂靠的任何状态（货物/损耗/数据包）都会失联。
 
     def __post_init__(self):
         """自动填充 coupler_2_pos = length（如果未显式设置）。"""
@@ -81,6 +89,7 @@ class WagonConfig:
             coupler_1_pos=self.length - self.coupler_2_pos,
             coupler_2_pos=self.length - self.coupler_1_pos,
             P_rated=self.P_rated,
+            wagon_id=self.wagon_id,
         )
 
 
@@ -94,6 +103,9 @@ class Consist:
     wagons: list[WagonConfig]       # 车厢列表（按车头到车尾顺序）
     velocity: float = 0.0           # 全车共享速度（m/s，质心或前转向架）
     acceleration: float = 0.0       # 全车共享加速度（m/s²）
+    data_log: ConsistDataLog = field(default_factory=ConsistDataLog)
+    # 车厢级数据包日志，按 wagon_id 归属。couple/decouple 时用 merge/split
+    # 维护，与 wagons 列表的增减保持同步（同一组 wagon_id）。
 
     @property
     def total_mass(self) -> float:
@@ -106,15 +118,45 @@ class Consist:
         用于列车原地折返：新 wagons[0] = 原 wagons[-1] 的镜像配置，
         这样 RigidWagonKinematics.get_all_wagon_poses 仍可直接从 wagons[0]
         开始链式求解，无需改动运动学层代码。
+
+        data_log 原样带过——折返不改变车厢集合，只重新定义朝向，
+        wagon_id 集合不变（reversed_config 保留原 id），数据包无需变动。
         """
         return Consist(
             wagons=[w.reversed_config() for w in reversed(self.wagons)],
+            data_log=self.data_log,
         )
 
     @property
     def total_length(self) -> float:
         """编组总长（米，所有车厢长度之和，暂不考虑车钩间隙）。"""
         return sum(w.length for w in self.wagons)
+
+    def split_at(self, wagon_idx: int) -> tuple["Consist", "Consist"]:
+        """按 wagon_idx 拆分编组（0-indexed，前段含 wagons[0..wagon_idx]）。
+
+        车厢列表与 data_log 一起拆分，保证 wagon_id 归属和数据包归属
+        始终同步——这是 decouple_at 的核心依赖，几何切分见
+        TrainEntity.decouple_at。
+        """
+        front_wagons = self.wagons[:wagon_idx + 1]
+        rear_wagons = self.wagons[wagon_idx + 1:]
+        front_ids = {w.wagon_id for w in front_wagons}
+        front_log, rear_log = self.data_log.split(front_ids)
+        return (
+            Consist(wagons=front_wagons, data_log=front_log),
+            Consist(wagons=rear_wagons, data_log=rear_log),
+        )
+
+    def merged_with(self, rear: "Consist") -> "Consist":
+        """将 rear 编组连挂到本编组车尾，返回合并后的新编组。
+
+        车厢列表拼接 + data_log 归并，保证两侧车厢原有的数据包都保留。
+        """
+        return Consist(
+            wagons=self.wagons + rear.wagons,
+            data_log=self.data_log.merge(rear.data_log),
+        )
 
 
 # ===== D2: 弧长/割线求解器 =====

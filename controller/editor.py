@@ -37,11 +37,12 @@ MAX_ARC_RADIUS = 500.0  # 弧半径超过此值时退化为沿 T1 的直线（Q3
 
 
 class EditMode(Enum):
-    """EditMode 顶层模式 = IDLE / BUILD / DELETE / PLAY."""
+    """EditMode 顶层模式 = IDLE / BUILD / DELETE / PLAY / SIGNAL."""
     IDLE = auto()     # 空闲：仅视图操作
     BUILD = auto()    # 建造轨道
     DELETE = auto()   # 删除轨道（边为单位）
     PLAY = auto()     # 游玩：列车放置、选择、指令
+    SIGNAL = auto()   # 信号机放置/切换（Step 2：纯手动）
 
 
 class BuildState(Enum):

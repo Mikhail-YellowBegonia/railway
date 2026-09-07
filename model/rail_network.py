@@ -169,6 +169,124 @@ class RailNetwork:
             return fwd * -1.0 if leaving else fwd
         return None
 
+    def leaving_direction_at(self, node_id: int, edge_id: int) -> Vec3 | None:
+        """从 node_id 出发、沿 edge_id 离开该节点的切线方向（归一化）。
+
+        edge_id 必须是 node_id 的关联边，否则返回 None。
+        """
+        edge = self.edges.get(edge_id)
+        if edge is None:
+            return None
+        return self._edge_dir_at_node(edge, node_id, leaving=True)
+
+    def resolve_directed_edge_by_click(
+        self, node_id: int, click_world_pos: Vec3
+    ) -> int | None:
+        """按点击方向，在 node_id 的关联边中选出最匹配的一条（返回 edge_id）。
+
+        规则：枚举 incident_edge_ids，取"离开该节点方向"与"点击方向"
+        点积最大的那条边。用于信号槛位选择——一个节点最多有
+        len(incident_edge_ids) 个独立信号槛位（每个槛位 = 一个
+        DirectedEdge，见 model/signal.py），需要确定性地从点击位置消解
+        出玩家想要操作哪一个。纯几何计算，不依赖 view/controller。
+
+        退化兜底：click_dir 长度不足以定向时（典型场景：Edge 中途点击
+        触发 split_edge_at 后，新节点的位置精确等于点击坐标本身，此时
+        click_dir 恒为零——不是概率性边界情况，是这个交互流程下必然
+        发生的常规路径），不返回 None，而是确定性选择"该节点作为
+        node_a 的那条边"（对应原 edge 的 node_a→node_b 正方向，dir=+1）。
+        这样退化时仍有确定结果，玩家想要另一方向只需点击时稍微偏离
+        节点、朝目标边方向靠一点，点积路径会自然生效，不需要额外的
+        交互手势。
+
+        node_id 不存在或无关联边时返回 None。
+        """
+        node = self.nodes.get(node_id)
+        if node is None or not node.incident_edge_ids:
+            return None
+
+        click_dir = click_world_pos - node.position
+        if click_dir.length() < 1e-6:
+            for eid in sorted(node.incident_edge_ids):
+                if self.edges[eid].node_a_id == node_id:
+                    return eid
+            return min(node.incident_edge_ids)
+        click_dir = click_dir.normalize()
+
+        best_edge_id = None
+        best_dot = -1.0
+        for eid in node.incident_edge_ids:
+            leaving_dir = self.leaving_direction_at(node_id, eid)
+            if leaving_dir is None:
+                continue
+            dot = leaving_dir.dot(click_dir)
+            if dot > best_dot:
+                best_dot = dot
+                best_edge_id = eid
+        return best_edge_id
+
+    def simple_segment_from_endpoint(
+        self, endpoint_node_id: int
+    ) -> tuple[float, int | None, list[int]]:
+        """从 endpoint（连接数=1 的节点）沿连接数=2 的节点链走，直到遇到
+        turnout（连接数>=3）或另一个 endpoint，得到这段 simple_segment。
+
+        simple_segment：不含任何分歧点的一段轨道，一端是 endpoint，另一端
+        是 turnout（或另一个 endpoint，此时整段孤立、没有 turnout）。
+
+        提升为 RailNetwork 方法（原为 pathfinding.py 里的自由函数）：
+        这是纯图遍历，不依赖寻路概念，原本只服务折返（判断死端 simple
+        segment 是否容纳车身），现在是通用基础设施——OpenTTD Path Signal
+        的"安全停车位置"判定（见 docs/train_control.md 调研记录）同样
+        需要"车身是否会跨在道岔上"这个信息，是同一个几何问题，理应共用
+        同一份实现，不是各自重新遍历一遍图。
+
+        参数:
+            endpoint_node_id: 起点节点 ID，必须 connection_count() == 1，
+                              否则返回 (0.0, None, [])
+
+        返回:
+            (total_length, turnout_node_id, edge_ids)
+            - total_length: 这段轨道的总弧长（米）
+            - turnout_node_id: 终止于的 turnout 节点 ID；若终止于另一个
+              endpoint（孤立段，两端都是死端），则为 None
+            - edge_ids: 途经的所有 edge_id（按遍历顺序，供调用方需要时使用）
+        """
+        start_node = self.nodes.get(endpoint_node_id)
+        if start_node is None or start_node.connection_count() != 1:
+            return 0.0, None, []
+
+        total_length = 0.0
+        edge_ids: list[int] = []
+        prev_edge_id: int | None = None
+        current_node_id = endpoint_node_id
+
+        while True:
+            node = self.nodes[current_node_id]
+            remaining = node.incident_edge_ids - ({prev_edge_id} if prev_edge_id is not None else set())
+            if not remaining:
+                # connection_count()==1 且已经是走进来的那条边：说明current_node是死端且已到达
+                break
+            next_edge_id = next(iter(remaining))
+            edge = self.edges[next_edge_id]
+            total_length += edge.length
+            edge_ids.append(next_edge_id)
+
+            next_node_id = edge.node_b_id if edge.node_a_id == current_node_id else edge.node_a_id
+            next_node = self.nodes[next_node_id]
+            count = next_node.connection_count()
+
+            if count >= 3:
+                return total_length, next_node_id, edge_ids
+            if count == 1:
+                # 另一端也是 endpoint：孤立段，没有 turnout
+                return total_length, None, edge_ids
+            # count == 2：继续沿链走
+            prev_edge_id = next_edge_id
+            current_node_id = next_node_id
+
+        return total_length, None, edge_ids
+
     def turn_allowed(self, node_id: int, from_edge_id: int, to_edge_id: int) -> bool:
         """经节点 node_id 从 from_edge 转到 to_edge 是否几何许可。
 

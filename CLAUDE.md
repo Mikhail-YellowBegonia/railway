@@ -46,6 +46,25 @@ controller/  Wires it together
 Dependency rule: `model` must stay pure (no view/controller imports). `controller`
 imports from `model` and `view`. `view` only sees `model`.
 
+## Graph topology invariant (learned the hard way)
+
+**`Node`/`Edge` only change when infrastructure changes (editor BUILD/DELETE,
+future signal placement). Runtime train state never touches graph topology** —
+it's always expressed as a scalar offset on an existing Edge (`(edge_id, t)`,
+`OccupancyState.occupied_offset`/`s`). No mid-route stop, no couple/decouple,
+no pathfinding call inserts a node or splits an edge.
+
+This was learned twice: pathfinding used to `split_edge_at` at the start and
+goal to give Dijkstra exact endpoints, producing throwaway nodes/edges that
+needed GC. Both were removed (`start_offset`/`end_offset` scalar corrections
+instead) — see `5ea8f16` (start) and `e3341bb` (goal) in git log. There is
+now no "GC problem" to solve because there is nothing to collect: the graph
+is never mutated by anything that isn't a deliberate infrastructure edit.
+Fixed-block signaling (see `docs/train_control.md`) doesn't change this —
+block occupancy is Edge-list granularity (`OccupancyState.occupied`), it
+never needs to know *where* on an Edge a train sits. Signal placement itself
+*is* infrastructure and should split edges like BUILD does.
+
 ## Editor state machine
 
 Top-level modes: **IDLE** / **BUILD** / **DELETE**. BUILD has substates
@@ -163,6 +182,71 @@ Modifier keys are polled per frame in `GameLoop._sync_modifiers`, not edge-trigg
 **Debug 测试**(F 键叠加态): 左键依次点选两节点 → 自动求路 → 控制台打印
 段数/总长/有向边序列;第三次点击重置。可视化:起点绿圈/终点红圈,路径橙色
 加粗,每段中点顺序编号 1,2,3…。
+
+`RailNetwork.simple_segment_from_endpoint(endpoint_node_id)`: 从死端
+(`connection_count()==1`) 沿二度节点链走到下一个道岔或另一死端，返回
+`(total_length, turnout_node_id, edge_ids)`。原是 `pathfinding.py` 里只服务
+折返的自由函数，2026-09 提升为 `RailNetwork` 方法——纯图遍历不依赖寻路概念，
+且是通用基础设施：折返时判断死端 simple segment 能否容纳车身、信号系统的
+"安全停车位置"判定（车身是否会跨在道岔上）是同一个几何问题，理应共用同一份
+实现。
+
+## 信号系统 (Signal System)
+
+见 `docs/train_control.md` 「信号系统 Roadmap」章节获取完整设计文档、
+OpenTTD Path Signal 调研笔记和分步实施状态。核心要点：
+
+- **固定闭塞**，不做移动闭塞。信号状态由 edge/node 占用直接衍生，与列车
+  运动状态无关。
+- **One-Way PBS 语义**(`model/signal.py::SignalTable`)：信号槛位是
+  `DirectedEdge`，只有"正面"，反方向永久禁止通行，不允许背靠背放置两个
+  相对信号。
+- **Block 边界判据是"节点"，与"能不能通行"无关**（2026-09 bug 修复后
+  确立）：`BlockManager._compute_block` 的 DFS 走到某节点时，若该节点
+  挂着任意方向的信号就停（`_node_has_any_signal`，按 tail_node 判断信号
+  是否物理位于该节点，不是任意相邻边任意方向），与信号是不是"背面"、
+  能不能通行完全脱钩。这是为了同时满足：环线场景不能被绕背面吞并整个
+  网络；单线双向两端各放一个相对信号时，两个 block 应对称、都覆盖中间
+  整段区间。原始实现（只检查前方来向是否正对信号）和第一次修复尝试
+  （检查边的任一方向）都被推翻过，详见 `docs/train_control.md`「Step 4
+  检查点期间发现并修复的第二个 bug」的完整记录，改动前请先读。
+- **颜色完全自动化**（2026-09 起）：`SignalTable` 只记录放置位置,不存
+  颜色；颜色由 `model/block.py::BlockManager` 按闭塞占用实时推导，玩家
+  无法手动切换红绿。
+- 渲染用等边三角形，Layout 模式（见 `view/renderer.py` 顶部），屏幕像素
+  基准，不随缩放变化。
+- **信号与网络编辑的耦合缺口**：`SignalTable` 存的 `DirectedEdge` 引用
+  `edge_id`，但 `Editor`（DELETE 模式删边/合并节点）完全不知道
+  `SignalTable` 的存在，两者刻意零耦合。删掉信号所在的边后会留下悬空
+  引用，靠 `SignalTable.prune_missing(network)` 自我清理（`GameLoop.run()`
+  每帧在 `block_manager.rebuild()` 之前调用一次），不侵入 `Editor` 的
+  删除逻辑。
+- **进路预约**（Step 4，2026-09 起）：`BlockManager.reserve_path`——冲突
+  判定下沉到 edge_id 级别（不是 block/方向级别），天然覆盖单线双向对向
+  block 共享 edge 的场景（方向令牌，事前阻止而非事后死锁检测）。释放
+  条件是 `occupied ∪ route` 都不再涉及该 block（不是只看 occupied 快照，
+  避免刚下指令就误释放前方未走到的 block）。`tick_reservations` 只信任
+  当前 `trains` 列表，解挂/连挂产生的旧 `TrainEntity` 一旦被移出该列表，
+  其预约立即清理。
+- **远场/近场寻路拆分**（Step 5，2026-09 起，见 `docs/train_control.md`
+  「Step 5」完整记录）：`find_path_from_point`（唯一跑 Dijkstra 的地方）
+  只用 `SignalTable.passable_topology_only`（拓扑 + One-Way PBS 反方向
+  硬性禁止，不看占用/预约）算出完整远场路径；`BlockManager.reserve_path`/
+  `make_passable_fn` 不再接寻路，改为对 `truncate_to_next_signal` 截出的
+  近场段（前方一个闭塞区间）单独调用。`truncate_to_next_signal` 的截断
+  边界 = 信号实际保护的 block（不是"走到信号跟前"就停——这两者错位过
+  一格，是个真实 bug，教训是这类边界必须用真实 `GameLoop` 端到端验证，
+  纯单元测试测不出预约集合和 block 集合对不上）。
+
+## 渲染约定：Layout 模式
+
+`view/renderer.py` 当前的全部渲染归为 **Layout（极简）模式**：没有美术
+素材前，所有要素（轨道/节点/信号/列车/车钩）依然完整可见可交互，但表现
+脱离真实比例尺——线是逻辑细线，标记是几何图形，交互性图标用固定屏幕像素
+常量定义（不随 `camera.scale` 缩放）。这不是占位实现，是长期共存的渲染
+方式：引入真实美术素材后不会修改/替换这套方法，而是新开一套渲染方法
+并存。因此这里的图形选择可以用"够用就行"的标准，不需要为将来换皮预留
+抽象层。
 
 ## Working with `docs/editor.md`
 

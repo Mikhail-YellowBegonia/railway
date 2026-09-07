@@ -20,6 +20,51 @@ def load_geojson(path: str | Path, epsilon: float = 0.01) -> RailNetwork:
     return network
 
 
+def load_signals(path: str | Path, network: RailNetwork, epsilon: float = 0.01):
+    """从同一份 GeoJSON 的顶层 "signals" 字段还原信号放置位置。
+
+    与 write_geojson 配对：按坐标反查 (from_node, to_node) 对应的
+    DirectedEdge——node_id_at 用的容差语义与建网络时一致，只要坐标能
+    精确匹配到已加载的节点就能还原。找不到对应节点/边的记录静默跳过
+    （容错优先，不因为一条信号记录失效就中断整个加载）。
+
+    Step 3 起不再还原颜色——颜色由占用状态实时推导（BlockManager），
+    这里只还原"信号放置在哪"。用 place() 而不是内部直接写入，是因为
+    place() 自带 One-Way PBS 背面校验：若某份手工编辑过的存档不小心
+    存了背靠背的一对信号，加载时会跳过第二条而不是产生非法状态。
+
+    返回一个新建的 SignalTable；旧存档没有 "signals" 字段时返回空表。
+    """
+    from model.signal import SignalTable
+
+    with open(path, "r") as f:
+        data = json.load(f)
+
+    signals = SignalTable()
+    records = data.get("signals", [])
+    for rec in records:
+        from_pos = Vec3(*_pad_coord(rec["from"]))
+        to_pos = Vec3(*_pad_coord(rec["to"]))
+        from_node_id = network.node_id_at(from_pos, epsilon)
+        to_node_id = network.node_id_at(to_pos, epsilon)
+        if from_node_id is None or to_node_id is None:
+            continue
+        from_node = network.nodes[from_node_id]
+        edge_id = None
+        for eid in from_node.incident_edge_ids:
+            edge = network.edges[eid]
+            if {edge.node_a_id, edge.node_b_id} == {from_node_id, to_node_id}:
+                edge_id = eid
+                break
+        if edge_id is None:
+            continue
+        edge = network.edges[edge_id]
+        direction = 1 if edge.node_a_id == from_node_id else -1
+        signals.place((edge_id, direction))
+
+    return signals
+
+
 def _validate_linestring(coords: list[tuple[float, float, float]]) -> bool:
     n = len(coords)
     if n < 2:

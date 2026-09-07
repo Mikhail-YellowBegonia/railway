@@ -6,7 +6,7 @@ import os
 import pygame
 
 from model.rail_network import RailNetwork
-from model.geojson_loader import load_geojson
+from model.geojson_loader import load_geojson, load_signals
 from model.vec3 import Vec3
 from view.camera import Camera
 from view.renderer import Renderer
@@ -60,10 +60,18 @@ class GameLoop:
         if os.path.exists(SAVE_PATH):
             self.network = load_geojson(SAVE_PATH)
             print(f"已加载存档 {SAVE_PATH}（{len(self.network.edges)} 条边）")
+            self.signals = load_signals(SAVE_PATH, self.network)
         else:
             self.network = load_geojson(geo_path)
+            from model.signal import SignalTable
+            self.signals = SignalTable()
         self.editor = Editor(self.network)
         self.running = True
+
+        # Step 3：固定闭塞管理（block 划分 + 占用推导信号颜色，每帧 rebuild，
+        # 见 model/block.py 顶部关于重算频率的说明）
+        from model.block import BlockManager
+        self.block_manager = BlockManager()
 
         # 平移状态（受模式影响触发集）
         self._pan_button: int | None = None  # 当前正在按的平移按钮（None 表示未平移）
@@ -90,6 +98,8 @@ class GameLoop:
         self.inspect_train: "TrainEntity | None" = None  # 编组面板目标（I 键切换）
         # 车钩悬停状态：(列车, coupler_idx) 或 None
         self._hovered_coupler: tuple["TrainEntity", int] | None = None
+        # self.signals（DirectedEdge -> SignalState 旁挂表）已在上方加载
+        # 网络时同步初始化/还原，不在这里重复创建。
 
     def run(self) -> None:
         while self.running:
@@ -131,6 +141,15 @@ class GameLoop:
             mouse_world = self._mouse_world_pos()
             self.editor.update_hover(mouse_world)
 
+            # 清理 DELETE/合并等网络变更留下的悬空信号引用，再重算 block
+            # （见 model/signal.py::prune_missing 顶部说明——Editor 不知道
+            # SignalTable 的存在，靠这里兜底同步，不侵入 Editor 的删除逻辑）
+            self.signals.prune_missing(self.network)
+            # Step 3：每帧重算 block 划分；Step 4：释放已驶离的预约
+            self.block_manager.rebuild(self.network, self.signals)
+            self.block_manager.tick_reservations(self.trains)
+            signal_colors = self.block_manager.compute_colors(self.trains)
+
             self.renderer.clear()
             self.renderer.draw_grid()
             # 空间索引可视化（I 键切换，在 draw_network 之前绘制，避免遮挡轨道）
@@ -144,7 +163,9 @@ class GameLoop:
                     query_radius=30.0,  # 可调整，匹配吸附阈值
                 )
             self.renderer.draw_network(self.network, self.editor)
-            self.renderer.draw_overlay(self.network, self.editor, mouse_world)
+            self.renderer.draw_overlay(
+                self.network, self.editor, mouse_world, self.signals, signal_colors,
+            )
             # PLAY 模式可视化：路径预览按需从 occupancy+route 现拼，不缓存
             if (self.editor.mode == EditMode.PLAY and self.active_train is not None
                     and self.active_train.state.occupancy.route):
@@ -331,6 +352,14 @@ class GameLoop:
             self.editor.set_mode(EditMode.BUILD)
         elif event.key == pygame.K_d:
             self.editor.set_mode(EditMode.DELETE)
+        elif event.key == pygame.K_h:
+            # H 键：SIGNAL 模式（信号机放置/切换，纯手动，Step 2）
+            if self.editor.mode == EditMode.SIGNAL:
+                self.editor.set_mode(EditMode.IDLE)
+                print("SIGNAL 模式：关闭")
+            else:
+                self.editor.set_mode(EditMode.SIGNAL)
+                print("SIGNAL 模式：开启（左键点节点附近某条边的方向放置/切换信号）")
         elif event.key == pygame.K_q:
             self.running = False
         elif event.key == pygame.K_g:
@@ -356,10 +385,11 @@ class GameLoop:
             # P 键切换平行吸附(Simple/Complex Case)；独立开关
             self.editor.parallel_snap_enabled = not self.editor.parallel_snap_enabled
         elif event.key == pygame.K_s:
-            # S 键保存当前路网到固定存档（启动时会优先加载它）
+            # S 键保存当前路网 + 信号到固定存档（启动时会优先加载它）
             from model.geojson_writer import write_geojson
-            write_geojson(self.editor.network, SAVE_PATH)
-            print(f"已保存 {len(self.editor.network.edges)} 条边到 {SAVE_PATH}")
+            write_geojson(self.editor.network, SAVE_PATH, signals=self.signals)
+            print(f"已保存 {len(self.editor.network.edges)} 条边 + "
+                  f"{len(self.signals.all_signals())} 个信号到 {SAVE_PATH}")
         elif event.key == pygame.K_i:
             if self.editor.mode == EditMode.PLAY:
                 # PLAY 模式：I 键切换焦点列车编组面板
@@ -408,6 +438,12 @@ class GameLoop:
                 return
             if event.button == 3:
                 self._play_right_click(self._mouse_world_pos())
+                return
+
+        # SIGNAL 模式：左键=放置/切换信号，不触发平移
+        if self.editor.mode == EditMode.SIGNAL:
+            if event.button == 1:
+                self._signal_left_click(self._mouse_world_pos())
                 return
 
         pan_buttons = self._pan_buttons_for_mode()
@@ -672,16 +708,28 @@ class GameLoop:
         find_path_from_point 不再修改网络（起点/终点都不分割），两次调用
         可以直接复用其中一次的结果，不需要"先探路再提交"的两阶段流程。
 
+        Step 5（远场/近场拆分，2026-09）：这是**唯一跑 Dijkstra 的地方**
+        （远场寻路），只用 `SignalTable.passable_topology_only` 过滤——
+        只看拓扑级的单向硬性限制（One-Way PBS 背面永久禁止），不看闭塞
+        占用/预约状态。判定可达性、算出的是"理论上能不能走到"和"完整
+        预期路径"，不该因为"眼前有别的车"就判不可达（红灯不代表这里
+        真的走不了，只代表暂时被占用）。近场调度（预约）是级联在这个
+        结果之上的下一步，不重新跑 Dijkstra，不在这里处理，见
+        `_issue_path_order` 里 `BlockManager.truncate_to_next_signal` 的
+        调用。因此这里不再需要 `requesting_train` 参数。
+
         返回 (path, start_offset, end_offset, goal_direction) 或 None
         （两个方向都不可达）。
         """
         from model.pathfinding import find_path_from_point
+        passable_fn = self.signals.passable_topology_only
         best = None
         best_gd = None
         for gd in (1, -1):
             result = find_path_from_point(
                 self.network, start_edge_id, start_t, start_direction,
                 goal_edge_id, goal_t, gd,
+                passable_fn=passable_fn,
                 allow_reversal=allow_reversal, consist_length=consist_length, debug=debug,
             )
             if result is not None and (best is None or result[0].total_cost < best[0].total_cost):
@@ -756,10 +804,22 @@ class GameLoop:
             ) * edge.arc_radius
 
         def _issue_to_goal(goal_edge_id: int, goal_t: float, label: str) -> None:
-            """探路选方向 -> 下达指令。共用两处调用点。
+            """远场寻路（Dijkstra，只看拓扑）选方向 -> 近场预约（不重新
+            寻路，只截断+预约前方一个闭塞区间）-> 下达指令。共用两处
+            调用点。
 
             find_path_from_point 不再修改网络（起点/终点都不分割），一次
             调用即可拿到可下达的干净路径，不再需要"探路+提交"两阶段流程。
+
+            Step 5（远场/近场拆分，2026-09）：`_find_path_any_goal_direction`
+            算出的 path 是完整的远场路径（只受拓扑单向限制约束，不看
+            占用/预约），列车物理上按这条完整 path 驱动（本轮范围内不
+            限制列车物理越过未预约的边界，见下方 assign_route）。近场
+            这一步只做一件事：用 `BlockManager.truncate_to_next_signal`
+            把 path 截断到"前方第一个信号为止"，只预约这一段——对应
+            OpenTTD 原版逻辑（不做 JGRPP 的 Long Reserve 多区间预留）。
+            全程不重新调用 Dijkstra，只是在远场结果上做一次线性扫描+
+            预约表写入。
             """
             consist_length = train.state.consist.total_length
             result = self._find_path_any_goal_direction(
@@ -770,6 +830,17 @@ class GameLoop:
                 print(f"PLAY: 不可达 ({label})")
                 return
             path, start_offset, end_offset, goal_direction = result
+
+            # 近场：截断到前方第一个信号为止，只预约这一段（全有或全无）。
+            near_field_edges = self.block_manager.truncate_to_next_signal(
+                self.network, self.signals, path.edges,
+            )
+            near_field_edge_ids = [eid for eid, _d in near_field_edges]
+            if not self.block_manager.reserve_path(train, near_field_edge_ids):
+                print(f"PLAY: 指令被拒绝 ({label})：前方闭塞区间被其他"
+                      f"列车抢先预约，请重试")
+                return
+
             se = self.network.edges[start_edge_id]
             ge = self.network.edges[goal_edge_id]
             self.train_path_virtual_points = [_edge_pos(se, start_t), _edge_pos(ge, goal_t)]
@@ -797,6 +868,51 @@ class GameLoop:
         goal_edge = self.network.edges[goal_edge_id]
         goal_t = 0.0 if goal_edge.node_a_id == node_id else 1.0
         _issue_to_goal(goal_edge_id, goal_t, f"节点 {node_id}")
+
+    def _signal_left_click(self, world_pos: Vec3) -> None:
+        """SIGNAL 模式左键：在最近节点上放置一个方向的信号。
+
+        点击落在 Edge 中途时先 split_edge_at（新节点度数恒为 2，见
+        CLAUDE.md「图拓扑只因基础设施变化而改变」——放置信号本身就是
+        基础设施变化，允许分割）；否则吸附到最近节点。槛位消解交给
+        RailNetwork.resolve_directed_edge_by_click（纯几何，不依赖
+        view/controller）。
+
+        Step 3：颜色改为由闭塞占用自动推导（BlockManager），玩家不再
+        能手动切换红绿——点击已存在的信号槛位只打印提示，不做任何
+        状态改动（Step 2 的 toggle 交互已废弃，见 model/signal.py 顶部
+        说明）。放置/移除信号会改变闭塞划分，需要 BlockManager 重算，
+        当前实现是每帧无条件 rebuild（见 model/block.py），这里不用
+        手动触发。
+        """
+        node_id = self._snap_node_at(world_pos)
+        if node_id is None:
+            edge_hit = self._snap_edge_at(world_pos)
+            if edge_hit is None:
+                print("SIGNAL: 请靠近节点或轨道点击")
+                return
+            edge_id, t = edge_hit
+            node_id = self.network.split_edge_at(edge_id, t)
+            if node_id is None:
+                print("SIGNAL: 该位置无法放置信号（截断失败）")
+                return
+
+        best_edge_id = self.network.resolve_directed_edge_by_click(node_id, world_pos)
+        if best_edge_id is None:
+            print(f"SIGNAL: 节点 {node_id} 没有可用方向")
+            return
+
+        from model.pathfinding import _directed_from
+        directed = _directed_from(self.network, best_edge_id, node_id)
+        if self.signals.has_signal(directed):
+            print(f"SIGNAL: 节点 {node_id} 方向 edge {best_edge_id} 已有信号"
+                  f"（颜色由占用状态自动决定，不支持手动切换）")
+        elif self.signals.is_blocked_backside(directed):
+            print(f"SIGNAL: 节点 {node_id} 方向 edge {best_edge_id} 是反向信号的背面，"
+                  f"不能在此放置（One-Way PBS，先点另一侧删除或换方向）")
+        else:
+            self.signals.place(directed)
+            print(f"SIGNAL: 节点 {node_id} 方向 edge {best_edge_id} 新建信号")
 
     def _snap_node_at(self, world_pos: Vec3) -> int | None:
         """返回点击命中的节点 ID，未命中返回 None。"""
