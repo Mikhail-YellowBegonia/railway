@@ -498,9 +498,21 @@ node_b 出发，已走过 `(1 - start_t) × length`），导致逆向起点时
 `remaining_to_goal` 算错（同 Edge 逆向场景实测算成 0，真实应为 6m）。已按
 有向边尾端点修正，回归补在 `tests/test_dispatch.py` 的 Part 0。
 
-回归测试：`tests/test_dispatch.py`（4 部分：direction=-1 起始偏移修复；红灯
+**人工测试后修复的 bug（2026-09）：长列车在绿灯前卡死**。用户在"最简图"
+上人工测试报告"信号机开放后列车不再续行"。复现根因：预约预算用了
+`len(held) < MAX_HELD_BLOCKS`（"总共持有几个 block"），但 `held` 包含车身
+横跨的所有 block——长列车（默认编组 60m，block 只有 20m 时）车身同时占据
+3 条边、持有 2 个 block，预算被"车尾尚未驶离的 block"占满，导致"向前预约
+下一区间"这步被永久跳过，列车在绿灯前停车且永不续约。修复：把预算判据从
+"总共持有"改为"**车头前方**已预约几个 block"——`TrainDispatcher._walk_frontier`
+沿剩余路径从车头向前扫描，返回 `(授权边界边数, 车头前方已持有的 block key
+集合)`，预算只数这个集合的 `len`。车尾尚未驶离的 block 不在 `remaining_path`
+里、天然不计入。长列车回归补在 `tests/test_dispatch.py` 场景 4（60m 车身 +
+20m block，绿灯连续通过不卡死）。
+
+回归测试：`tests/test_dispatch.py`（5 部分：direction=-1 起始偏移修复；红灯
 前停车等待 + 车头不越过信号 + 占用释放后自动续行到终点；绿灯连续通过全程
-不进入等待态；无信号直行不受约束）。
+不进入等待态；无信号直行不受约束；长列车横跨多 block 不卡死）。
 
 我们遵循一个典型工作流：
 1. 拆解需求，变成可一口气实现的小步

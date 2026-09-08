@@ -168,4 +168,47 @@ for _ in range(60 * 120):
 assert reached3, "无信号时列车应直达终点"
 print("✅ 无信号直行：无约束直达终点")
 
+# =========================================================================
+# 场景 4：长列车横跨多个 block，绿灯下不得卡死（2026-09 bug 回归）
+# =========================================================================
+# 60m 车身 vs 20m 的 block：车身同时占据 3 条边，即同时持有 2 个 block。
+# 早前的预约预算用"总共持有几个 block"（len(held)）判定，长列车会因
+# 车尾尚未驶离的 block 占满预算而在绿灯前被永久卡死——现在改为只数
+# "车头前方"已预约的 block（_walk_frontier 返回的 blocks_ahead）。
+net4 = RailNetwork()
+nodes4 = [net4.add_node(Vec3(x, 0.0, 0.0)) for x in range(0, 140, 20)]
+edges4 = [net4.add_edge(nodes4[i], nodes4[i + 1]) for i in range(len(nodes4) - 1)]
+signals4 = SignalTable()
+for i in range(1, len(edges4)):
+    signals4.place(_directed_from(net4, edges4[i].edge_id, nodes4[i].node_id))
+blocks4 = BlockManager()
+blocks4.rebuild(net4, signals4)
+
+consist4 = Consist(wagons=[create_simple_wagon(length=60.0, mass=30.0)])
+occ4 = OccupancyState(occupied=[(edges4[0].edge_id, 1)], occupied_offset=0.0,
+                      s=0.0, route=[])
+state4 = TrainState(occupancy=occ4, remaining_to_goal=0.0, v=0.0, consist=consist4)
+train4 = TrainEntity(state4, net4, SimplePhysics(a_max=2.0, b_max=3.0, v_max=30.0))
+train4.assign_route([(e.edge_id, 1) for e in edges4[1:]], 120.0,
+                    (edges4[-1].edge_id, 1.0, 1))
+disp4 = TrainDispatcher(net4, signals4, blocks4)
+trains4 = [train4]
+
+reached4 = False
+stuck_holding = False
+for _ in range(60 * 240):
+    for t in trains4:
+        disp4.tick(t, DT, V_TARGET, trains4)
+    blocks4.rebuild(net4, signals4)
+    blocks4.tick_reservations(trains4)
+    if train4.is_holding():
+        stuck_holding = True
+        break
+    if train4.is_parked():
+        reached4 = True
+        break
+assert reached4 and not stuck_holding, \
+    "长列车（60m 横跨 3 个 20m block）绿灯下不得卡死——预约预算必须只数车头前方"
+print("✅ 长列车跨多个 block：绿灯连续通过不卡死")
+
 print("\n全部通过")
