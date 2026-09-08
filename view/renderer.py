@@ -701,6 +701,10 @@ COLOR_TRAIN_HEADING = (255, 220, 80)  # heading 箭头（亮黄）
 COLOR_COUPLER = (140, 140, 140)       # 车钩常亮（灰）
 COLOR_COUPLER_HOVER = (255, 235, 60)  # 车钩悬停高亮（黄）
 COUPLER_RADIUS_PX = 5                 # 车钩圆圈屏幕半径（像素）
+# 端头车钩（head/tail，docs/consist_ui.md §6，2026-09 定稿：单色方块，
+# head/tail 靠 tooltip 文字区分）：方块比内部圆点大一号，作为连挂目标标记。
+COLOR_END_COUPLER = (120, 200, 230)   # 端头车钩方块（青）
+END_COUPLER_SIZE_PX = 9               # 端头方块半边长（像素）
 
 
 def draw_debug_train(
@@ -784,6 +788,17 @@ def draw_debug_train(
             cx, cy = camera.world_to_screen(cp.x, cp.y, w, h)
             pygame.draw.circle(surface, COLOR_COUPLER, (int(cx), int(cy)), COUPLER_RADIUS_PX)
             pygame.draw.circle(surface, (200, 200, 200), (int(cx), int(cy)), COUPLER_RADIUS_PX, 1)
+
+        # 端头车钩（head/tail）方块标记——连挂目标（docs/consist_ui.md §6）。
+        # 单色方块（青色），head/tail 的区分靠悬停 tooltip 文字。
+        _head_data, _tail_data = kinematics.get_end_coupler_data(s)
+        for _label, (_cp, _eid, _t) in (("head", _head_data), ("tail", _tail_data)):
+            cx, cy = camera.world_to_screen(_cp.x, _cp.y, w, h)
+            rect = pygame.Rect(int(cx) - END_COUPLER_SIZE_PX,
+                               int(cy) - END_COUPLER_SIZE_PX,
+                               END_COUPLER_SIZE_PX * 2, END_COUPLER_SIZE_PX * 2)
+            pygame.draw.rect(surface, COLOR_END_COUPLER, rect)
+            pygame.draw.rect(surface, (230, 250, 255), rect, 1)
 
     else:
         # 质点模型可视化（原有方块+箭头）
@@ -892,10 +907,47 @@ def draw_coupler_highlight(
     w: int,
     h: int,
 ) -> None:
-    """在指定车钩位置画高亮圆圈（悬停时调用）。"""
+    """在指定内部车钩位置画高亮圆圈（解挂悬停，docs/consist_ui.md §4）。"""
     cx, cy = camera.world_to_screen(world_pos.x, world_pos.y, w, h)
     pygame.draw.circle(surface, COLOR_COUPLER_HOVER, (int(cx), int(cy)), COUPLER_RADIUS_PX + 3)
     pygame.draw.circle(surface, (255, 255, 255), (int(cx), int(cy)), COUPLER_RADIUS_PX + 3, 1)
+
+
+def draw_end_coupler_highlight(
+    surface: pygame.Surface,
+    camera: Camera,
+    world_pos: Vec3,
+    w: int,
+    h: int,
+) -> None:
+    """在指定端头车钩位置画高亮方块（连挂悬停，docs/consist_ui.md §5）。"""
+    cx, cy = camera.world_to_screen(world_pos.x, world_pos.y, w, h)
+    size = END_COUPLER_SIZE_PX + 4
+    rect = pygame.Rect(int(cx) - size, int(cy) - size, size * 2, size * 2)
+    pygame.draw.rect(surface, COLOR_COUPLER_HOVER, rect)
+    pygame.draw.rect(surface, (255, 255, 255), rect, 2)
+
+
+def draw_text_tooltip(
+    surface: pygame.Surface,
+    font: pygame.font.Font,
+    screen_pos: tuple[float, float],
+    text: str,
+) -> None:
+    """通用浮动提示（跟随鼠标屏幕坐标）。车钩悬停 tooltip（§4/§5）用。"""
+    surf = font.render(text, True, (230, 235, 225))
+    pad = 4
+    w, h = surface.get_width(), surface.get_height()
+    mx, my = screen_pos
+    bx = int(mx) + 12
+    by = int(my) - surf.get_height() - 8
+    bx = max(0, min(bx, w - surf.get_width() - pad * 2))
+    by = max(0, by)
+    bg = pygame.Surface((surf.get_width() + pad * 2, surf.get_height() + pad * 2))
+    bg.set_alpha(170)
+    bg.fill((18, 18, 24))
+    surface.blit(bg, (bx, by))
+    surface.blit(surf, (bx + pad, by + pad))
 
 
 def draw_train_tooltip(
@@ -907,19 +959,7 @@ def draw_train_tooltip(
 ) -> None:
     """鼠标悬停列车时的浮动提示（跟随鼠标屏幕坐标）。"""
     text = f"Train #{train_idx}  {v * 3.6:.1f} km/h"
-    surf = font.render(text, True, (220, 230, 220))
-    pad = 4
-    w, h = surface.get_width(), surface.get_height()
-    mx, my = screen_pos
-    bx = int(mx) + 12
-    by = int(my) - surf.get_height() - 8
-    bx = max(0, min(bx, w - surf.get_width() - pad * 2))
-    by = max(0, by)
-    bg = pygame.Surface((surf.get_width() + pad * 2, surf.get_height() + pad * 2))
-    bg.set_alpha(160)
-    bg.fill((20, 20, 20))
-    surface.blit(bg, (bx, by))
-    surface.blit(surf, (bx + pad, by + pad))
+    draw_text_tooltip(surface, font, screen_pos, text)
 
 
 def draw_consist_panel(

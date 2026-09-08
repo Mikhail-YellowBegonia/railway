@@ -151,15 +151,25 @@ on load — round-trip is bit-stable for arc geometry within 1e-4.
 | `F` | any | Toggle pathfinding test mode (debug) |
 | `I` | any | Toggle spatial index visualization (debug) |
 | `C` | any | Toggle camera follow (train tracking) |
-| `Space` | Train active | Reset train to path start (s=0, v=0) |
+| `K` | PLAY | 编组确认键：悬停内部车钩=解挂；悬停其它列车端头车钩=连挂（规格见 `docs/consist_ui.md`） |
+| `Space` | PLAY | 悬停内部车钩(停放)=解挂确认；否则 = 紧急停止 |
+| `Enter` | PLAY | 悬停内部车钩(停放)=解挂确认（同 K） |
 | `↑` | Train active | Throttle (accelerate) |
 | `↓` | Train active | Brake (decelerate) |
 | `LSHIFT` (held) | BUILD_ACTIVE | Force straight along T1 |
 | `LALT` (held) | BUILD_ACTIVE | Force Case 2T single-tangent arc (M2 path-snap to straight edge) |
 | Left/Right/Middle drag | IDLE | Pan camera |
 | Middle drag | BUILD/DELETE | Pan camera |
+| Left click | PLAY | 选列车 / 放置（左键**永不**触发放大/编组操作） |
 | Left click | Pathfinding test | Select start/goal nodes (F mode) |
 | Scroll | any | Zoom |
+
+车钩悬停交互（PLAY 模式，`docs/consist_ui.md`）：内部车钩=灰圆点（解挂点），
+端头车钩=青方块（连挂点），命中半径按屏幕像素（不随缩放）。悬停内部车钩 →
+tooltip「解挂 → N1+N2 节」→ K/空格/回车 确认；悬停其它列车端头车钩 →
+tooltip「连挂目标 #k」→ K 确认（已贴住直接连挂；未贴住则驶向对方车尾，到位
+自动连挂）。任何右键寻路停车在其它停放列车端头车钩 1m 内也自动连挂（2026-09
+定稿，见 §9-4 决策记录）。判定逻辑在 `controller/coupling.py`（纯模型可测）。
 
 Modifier keys are polled per frame in `GameLoop._sync_modifiers`, not edge-triggered.
 
