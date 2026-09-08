@@ -69,7 +69,7 @@ print("✅ 放置第二个槛位（北侧），互不影响")
 blocks = BlockManager()
 blocks.rebuild(network, signals)
 
-colors_empty = blocks.compute_colors(trains=[])
+colors_empty = blocks.compute_colors([], network, signals)
 assert colors_empty[directed_east] is SignalState.GREEN
 assert colors_empty[edge_north_dir] is SignalState.GREEN
 print("✅ 无车占用时，所有信号 GREEN")
@@ -79,7 +79,7 @@ east_block = blocks.block_edges(directed_east)
 assert EDGE_EAST in east_block, "east 槛位的 block 至少应包含 edge3 自身"
 
 train_on_east = _FakeTrain(occupied_edge_ids=[EDGE_EAST])
-colors_occupied = blocks.compute_colors(trains=[train_on_east])
+colors_occupied = blocks.compute_colors([train_on_east], network, signals)
 assert colors_occupied[directed_east] is SignalState.RED, \
     "block 边被占用，对应信号应变 RED"
 assert colors_occupied[edge_north_dir] is SignalState.GREEN, \
@@ -87,7 +87,7 @@ assert colors_occupied[edge_north_dir] is SignalState.GREEN, \
 print("✅ 占用推导：被占用的 block 变红，不相关的 block 不受影响")
 
 # 车离开后应恢复 GREEN（验证颜色是实时推导，不是一次性翻转）
-colors_cleared = blocks.compute_colors(trains=[])
+colors_cleared = blocks.compute_colors([], network, signals)
 assert colors_cleared[directed_east] is SignalState.GREEN
 print("✅ 车离开后颜色恢复 GREEN（实时推导，非翻转标记）")
 

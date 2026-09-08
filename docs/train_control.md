@@ -510,9 +510,34 @@ node_b 出发，已走过 `(1 - start_t) × length`），导致逆向起点时
 里、天然不计入。长列车回归补在 `tests/test_dispatch.py` 场景 4（60m 车身 +
 20m block，绿灯连续通过不卡死）。
 
-回归测试：`tests/test_dispatch.py`（5 部分：direction=-1 起始偏移修复；红灯
+**区间占用的定义：完全互斥 → edge 交集（2026-09，用户澄清）**。用户指出
+当前实现展现的是老版简单闭塞的"完全互斥"（block 内任何位置有车就整块红灯），
+而原本目标是 PBS 的"edge 交集"（本车预约的路径 edge 与其它占用交集为空即可
+放行）。典型死锁：单线铁路上的 2 线车站 `主线-【A道/B道】-主线`，按现代习惯
+在 A道 放右行单向 PBS、B道 放左行单向 PBS，道岔处不放信号，A道/B道 被并入
+同一粗 block——列车已完全进入 B道 避让后，仍"位于 A道 出口区间内"，整块红灯
+卡死 A道 出站列车。改为 edge 交集后，两车占据的 edge 集合交集为空，就该绿灯
+放行。**两种标准**：完全互斥（更安全、现实仍在用）vs edge 交集（更现代、
+OpenTTD PBS，本项目目标）。修复：
+
+- `BlockManager._reservations` 从 `dict[DirectedEdge, TrainEntity]`（block key
+  → train，整块互斥）改为 `dict[TrainEntity, set[int]]`（train → 预约的具体
+  edge_id）。
+- `reserve_path` 冲突判定只查 `path_edge_ids` 本身是否被别的车预约，不再
+  展开到整个 block 的全部边；`tick_reservations` 按 edge 逐条释放。
+- `compute_colors` 改为 `_has_free_path`：从信号出发沿 turn_allowed 走，只要
+  存在一条 edge 全部既不被占用也不被预约的路径走到下一个信号/死端就 GREEN，
+  所有分支都堵死才 RED。这样 A/B 股道不再互锁。
+- `TrainDispatcher` 的物理占用检查也从"整个 block"改为"本车实际要走的
+  `next_seg` 边"。
+
+回归：`tests/test_dispatch.py` 场景 5（单线 2 线车站会让线：B道被占时进站信号
+保持 GREEN、A道列车仍顺利通过）。
+
+回归测试：`tests/test_dispatch.py`（6 部分：direction=-1 起始偏移修复；红灯
 前停车等待 + 车头不越过信号 + 占用释放后自动续行到终点；绿灯连续通过全程
-不进入等待态；无信号直行不受约束；长列车横跨多 block 不卡死）。
+不进入等待态；无信号直行不受约束；长列车横跨多 block 不卡死；单线 2 线车站
+edge 交集不互锁）。
 
 我们遵循一个典型工作流：
 1. 拆解需求，变成可一口气实现的小步

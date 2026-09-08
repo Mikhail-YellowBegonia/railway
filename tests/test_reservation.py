@@ -88,7 +88,7 @@ assert blocks.reserve_path(train_1, [SHARED_EID]) is True
 print("✅ 同一列车重复预约自己已持有的路径：幂等成功")
 
 # --- 2. 颜色：两个方向的信号都应该显示 RED（block 被占用/预约） ---
-colors = blocks.compute_colors(trains=[train_1])
+colors = blocks.compute_colors([train_1], network, signals)
 assert colors[d_east] is SignalState.RED
 assert colors[d_west] is SignalState.RED, \
     "对向 block 共享同一条 edge，train_1 占用时对向信号也应该显示占用/预约中"

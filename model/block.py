@@ -1,28 +1,33 @@
-"""固定闭塞区间划分 + 占用推导信号颜色 + 进路预约（Step 3/4）。
+"""固定闭塞区间划分 + 占用推导信号颜色 + 进路预约（Step 3/4/6）。
 
-Block / 预约设计（Step 4，见 docs/train_control.md 调研记录）：
+Block / 预约设计（Step 4 起，Step 6 改为 PBS / edge 交集语义，见
+docs/train_control.md 调研记录与「Step 6」）：
 
-- 预约表 `_reservations: dict[DirectedEdge, TrainEntity]`——每个 block（以
-  其信号的 DirectedEdge 为 key）当前被哪辆车预约。预约在调度层收到新指令
-  时对整条路径一次性写入（`reserve_path`），不是列车驶入后才写。
+- 预约表 `_reservations: dict[TrainEntity, set[int]]`——每辆车预约的**具体
+  edge_id 集合**（PBS 语义），不是"block key → train"的整块互斥。预约在
+  调度层每帧对"前方一个闭塞区间"的具体边写入（`reserve_path`）。
 
-- **冲突判定在 edge_id 级别，不是 block/方向级别**：两个方向相反的 block
-  可能物理上共享同一段单线（典型场景：单线双向运行，两端各放一个面向
-  对方的单向信号，各自的 block 沿相反方向走到对面）。若只按"检查反方向
-  同一个 block key"判断冲突，会漏掉这种场景（两个 block 的 DirectedEdge
-  key 完全不同，但 edge_id 集合有重叠）。所以 `reserve_path` 展开成
-  "本次预约涉及的所有 edge_id"，逐一检查是否已被其他列车通过*任意*
-  block 预约占用——这天然实现了 JGRPP 方向令牌的效果：对向 block 只要
-  和本次要预约的 block 共享哪怕一条 edge，就会被判定冲突，事前阻止而
-  不是事后检测死锁。
+- **冲突判定 = edge 交集，不是整块互斥**（2026-09 用户澄清）：老版简单
+  闭塞是"block 内任何位置有车就整块红灯"（完全互斥，更安全但会在会让线
+  A/B 股道处死锁）；PBS 是"本车要走的 edge 集合与其它占用/预约的 edge
+  集合交集为空即可放行"（edge 交集，更现代）。`reserve_path` 只检查
+  `path_edge_ids` 本身是否被别的车预约，不再展开到整个 block 的全部边。
+  单线双向场景（对向两个信号各自 block 完全重叠）依然正确：重叠的边会在
+  edge 级别被同一套冲突判定拦下（方向令牌效果）。
 
-- **释放条件用"占用 ∪ 未来路由"，不是单用当前占用**：如果只检查"block
+- **颜色 = 是否存在一条无占用/无预约的通路**：`compute_colors` 对每个信号
+  做 `_has_free_path`（从信号出发沿 turn_allowed 走，只要有一条 edge 全部
+  既不被占用也不被预约的路径走到下一个信号/死端就 GREEN）。这样道岔无
+  信号时被并入同一 block 的 A/B 股道不会互锁：B 股道被占不影响 A 股道作为
+  通路让信号保持绿灯。
+
+- **释放条件用"占用 ∪ 未来路由"，不是单用当前占用**：如果只检查"预约 edge
   是否与当前 occupied 有交集"，会在列车刚收到指令、还没开始走的那些
-  "预约了但车身还没到"的前方 block 上立刻误释放（正是这个原因，一开始
-  的实现被推翻重写）。正确条件是 `block & (occupied ∪ route) == ∅` 才
-  释放——route 是寻路结果里"车头尚未走到的部分"，只要 block 还在 route
-  里，就还没走完，不该释放。折返不受影响：折返只反转方向，不改变
-  occupied 的 edge_id 集合，`tick_reservations` 天然对折返前后一视同仁。
+  "预约了但车身还没到"的前方 edge 上立刻误释放（正是这个原因，一开始
+  的实现被推翻重写）。正确条件是按 edge 逐个判断 `e ∈ (occupied ∪ route)`
+  才保留——route 是寻路结果里"车头尚未走到的部分"。折返不受影响：折返只
+  反转方向，不改变 occupied 的 edge_id 集合，`tick_reservations` 天然对
+  折返前后一视同仁。
 
 - **`tick_reservations` 只信任当前传入的 `trains` 列表**：任何持有预约但
   不在这个列表里的对象（典型场景：解挂/连挂会创建全新的 `TrainEntity`，
@@ -32,8 +37,8 @@ Block / 预约设计（Step 4，见 docs/train_control.md 调研记录）：
 
 - 寻路接入：`make_passable_fn(train)` 返回符合 `PassableFn` 签名的闭包，
   只检查"这条 edge 是否被别的列车预约"；One-Way PBS 的背面禁止在
-  `SignalTable.allows_direction` 里单独判定，两者在 GameLoop 组合成责任链
-  （`turn_allowed` 已经在 `neighbors()` 内部单独处理，不在这条链里）。
+  `SignalTable.passable_topology_only` 里单独判定，两者在 GameLoop 组合成
+  责任链（`turn_allowed` 已经在 `neighbors()` 内部单独处理，不在这条链里）。
 """
 from __future__ import annotations
 
@@ -50,7 +55,7 @@ if TYPE_CHECKING:
 
 class SignalState(Enum):
     GREEN = "green"
-    RED = "red"      # block 被占用（占用 = 物理占用 or 预约）
+    RED = "red"      # 信号前方已无通路（所有分支都被占用/预约堵死）
 
 
 class BlockManager:
@@ -58,17 +63,25 @@ class BlockManager:
 
     def __init__(self) -> None:
         self._blocks: dict[DirectedEdge, frozenset[int]] = {}
-        self._reservations: dict[DirectedEdge, "TrainEntity"] = {}
+        # 预约表（PBS / edge 交集语义）：train -> 该车预约的具体 edge_id 集合。
+        # 与 Step 4 的"block key -> train"不同——预约不再整块互斥，而是按
+        # 列车实际要走的边粒度登记，两列车的预约 edge 集合交集为空即可共享
+        # 同一个（粗粒度）block。
+        self._reservations: dict["TrainEntity", set[int]] = {}
 
     def rebuild(self, network: RailNetwork, signals: SignalTable) -> None:
-        """重新计算所有信号的 block 边集合，清理失效预约（对应已删除的信号）。"""
+        """重新计算所有信号的 block 边集合，清理引用已删除 edge 的预约。"""
         self._blocks = {
             directed: self._compute_block(network, signals, directed)
             for directed in signals.all_signals()
         }
-        stale = [k for k in self._reservations if k not in self._blocks]
-        for k in stale:
-            del self._reservations[k]
+        # 轨道删除/合并后，预约里可能残留已不存在的 edge_id（跟信号悬空引用
+        # 同一类问题），这里顺带剪掉。
+        live_edges = set(network.edges)
+        for train in list(self._reservations):
+            self._reservations[train] &= live_edges
+            if not self._reservations[train]:
+                del self._reservations[train]
 
     def _compute_block(
         self, network: RailNetwork, signals: SignalTable, start: DirectedEdge,
@@ -161,9 +174,9 @@ class BlockManager:
     def block_edges(self, directed: DirectedEdge) -> frozenset[int]:
         return self._blocks.get(directed, frozenset())
 
-    def held_blocks(self, train: "TrainEntity") -> set[DirectedEdge]:
-        """train 当前持有的所有 block key（预约表的反查）。"""
-        return {d for d, t in self._reservations.items() if t is train}
+    def held_edges(self, train: "TrainEntity") -> set[int]:
+        """train 当前预约的具体 edge_id 集合（PBS / edge 交集语义）。"""
+        return set(self._reservations.get(train, ()))
 
     def all_blocks(self) -> dict[DirectedEdge, frozenset[int]]:
         """返回当前所有信号的 block 划分（key -> 边集合），供调度层判断某条
@@ -212,75 +225,68 @@ class BlockManager:
     # ------------------------------------------------------------------
 
     def _edge_owners(self) -> dict[int, set]:
-        """edge_id -> 当前持有该 edge 所在任意 block 预约的列车集合。"""
+        """edge_id -> 预约了该 edge 的列车集合（由预约表反查）。"""
         owners: dict[int, set] = {}
-        for directed, train in self._reservations.items():
-            for eid in self._blocks.get(directed, frozenset()):
+        for train, edges in self._reservations.items():
+            for eid in edges:
                 owners.setdefault(eid, set()).add(train)
         return owners
 
     def reserve_path(self, train: "TrainEntity", path_edge_ids: list[int]) -> bool:
-        """为 train 预约 path_edge_ids 途经的所有信号 block。
+        """为 train 预约 path_edge_ids 里的具体 edge（PBS / edge 交集语义）。
 
-        全有或全无：本次路径涉及的所有 block 的全部 edge，只要有一条被
-        别的列车持有（不管持有方是通过哪个 block/方向拿到的），整个预约
-        失败并返回 False，不改变任何现有状态——这就是单线对向冲突的
-        判定入口，见本文件顶部说明。
+        **与 Step 4 的关键区别**：冲突判定不再展开到"整块 block 的全部边"，
+        而是只看 train 实际要走的 `path_edge_ids` 本身。两条列车只要预约的
+        edge 集合交集为空，就能共享同一个（粗粒度）block——这正是 PBS 的
+        行为，也是单线车站 A/B 股道（道岔无信号、被并入同一 block）不互锁
+        死锁的前提。反之，老版简单闭塞是"整块互斥"：block 内任何位置有车
+        就整块红灯，A/B 股道互相卡死。
 
-        路径不涉及任何有信号的 block 时（没放信号的路段）视为无需预约，
-        直接返回 True。
+        全有或全无：`path_edge_ids` 里只要有一条 edge 被别的列车预约，整个
+        预约失败并返回 False，不改变任何现有状态。
         """
         path_edge_set = set(path_edge_ids)
-        target_blocks = [
-            directed for directed, block in self._blocks.items()
-            if block & path_edge_set
-        ]
-        if not target_blocks:
-            return True
-
         owners = self._edge_owners()
-        touched_edges: set[int] = set()
-        for directed in target_blocks:
-            touched_edges |= self._blocks[directed]
-
-        for eid in touched_edges:
+        for eid in path_edge_set:
             for owner in owners.get(eid, ()):
                 if owner is not train:
                     return False
-
-        for directed in target_blocks:
-            self._reservations[directed] = train
+        self._reservations.setdefault(train, set()).update(path_edge_set)
         return True
 
     def tick_reservations(self, trains) -> None:
-        """按当前 trains 列表释放已经不需要的预约。
+        """按当前 trains 列表释放已经不需要的预约 edge。
 
         释放条件：holder 不在 trains 里（已被移除/替换，见本文件顶部
-        关于 decouple/couple 的说明），或者 block 与 holder 的
+        关于 decouple/couple 的说明），或者某条 edge 与 holder 的
         (occupied ∪ route) 已经没有交集（车身已完全驶离，且这段路也不在
-        待走的路由里了）。
+        待走的路由里了）——按 edge 逐条释放，而不是整块释放。
         """
         live = set(trains)
-        for directed in list(self._reservations):
-            holder = self._reservations[directed]
-            if holder not in live:
-                del self._reservations[directed]
+        for train in list(self._reservations):
+            if train not in live:
+                del self._reservations[train]
                 continue
-            block = self._blocks.get(directed, frozenset())
-            occ = holder.state.occupancy
+            occ = train.state.occupancy
             needed = {e for e, _ in occ.occupied} | {e for e, _ in occ.route}
-            if not (block & needed):
-                del self._reservations[directed]
+            self._reservations[train] &= needed
+            if not self._reservations[train]:
+                del self._reservations[train]
 
     def is_reserved_by_other(self, directed: DirectedEdge, train: "TrainEntity") -> bool:
-        """directed 对应的 block 是否被除 train 之外的列车持有预约。
+        """directed 对应的 block 是否有任何 edge 被除 train 之外的列车预约。
 
-        供测试/调试查询用；寻路层走 make_passable_fn（按 edge_id 级别
-        判定，覆盖对向 block 共享 edge 的场景），这里是 block key 级别
-        的直接查询，语义更简单但不做跨 block 的 edge 级别冲突检查。
+        供测试/调试查询用；寻路层走 make_passable_fn（按 edge_id 级别判定），
+        这里是"block 边集合里是否含他人的预约 edge"的查询，语义上等价于
+        "该 block 对 train 而言是否被他人部分占用"。
         """
-        holder = self._reservations.get(directed)
-        return holder is not None and holder is not train
+        block = self._blocks.get(directed, frozenset())
+        owners = self._edge_owners()
+        for eid in block:
+            for owner in owners.get(eid, ()):
+                if owner is not train:
+                    return True
+        return False
 
     # ------------------------------------------------------------------
     # passable_fn 接口（接入寻路）
@@ -305,18 +311,62 @@ class BlockManager:
     # 颜色推导
     # ------------------------------------------------------------------
 
-    def compute_colors(self, trains) -> dict[DirectedEdge, SignalState]:
-        """按物理占用 + 预约推导信号颜色（占用或预约 = RED）。"""
+    def compute_colors(
+        self, trains, network: RailNetwork, signals: SignalTable,
+    ) -> dict[DirectedEdge, SignalState]:
+        """按"是否还有一条无占用/无预约的通路"推导信号颜色（PBS / edge 交集）。
+
+        与老版简单闭塞"block 内有车就整块红灯"不同：这里对每个信号做一次
+        `_has_free_path`——只要从该信号出发，存在一条 edge 全部既不被物理
+        占用、也不被预约的路径走到下一个信号/死端，就判 GREEN；所有分支都
+        被堵死才判 RED。这样道岔无信号时被并入同一 block 的 A/B 股道不会
+        互相锁死：A 股道被占不影响 B 股道作为一条通路让信号保持绿灯。
+        """
         occupied_edge_ids: set[int] = set()
         for train in trains:
             for edge_id, _direction in train.state.occupancy.occupied:
                 occupied_edge_ids.add(edge_id)
+        reserved_edge_ids: set[int] = set()
+        for edges in self._reservations.values():
+            reserved_edge_ids |= edges
+        blocked = occupied_edge_ids | reserved_edge_ids
 
         colors: dict[DirectedEdge, SignalState] = {}
-        for directed, block in self._blocks.items():
-            occupied = bool(block & occupied_edge_ids)
-            reserved = directed in self._reservations
+        for directed in self._blocks:
             colors[directed] = (
-                SignalState.RED if (occupied or reserved) else SignalState.GREEN
+                SignalState.GREEN
+                if self._has_free_path(network, signals, directed, blocked)
+                else SignalState.RED
             )
         return colors
+
+    def _has_free_path(
+        self,
+        network: RailNetwork,
+        signals: SignalTable,
+        directed: DirectedEdge,
+        blocked_edges: set[int],
+    ) -> bool:
+        """从信号 directed 出发，是否存在一条全程不被 blocked 的路径走到
+        下一个信号（或死端）。存在则 True（该信号可放行，GREEN）。"""
+        stack: list[DirectedEdge] = [directed]
+        visited: set[DirectedEdge] = set()
+        while stack:
+            cur = stack.pop()
+            if cur in visited:
+                continue
+            visited.add(cur)
+            if cur[0] in blocked_edges:
+                continue  # 这条边被占/被预约，此分支不通
+            node = head_node(network, cur)
+            if self._node_has_any_signal(network, signals, node):
+                return True  # 走到下一个信号节点 = 完整通过本 block
+            nxt = [
+                to_edge_id for to_edge_id in network.adjacent_edges_at(node, cur[0])
+                if network.turn_allowed(node, cur[0], to_edge_id)
+            ]
+            if not nxt:
+                return True  # 走到死端 = block 终点，同样算一条通路
+            for to_edge_id in nxt:
+                stack.append(_directed_from(network, to_edge_id, node))
+        return False

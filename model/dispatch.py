@@ -87,19 +87,19 @@ class TrainDispatcher:
         # 1) 预约推进：若车头前方已预约的 block 数不足 MAX_AHEAD_BLOCKS 且更
         #    前方还有区间，尝试预约下一个受保护区间（全有或全无）。失败
         #    （被预约 or 被物理占用）则边界保持，列车停车等待。
-        held = self.block_manager.held_blocks(train)
-        frontier, blocks_ahead = self._walk_frontier(remaining_path, held)
+        held_edges = self.block_manager.held_edges(train)
+        frontier, blocks_ahead = self._walk_frontier(remaining_path, held_edges)
         if len(blocks_ahead) < MAX_AHEAD_BLOCKS and frontier < len(remaining_path):
             next_seg = self.block_manager.truncate_to_next_signal(
                 self.network, self.signals, remaining_path[frontier:],
             )
-            # 物理占用视同红灯：block 边集与其它车 occupied 有交集则不预约。
-            block_key = next_seg[0]
-            full_block = self.block_manager.block_edges(block_key)
-            if not (full_block & others_occupied):
+            # 物理占用视同红灯：只看列车实际要走的边（edge 交集），不展开到
+            # 整个 block——否则道岔无信号时 A/B 股道会因共享粗 block 互锁。
+            next_seg_eids = {eid for eid, _d in next_seg}
+            if not (next_seg_eids & others_occupied):
                 self.block_manager.reserve_path(train, [eid for eid, _d in next_seg])
-            held = self.block_manager.held_blocks(train)
-            frontier, blocks_ahead = self._walk_frontier(remaining_path, held)
+            held_edges = self.block_manager.held_edges(train)
+            frontier, blocks_ahead = self._walk_frontier(remaining_path, held_edges)
 
         red_ahead = frontier < len(remaining_path)
         raw_authority = self._distance_head_to_frontier(remaining_path, frontier, train)
@@ -130,33 +130,37 @@ class TrainDispatcher:
     # ------------------------------------------------------------------
 
     def _walk_frontier(
-        self, remaining_path: list[DirectedEdge], held_blocks: set[DirectedEdge],
+        self, remaining_path: list[DirectedEdge], held_edges: set[int],
     ) -> tuple[int, set[DirectedEdge]]:
         """沿 remaining_path 从车头向前走，返回 (授权边界边数, 车头前方已预约
         的 block key 集合)。
 
-        授权边界 = 能连续通过的最长前缀的边数：前缀里每条边要么属于某列车已
-        持有的 block，要么不属于任何 block（无保护路段）；遇到"属于某 block
-        但未被持有"的边即停（红灯边界）。
+        授权边界 = 能连续通过的最长前缀的边数：前缀里每条边要么被我预约
+        （edge 交集语义），要么不属于任何 block（无保护路段）；遇到"属于某
+        block 但未被预约"的边即停（红灯边界）。
 
-        blocks_ahead 只统计"车头前方"扫描到的已持有 block——车身横跨多个
-        block 时，车尾尚未驶离的 block 不在 remaining_path 里、不计入，因此
-        不会被它挤占"前方预约预算"（长列车绿灯前卡死 bug 的根因）。
+        blocks_ahead 只统计"车头前方"扫描到的、含已预约边的 block——车身横跨
+        多个 block 时，车尾尚未驶离的 block 不在 remaining_path 里、不计入，
+        因此不会被它挤占"前方预约预算"（长列车绿灯前卡死 bug 的根因）。
         """
-        held_edge_sets = {d: self.block_manager.block_edges(d) for d in held_blocks}
-        all_edge_sets = list(self.block_manager.all_blocks().values())
+        all_blocks = self.block_manager.all_blocks()  # block key -> edge set
+        block_by_edge: dict[int, list[DirectedEdge]] = {}
+        for key, edges in all_blocks.items():
+            for eid in edges:
+                block_by_edge.setdefault(eid, []).append(key)
+
         frontier = 0
         blocks_ahead: set[DirectedEdge] = set()
         for i, (eid, _d) in enumerate(remaining_path):
-            if not any(eid in bs for bs in all_edge_sets):
+            blocks_here = block_by_edge.get(eid, [])
+            if not blocks_here:
                 frontier = i + 1  # 无保护路段：天然可通行
                 continue
-            held_here = [d for d, bs in held_edge_sets.items() if eid in bs]
-            if held_here:
-                blocks_ahead.update(held_here)
+            if eid in held_edges:
+                blocks_ahead.update(blocks_here)
                 frontier = i + 1
             else:
-                break  # 属于某 block 但未被持有：红灯边界
+                break  # 属于某 block 但未被预约：红灯边界
         return frontier, blocks_ahead
 
     def _distance_head_to_frontier(

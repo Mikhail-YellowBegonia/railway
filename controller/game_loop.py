@@ -149,7 +149,9 @@ class GameLoop:
             # Step 3：每帧重算 block 划分；Step 4：释放已驶离的预约
             self.block_manager.rebuild(self.network, self.signals)
             self.block_manager.tick_reservations(self.trains)
-            signal_colors = self.block_manager.compute_colors(self.trains)
+            signal_colors = self.block_manager.compute_colors(
+                self.trains, self.network, self.signals,
+            )
 
             self.renderer.clear()
             self.renderer.draw_grid()

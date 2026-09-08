@@ -18,7 +18,7 @@ from model.occupancy import OccupancyState
 from model.train_entity import TrainEntity, TrainState
 from model.train_physics import SimplePhysics
 from model.signal import SignalTable
-from model.block import BlockManager
+from model.block import BlockManager, SignalState
 from model.dispatch import TrainDispatcher
 from model.pathfinding import find_path_from_point, _directed_from
 
@@ -210,5 +210,62 @@ for _ in range(60 * 240):
 assert reached4 and not stuck_holding, \
     "长列车（60m 横跨 3 个 20m block）绿灯下不得卡死——预约预算必须只数车头前方"
 print("✅ 长列车跨多个 block：绿灯连续通过不卡死")
+
+# =========================================================================
+# 场景 5：单线 2 线车站（会让线）——PBS edge 交集，不整块互斥（2026-09）
+# =========================================================================
+# 主线 → 道岔T1 →【A道(直线) / B道(绕行)】→ 道岔T2 → 主线。道岔处不放信号，
+# A道/B道 被并入同一个粗 block。老版简单闭塞（整块互斥）下，列车停在 B道
+# 避让时会让整个 block 红灯、卡死 A道出站的列车；PBS（edge 交集）下，B道
+# 与 A道 的 edge 集合交集为空，应准予放行、信号保持绿灯。
+net5 = RailNetwork()
+W5 = net5.add_node(Vec3(0.0, 0.0, 0.0))
+T1_5 = net5.add_node(Vec3(20.0, 0.0, 0.0))
+T2_5 = net5.add_node(Vec3(60.0, 0.0, 0.0))
+E5 = net5.add_node(Vec3(80.0, 0.0, 0.0))
+B5 = net5.add_node(Vec3(40.0, 10.0, 0.0))
+w_in5 = net5.add_edge(W5, T1_5)          # 西主线
+A5 = net5.add_edge(T1_5, T2_5)           # A道（直线）
+B1_5 = net5.add_edge(T1_5, B5)           # B道（绕行上段）
+B2_5 = net5.add_edge(B5, T2_5)           # B道（绕行下段）
+e_out5 = net5.add_edge(T2_5, E5)         # 东主线
+
+signals5 = SignalTable()
+s_in5 = _directed_from(net5, w_in5.edge_id, W5.node_id)
+signals5.place(s_in5)
+blocks5 = BlockManager()
+blocks5.rebuild(net5, signals5)
+assert {A5.edge_id, B1_5.edge_id, B2_5.edge_id} <= blocks5.block_edges(s_in5), \
+    "A道/B道 应因道岔无信号而被并入同一粗 block"
+
+# 避让列车停在 B道（占用 B道，无预约）
+train_b = make_train(net5, [(B1_5.edge_id, 1), (B2_5.edge_id, 1)])
+# 颜色：B道被占，但 A道仍是一条通路 → 进站信号应 GREEN（不再是整块红灯）
+assert blocks5.compute_colors([train_b], net5, signals5)[s_in5] is SignalState.GREEN, \
+    "B道被占时，A道仍为通路，进站信号应 GREEN（edge 交集，不整块互斥）"
+print("✅ 2 线车站：B道被占时进站信号保持 GREEN（A道通路未被误锁）")
+
+# 东行列车走 A道，应能穿过（预约 A道 的 edge 与 B道 占用交集为空）
+train_a = make_train(net5, [(w_in5.edge_id, 1)])
+train_a.assign_route([(A5.edge_id, 1), (e_out5.edge_id, 1)], 80.0,
+                     (e_out5.edge_id, 1.0, 1))
+disp5 = TrainDispatcher(net5, signals5, blocks5)
+trains5 = [train_a, train_b]
+reached5 = False
+stuck5 = False
+for _ in range(60 * 120):
+    for t in trains5:
+        disp5.tick(t, DT, V_TARGET, trains5)
+    blocks5.rebuild(net5, signals5)
+    blocks5.tick_reservations(trains5)
+    if train_a.is_holding():
+        stuck5 = True
+        break
+    if train_a.is_parked():
+        reached5 = True
+        break
+assert reached5 and not stuck5, \
+    "B道被占不应卡死 A道出站列车（PBS edge 交集语义）"
+print("✅ 2 线车站：A道列车在 B道被占时仍顺利通过")
 
 print("\n全部通过")

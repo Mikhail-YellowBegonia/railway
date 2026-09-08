@@ -210,9 +210,20 @@ OpenTTD Path Signal 调研笔记和分步实施状态。核心要点：
   整段区间。原始实现（只检查前方来向是否正对信号）和第一次修复尝试
   （检查边的任一方向）都被推翻过，详见 `docs/train_control.md`「Step 4
   检查点期间发现并修复的第二个 bug」的完整记录，改动前请先读。
-- **颜色完全自动化**（2026-09 起）：`SignalTable` 只记录放置位置,不存
-  颜色；颜色由 `model/block.py::BlockManager` 按闭塞占用实时推导，玩家
-  无法手动切换红绿。
+- **颜色完全自动化 + PBS 通路判定**（2026-09 起）：`SignalTable` 只记录
+  放置位置,不存颜色；颜色由 `model/block.py::BlockManager` 实时推导，玩家
+  无法手动切换红绿。判定不是"block 内有车就红"，而是 `_has_free_path`——
+  从信号出发沿 turn_allowed 走，只要存在一条 edge 全部既不被占用也不被
+  预约的路径走到下一个信号/死端就 GREEN，所有分支都堵死才 RED。
+- **占用判定 = edge 交集，不是完全互斥**（2026-09 用户澄清，务必先读）：
+  老版简单闭塞 = "block 内任何位置有车就整块红灯"（完全互斥，更安全、
+  现实在用）；PBS = "本车预约的 edge 集合与其它占用交集为空即可放行"
+  （edge 交集，更现代，本项目目标）。典型场景：单线 2 线车站
+  `主线-【A道/B道】-主线`，道岔无信号时 A/B 股道并入同一粗 block，完全
+  互斥会让停在 B道 避让的列车卡死 A道 出站。实现：`_reservations` 存
+  `dict[TrainEntity, set[int]]`（train → 预约的具体 edge_id），`reserve_path`
+  只查本车路径 edge 是否被他人预约、不再展开到整块；`compute_colors` 走
+  `_has_free_path` 判通路；调度层物理占用检查也只查本车实际要走的边。
 - 渲染用等边三角形，Layout 模式（见 `view/renderer.py` 顶部），屏幕像素
   基准，不随缩放变化。
 - **信号与网络编辑的耦合缺口**：`SignalTable` 存的 `DirectedEdge` 引用
@@ -221,13 +232,13 @@ OpenTTD Path Signal 调研笔记和分步实施状态。核心要点：
   引用，靠 `SignalTable.prune_missing(network)` 自我清理（`GameLoop.run()`
   每帧在 `block_manager.rebuild()` 之前调用一次），不侵入 `Editor` 的
   删除逻辑。
-- **进路预约**（Step 4，2026-09 起）：`BlockManager.reserve_path`——冲突
-  判定下沉到 edge_id 级别（不是 block/方向级别），天然覆盖单线双向对向
-  block 共享 edge 的场景（方向令牌，事前阻止而非事后死锁检测）。释放
-  条件是 `occupied ∪ route` 都不再涉及该 block（不是只看 occupied 快照，
-  避免刚下指令就误释放前方未走到的 block）。`tick_reservations` 只信任
-  当前 `trains` 列表，解挂/连挂产生的旧 `TrainEntity` 一旦被移出该列表，
-  其预约立即清理。
+- **进路预约**（Step 4 起，Step 6 改 edge 交集）：`BlockManager.reserve_path`
+  只检查本车 `path_edge_ids` 是否被别的车预约（edge 交集）；单线双向对向
+  block 共享 edge 的场景天然被同一套 edge 级冲突拦下（方向令牌，事前阻止
+  而非事后死锁检测）。释放条件按 edge 判断 `e ∈ (occupied ∪ route)`（不是
+  只看 occupied 快照，避免刚下指令就误释放前方未走到的 edge）。
+  `tick_reservations` 只信任当前 `trains` 列表，解挂/连挂产生的旧
+  `TrainEntity` 一旦被移出该列表，其预约立即清理。
 - **远场/近场寻路拆分**（Step 5，2026-09 起，见 `docs/train_control.md`
   「Step 5」完整记录）：`find_path_from_point`（唯一跑 Dijkstra 的地方）
   只用 `SignalTable.passable_topology_only`（拓扑 + One-Way PBS 反方向
