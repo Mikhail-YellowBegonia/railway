@@ -159,6 +159,19 @@ on load — round-trip is bit-stable for arc geometry within 1e-4.
   重建（与豁免前置条件语义等价）；`couple_approach_partner` 由续行/重寻路重建。
 - 容错：单列车反查失败静默跳过（与 signals 逐条容错一致）。
 
+## 已知限制：调车/倒车（2026-09 #1 验收反馈记录）
+
+连挂/解挂已完成，但编组作业局限在"前进对接 + 原方向驶离"——**无物理倒车**
+（`advance_occupied_path` 只沿 route 正向推进，没有负向推进原语）且**无玩家手动
+掉头入口**（键盘没有折返键；折返只在寻路含折返边到端点、或 `_apply_route_result`
+首边不匹配时自动发生）。因此 AB 顺序相连解挂后，A 在 B 前方想"倒出去"（沿
+反方向退回）时，玩家没有掉头键让 A 先转向，只能沿原方向寻路——若前方是 B 等
+列车，无碰撞模型下表现为视觉穿过（非碰撞）。`reverse_in_place` 本身在环线/直线
+中段**也能**掉头（内部 `truncate_to_segment` 截断），只是玩家无法主动触发。
+**这是预期内结果非 bug**（几乎所有铁路游戏都简化或回避调车）。详细认知记录在
+`docs/roadmap.md`「已知限制与未来方向」；将来做真实调车需先补"负向推进（倒车）
+原语"或"玩家手动掉头入口"。
+
 ## Input reference
 
 | Key / mouse | Mode | Action |
