@@ -642,13 +642,10 @@ class GameLoop:
         if not target_train.is_parked():
             print("PLAY: 对方列车未停车，无法连挂")
             return
-        # 朝向预检：同向才能配对（reverse 后同向也行——但此处只处理简单情形）
-        from controller.coupling import end_coupler_pos, _train_heading
-        a_h = _train_heading(front)
-        b_h = _train_heading(target_train)
-        if a_h is None or b_h is None or a_h.dot(b_h) < 0.9:
-            print("PLAY: 无法连挂（两车朝向不一致，需先让目标折返或换向）")
-            return
+        # 不再做"两车整车朝向"预检——可达性交给 find_path_from_point（它支持
+        # 折返 allow_reversal=True）。旧预检用首节车厢 heading 点积 >0.9 粗判
+        # "同向"，在 90° 弧上会误杀同向但相距较远的合法连挂（2026-09 实测，
+        # 见 docs/consist_ui.md §5.1 / coupling.end_heading）。
 
         # 驶向目标限定为对方车尾：焦点列车车头同向行驶只能从后方接近并挂上
         # 对方车尾（A.head ↔ B.tail）。悬停的是对方车头端时提示改悬停车尾端
@@ -657,6 +654,7 @@ class GameLoop:
             print(f"PLAY: 请悬停列车 #{self.trains.index(target_train)+1} 的"
                   f"车尾端头（本车需从后方接近）")
             return
+        from controller.coupling import end_coupler_pos
         _edge_id, _t = end_coupler_pos(target_train, "tail")[1:]
         # stop_before = 本车车钩与头转向架的间距：停车点是头转向架，但连挂要让
         # **车钩** 停在对方尾钩处，须提前该距离停车（_apply_route_result 说明）。

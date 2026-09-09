@@ -487,6 +487,20 @@ tick 一次：
    hard_stop()` 强制速度归零并打印可见警告——牺牲物理连续性保住"不闯红灯"。
    正常运行时边界始终在车头前方，此路径不会被触发。
 
+**hard_stop 误判修复（2026-09，roadmap #1 验收反馈"信号死锁依然存在"）**：
+授权边界落到车头之后（`raw_authority < 0`）有**两种成因**，旧实现一概
+`hard_stop`（清空 route/goal），把正常场景误判成"闯红灯"：
+- (a) 列车**行驶中**越过安全制动点（删/并信号导致 block 重划）→ 这才是
+  hard_stop 本义，必须清指令 + 可见警告。
+- (b) 列车**静止起步**时前方受保护区间被别的车占用 → 预约失败、`_walk_frontier`
+  停在车头脚下第一条边（frontier=0），`raw_authority` 变负。旧实现把它
+  hard_stop → 清空 route **丢指令**，玩家重新下令又再丢——表现成"信号死锁"
+  （实测：对向两车同时起步，双车 hard_stop 锁死）。
+修复：`dispatch.tick` 按 `v` 区分——`v > STOP_EPSILON` 才 hard_stop；静止则
+`hold_at_signal()` 进入 holding（保留 route/goal，绿灯后续行）。新增
+`TrainEntity.hold_at_signal()`（公开，语义同原私有 `_hold_at_signal`）。
+回归 `tests/test_dispatch.py` 场景 6（对向起步 holding + 绿灯续行）。
+
 **行为语义变化（相对 Step 4）**：下达指令时不再"预约第一区间 + 失败直接
 拒绝"，改为"远场寻路判可达性 → 直接下达完整 route"，预约/等待完全交给
 `TrainDispatcher`。红灯不再是"指令被拒绝"，而是"接受指令、开到信号前停车

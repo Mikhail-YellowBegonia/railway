@@ -108,10 +108,28 @@ class TrainDispatcher:
         if red_ahead:
             raw_authority -= SIGNAL_STOP_MARGIN
 
-        # 2) hard_stop 兜底：授权边界已落到车头之后（网络编辑/信号放置导致
-        #    的异常），减速曲线已来不及，强制停车保住"不闯红灯"。
-        if raw_authority < -HARD_STOP_EPS and train.is_moving():
-            train.hard_stop()
+        # 2) hard_stop 兜底 vs 信号前等待的区分（2026-09 修复，重要）：
+        #    授权边界落到车头之后（raw_authority < 0）有两种成因，不能一概
+        #    hard_stop：
+        #    (a) 列车**正在行驶**却已越过安全制动点（运行中删/并挂信号的边、
+        #        或运行中放新信号导致 block 重划，减速曲线来不及）——这才是
+        #        hard_stop 的本义（JGRPP realistic braking 的"无法安全制动"），
+        #        必须清空指令、可见警告。
+        #    (b) 列车**静止起步**时，前方受保护区间被别的车占用 → 预约失败、
+        #        frontier 停在车头脚下第一条边，raw_authority 变负。这不该
+        #        hard_stop（车没闯红灯，只是暂时等绿灯），否则会**清空 route
+        #        丢指令**，玩家重新下令又再丢——表现成"信号死锁"（2026-09
+        #        复杂场景实测：对向两车同时起步，双车 hard_stop 锁死）。
+        #        正确处理是进入 holding（保留 route/goal，绿灯后续行）。
+        #    判据：v 是否显著 > 0。起步时 v==0；闯红灯时 v>0。
+        if raw_authority < -HARD_STOP_EPS:
+            if train.is_moving() and train.state.v > BrakingController.STOP_EPSILON:
+                train.hard_stop()
+                return
+            # 静止（起步预约失败）→ 保留指令停车等待（等绿灯，由下方状态转移续行）
+            if train.is_moving():
+                train.hold_at_signal()
+            train.authority_remaining = 0.0
             return
 
         authority = max(0.0, raw_authority)

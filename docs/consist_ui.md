@@ -148,12 +148,25 @@ HOVER_COUPLE（悬停其它列车端头车钩）:
 设 A = 焦点列车，B = 悬停端头所属列车，命中端头为 b_end ∈ {head, tail}。
 计算 A 的哪个端头（a_end ∈ {head, tail}）可与 b_end 配对：
 - 物理配对只允许**反向端**贴一起的几何：A 车尾钩 ↔ B 车头钩，或 A 车头钩 ↔ B
-  车尾钩（车头对车头 / 车尾对车尾在现实里是两个反向朝向列车的**同向**排列问题，
-  demo 阶段一律拒绝——现有 `HEADING_DOT>0.9` 已隐含此约束，交互层显式化）。
+  车尾钩（车头对车头 / 车尾对车尾由"只枚举反向端组合"天然排除，不做额外朝向
+  判定——见下方"朝向判据修订"）。
 - 距离与朝向实时量测：
   - `dist = |a_end.pos - b_end.pos|`
-  - `aligned = heading(A) · heading(B) > 0.9`
+  - `aligned`：**接触端各自的切线方向**一致——A尾↔B头 用 A末节·B首节 heading，
+    A头↔B尾 用 A首节·B末节 heading（`coupling.end_heading` 按端取首/末节车厢
+    朝向）。点积 > 0.9。
   - `both_parked = A.is_parked() and B.is_parked()`
+
+**朝向判据修订（2026-09，重要，勿回退）**：早期用"两车首节车厢 heading 点积
+>0.9"判"同向"，在 `manual_track` 90° 弧（edge 29，半径 170m）上实测误杀——两列
+同向停在弧上、相距约 87m、寻路可达，但首节朝向随弧角分叉（点积 0.863<0.9），
+`_couple_to_hovered` 的"驶向分支"整车朝向预检先报"无法连挂（朝向不一致）"拒绝。
+修复两层：
+1. 朝向判据改按**接触端**取各自端头 heading（`end_heading`：head→首节、tail→
+   末节），已贴住（<1m）时两端头位置几乎重合、切线天然一致，不误杀；反向重叠
+   时接触端切线相反，仍正确拒绝。
+2. 删除 `_couple_to_hovered` 驶向分支的整车朝向预检——可达性交给
+   `find_path_from_point`（支持折返 allow_reversal=True）。
 
 ### 5.2 三种情形与动作
 | 情形 | 判定 | 动作 |

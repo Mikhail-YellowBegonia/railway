@@ -268,4 +268,63 @@ assert reached5 and not stuck5, \
     "B道被占不应卡死 A道出站列车（PBS edge 交集语义）"
 print("✅ 2 线车站：A道列车在 B道被占时仍顺利通过")
 
+# =========================================================================
+# 场景 6：对向起步预约失败 → holding 保留指令，不 hard_stop 丢指令（2026-09）
+# =========================================================================
+# 单线 X--e0--Y--e1--Z--e2--W，X 端信号(朝+1) 与 W 端信号(朝-1) 保护中间区间。
+# 两车对向、各自车头停在无保护首段内、同时起步驶向对方：第一帧预约失败时，
+# frontier 停在车头脚下（frontier=0），旧实现因 raw_authority<0 触发 hard_stop
+# 清空 route —— 玩家重新下令又再丢，表现为"信号死锁"。修复后应进入 holding
+# 且保留 route/goal（绿灯后续行）。
+net6 = RailNetwork()
+X6 = net6.add_node(Vec3(0, 0, 0)); Y6 = net6.add_node(Vec3(40, 0, 0))
+Z6 = net6.add_node(Vec3(80, 0, 0)); W6 = net6.add_node(Vec3(120, 0, 0))
+e6a = net6.add_edge(X6, Y6); e6b = net6.add_edge(Y6, Z6); e6c = net6.add_edge(Z6, W6)
+sig6 = SignalTable()
+sig6.place(_directed_from(net6, e6a.edge_id, X6.node_id))  # X 朝 +1
+sig6.place(_directed_from(net6, e6c.edge_id, W6.node_id))  # W 朝 -1
+blk6 = BlockManager(); blk6.rebuild(net6, sig6)
+disp6 = TrainDispatcher(net6, sig6, blk6)
+# A 停在 e6a 内（头 x=20，朝 +x），B 停在 e6c 内（头 x=100，朝 -x）
+tA6 = make_train(net6, [(e6a.edge_id, 1)], consist_length=20.0)
+tA6.state.occupancy.s = 20.0
+tA6.kinematics = tA6._build_kinematics()
+tB6 = make_train(net6, [(e6c.edge_id, -1)], consist_length=20.0)
+tB6.state.occupancy.s = 20.0
+tB6.kinematics = tB6._build_kinematics()
+trains6 = [tA6, tB6]
+# 各自对向下令
+_se, _st = tA6.current_edge_and_t(); _sd = tA6.current_direction()
+r6 = find_path_from_point(net6, _se, _st, _sd, e6c.edge_id, 0.0, 1, debug=False)
+p6, so6, eo6 = r6
+tA6.assign_route(p6.edges[1:], max(0.0, p6.total_cost - so6 - eo6), (e6c.edge_id, 0.0, 1))
+_se, _st = tB6.current_edge_and_t(); _sd = tB6.current_direction()
+r6b = find_path_from_point(net6, _se, _st, _sd, e6a.edge_id, 1.0, -1, debug=False)
+p6b, so6b, eo6b = r6b
+tB6.assign_route(p6b.edges[1:], max(0.0, p6b.total_cost - so6b - eo6b), (e6a.edge_id, 1.0, -1))
+for _ in range(3):
+    disp6.tick(tA6, DT, V_TARGET, trains6)
+    disp6.tick(tB6, DT, V_TARGET, trains6)
+    blk6.tick_reservations(trains6)
+# 起步预约失败：两车都应进入 holding 且保留 route（而非 hard_stop 清空）
+assert tA6.is_holding() and tB6.is_holding(), \
+    f"对向起步应进入 holding 等待，而非丢指令（A.hold={tA6.is_holding()} B.hold={tB6.is_holding()}）"
+assert len(tA6.state.occupancy.route) > 0 and len(tB6.state.occupancy.route) > 0, \
+    "holding 必须保留 route/goal（绿灯后续行），不得 hard_stop 清空"
+print("✅ 对向起步：预约失败进入 holding 保留指令，不再 hard_stop 丢指令锁死")
+
+# 绿灯续行：B 从 trains 移除（模拟驶离消失），A 应能续约并驶出
+trains6.remove(tB6)
+blk6.tick_reservations(trains6)
+reached6 = False
+for _ in range(60 * 60):
+    disp6.tick(tA6, DT, V_TARGET, trains6)
+    blk6.rebuild(net6, sig6)
+    blk6.tick_reservations(trains6)
+    if tA6.is_parked():
+        reached6 = True
+        break
+assert reached6, "绿灯后 A 应续行到终点（holding 语义：保留指令可恢复）"
+print("✅ 对向起步绿灯续行：B 让开后 A 从 holding 恢复并到达")
+
 print("\n全部通过")

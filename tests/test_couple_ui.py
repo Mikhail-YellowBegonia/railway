@@ -488,5 +488,46 @@ for _ in range(60 * 60):
 assert tC3.is_holding(), "非豁免列车驶向被占区间必须仍被信号拦截"
 print("✅ 安全网：豁免配对专属，第三方列车仍被信号拦截（不退化成无视红灯）")
 
+# 4d. 弧上同向连挂（问题 2 回归，2026-09）：90° 弧上两列同向、相距较远，
+#     _couple_to_hovered 的旧整车朝向预检会用"首节车厢 heading"点积 >0.9 误杀
+#     （点积 0.863），修复后已删除该预检、try_couple_to 改用接触端切线
+#     （end_heading）。这里断言：接触端切线判据在弧上贴住时仍可连、反向重叠
+#     仍被拒。
+from model.geojson_loader import load_geojson
+from controller.coupling import end_heading, end_coupler_pos
+net_arc = load_geojson("manual_track.geojson")
+
+
+def _mk_arc(head_s, lens):
+    total = sum(lens)
+    off = max(0.0, head_s - total)
+    wagons = [create_simple_wagon(length=l, mass=30.0,
+                                  P_rated=1000.0 if i == 0 else None)
+              for i, l in enumerate(lens)]
+    occ = OccupancyState(occupied=[(29, 1)], occupied_offset=off,
+                         s=head_s - off, route=[])
+    t = TrainEntity(TrainState(occupancy=occ, remaining_to_goal=0.0, v=0.0,
+                               consist=Consist(wagons=wagons)), net_arc,
+                    RealisticElectric())
+    t.kinematics = t._build_kinematics()
+    return t
+
+
+# 已贴住（head=160 vs 120，端头 <1m）：接触端切线一致，应可连
+_tB = _mk_arc(160.0, [20.0, 20.0])
+_tA = _mk_arc(120.0, [20.0])
+_m = try_couple_to(_tA, _tB, "tail")
+assert _m is not None, "弧上同向已贴住应可连挂（接触端切线判据）"
+print("✅ 弧上同向已贴住：接触端切线判据正确放行")
+
+# 相距较远（head=180 vs 90，未贴住）：try_couple_to 应返回 None 走驶向分支，
+# 但接触端切线 dot 不再是拒绝依据（旧首节 dot=0.863<0.9 会误杀）
+_tB2 = _mk_arc(180.0, [20.0])
+_tA2 = _mk_arc(90.0, [20.0])
+_dot_first = end_heading(_tA2, "head").dot(end_heading(_tB2, "head"))
+assert _dot_first < 0.9, "测试前置：旧首节判据在此场景必然误杀"
+assert try_couple_to(_tA2, _tB2, "tail") is None, "未贴住应返回 None 走驶向分支"
+print(f"✅ 弧上同向相距远（旧首节 dot={_dot_first:.3f}<0.9）：不再误判朝向，交寻路")
+
 print("\n✅ 全部连挂/解挂交互 + 信号豁免回归通过")
 print("\n✅ 全部连挂/解挂交互回归通过")

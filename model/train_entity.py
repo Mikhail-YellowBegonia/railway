@@ -172,16 +172,24 @@ class TrainEntity:
         self.state.remaining_to_goal = 0.0
         self.authority_remaining = None
 
-    def _hold_at_signal(self) -> None:
+    def hold_at_signal(self) -> None:
         """在授权边界（信号红灯）前停车等待：保留 route/goal/remaining_to_goal，
         只停住（controller=None）。等待调度层续约成功后 resume() 恢复行驶。
 
         与 emergency_stop 的区别：后者清空 route/goal（彻底放弃指令），
         这里保留（绿灯后要继续走）。
+
+        公开版本供 dispatch 层调用（起步预约失败时进入 holding，而非
+        hard_stop 丢指令，见 model/dispatch.py tick 的注释）；内部
+        update() 里"行驶到授权边界停车"走的 _hold_at_signal 与本方法等价。
         """
         self.state.v = 0.0
         self.last_a = 0.0
         self.controller = None
+
+    def _hold_at_signal(self) -> None:
+        """内部等价入口（update() 到达授权边界时用），语义同 hold_at_signal。"""
+        self.hold_at_signal()
 
     def resume(self) -> None:
         """从信号前等待恢复行驶：保留 route/goal，仅重建控制器。
