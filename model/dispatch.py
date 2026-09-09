@@ -77,10 +77,12 @@ class TrainDispatcher:
 
         others_occupied: set[int] = set()
         if trains is not None:
-            others_occupied = {
-                eid for other in trains if other is not train
-                for eid, _d in other.state.occupancy.occupied
-            }
+            for other in trains:
+                if other is train:
+                    continue
+                if self._consist_maneuver_exempt(train, other):
+                    continue  # 编组作业豁免，见 _consist_maneuver_exempt
+                others_occupied |= {eid for eid, _d in other.state.occupancy.occupied}
 
         remaining_path = [train.head_directed_edge()] + list(train.state.occupancy.route)
 
@@ -124,6 +126,39 @@ class TrainDispatcher:
         # 4) 写入授权并推进物理。
         train.authority_remaining = authority
         train.update(dt, v_target)
+
+    # ------------------------------------------------------------------
+    # 编组作业信号豁免（docs/consist_ui.md §5.5）
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _consist_maneuver_exempt(train: TrainEntity, other: TrainEntity) -> bool:
+        """判定 other 是否应被 train 的物理占用检查豁免（编组作业配对列车）。
+
+        **这是本系统里唯一被编组作业绕开的信号检查**，语义与边界如下：
+
+        1. `train.couple_approach_partner is other`：train 正驶向 other 的端头
+           车钩（连挂驶向）。此时 train 在保护区外、other 占着目标区间，两者
+           通常不共享 occupied 边；豁免让 train 能预约进入 other 占用的区间，
+           授权边界仍 clamp 在车钩处（§5.2 的 stop_before / update 的
+           min(remaining, authority) 保证车头不压线）。
+
+        2. `train.split_sibling is other`（且两者仍共享至少一条 occupied 边）：
+           解挂后的前/后段。豁免仅在两者**仍共享边**时生效——两段驶离到不再
+           重叠后自动失效，无需显式清除；这是"解挂后前段驶离不被后段占的
+           共享边卡住"的关键。
+
+        不被绕开的：`reserve_path`（预约表冲突）、`compute_colors`（信号灯仍
+        红，视觉即"冒进"）、`_walk_frontier`/授权边界计算。豁免只作用于
+        tick() 里 others_occupied 这一处。
+        """
+        if train.couple_approach_partner is other:
+            return True
+        if train.split_sibling is other:
+            a_edges = {eid for eid, _d in train.state.occupancy.occupied}
+            b_edges = {eid for eid, _d in other.state.occupancy.occupied}
+            return bool(a_edges & b_edges)
+        return False
 
     # ------------------------------------------------------------------
     # 授权几何

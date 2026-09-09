@@ -664,6 +664,10 @@ class GameLoop:
         self._issue_goal_order(front, _edge_id, _t,
                                f"连挂 #{self.trains.index(target_train)+1} 车尾",
                                stop_before_m=head_hook_offset(front))
+        # 信号豁免（docs/consist_ui.md §5.5）：驶向连挂目标时，调度层对本车
+        # 豁免 target 的物理占用，允许冒进目标所在受保护区间；授权边界仍
+        # clamp 在车钩处。
+        front.couple_approach_partner = target_train
         print(f"PLAY: 已下达驶向 #{self.trains.index(target_train)+1} "
               f"车尾指令，到位后自动连挂")
 
@@ -969,6 +973,7 @@ class GameLoop:
         # Couple-2：检查是否吸附到其他列车端头车钩
         COUPLE_SNAP = 5.0
         snapped_goal: tuple[int, float] | None = None
+        snapped_target = None  # 被吸附端头车钩所属的列车（连挂豁免用，§5.5）
         for other in self.trains:
             if other is self.active_train:
                 continue
@@ -976,6 +981,7 @@ class GameLoop:
             for cp_pos, cp_edge_id, cp_t in (head_data, tail_data):
                 if (cp_pos - world_pos).length() < COUPLE_SNAP:
                     snapped_goal = (cp_edge_id, cp_t)
+                    snapped_target = other
                     print(f"PLAY: 吸附到列车 #{self.trains.index(other)+1} 车钩 "
                           f"(edge {cp_edge_id} t={cp_t:.2f})，到位后自动连挂")
                     break
@@ -993,6 +999,9 @@ class GameLoop:
             self._issue_goal_order(train, goal_edge_id, goal_t,
                                    f"edge {goal_edge_id} t={goal_t:.2f}",
                                    stop_before_m=stop_before)
+            # 信号豁免：右键吸附车钩同样是"驶向连挂目标"（§5.5）
+            if snapped_target is not None:
+                train.couple_approach_partner = snapped_target
             return
 
         node_id = self._snap_node_at(world_pos)

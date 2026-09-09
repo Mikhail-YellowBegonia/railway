@@ -9,6 +9,8 @@
    - 手动连挂：悬停其它列车端头 + K（已贴住）→ 立即 couple；
    - 自动连挂：右键/指令驶向对方车尾，停车事件帧自动 couple；
    - 拒绝：行驶中不可解挂、自己端头不连挂、朝向不符不连挂、左键不触发解挂。
+4. 信号豁免（docs/consist_ui.md §5.5）：有信号保护区间内，连挂驶向能冒进
+   目标占用的受保护区间；解挂分离后前段驶离不被后段占的共享边卡住。
 
 运行：PYTHONPATH=. .venv/bin/python tests/test_couple_ui.py
 """
@@ -368,4 +370,123 @@ print("✅ 回归：普通右键寻路不挨车钩停车 → 不自动连挂")
 
 gl.running = False
 pygame.quit()
+
+# =========================================================================
+# 4. 信号豁免（docs/consist_ui.md §5.5，2026-09）
+#    有信号保护区间内：连挂驶向冒进 / 解挂分离驶离，不被物理占用检查卡住。
+#    直接驱动 TrainDispatcher（无需 GameLoop），精确断言授权与到达位置。
+# =========================================================================
+print("\n--- 信号豁免 ---")
+from model.signal import SignalTable
+from model.block import BlockManager
+from model.dispatch import TrainDispatcher
+from model.pathfinding import find_path_from_point
+from controller.coupling import head_hook_offset
+
+
+def _mk(net, edges, lens, s):
+    wagons = [create_simple_wagon(length=l, mass=30.0,
+                                  P_rated=1000.0 if i == 0 else None)
+              for i, l in enumerate(lens)]
+    occ = OccupancyState(occupied=edges, occupied_offset=0.0, s=s, route=[])
+    t = TrainEntity(TrainState(occupancy=occ, remaining_to_goal=0.0, v=0.0,
+                               consist=Consist(wagons=wagons)), net, RealisticElectric())
+    t.kinematics = t._build_kinematics()
+    return t
+
+
+def _head_x(t):
+    return t.kinematics._path_kin.pose_at(t.state.abs_s).position.x
+
+
+def _run_until_settle(t, trains, dp, bm, max_sec=120):
+    for _ in range(60 * max_sec):
+        dp.tick(t, DT, t.v_target, trains)
+        bm.tick_reservations(trains)
+        if t.is_parked() or t.is_holding():
+            return
+    raise AssertionError(f"列车未在 {max_sec}s 内收敛")
+
+# 4a. 连挂驶向冒进：A(保护区外) 驶向 B 尾钩（B 占着受保护区间），couple_approach
+#     _partner 豁免后应能到达车钩前停车（不触发 hard_stop / 不在信号前等待）。
+net_sig = RailNetwork()
+n0 = net_sig.add_node(Vec3(0, 0, 0)); n1 = net_sig.add_node(Vec3(40, 0, 0))
+n2 = net_sig.add_node(Vec3(200, 0, 0))
+e0 = net_sig.add_edge(n0, n1); e1 = net_sig.add_edge(n1, n2)
+sig = SignalTable(); sig.place(_directed_from(net_sig, e1.edge_id, n1.node_id))
+bm_sig = BlockManager(); bm_sig.rebuild(net_sig, sig)
+dp_sig = TrainDispatcher(net_sig, sig, bm_sig)
+
+tB = _mk(net_sig, [(e1.edge_id, 1)], [20.0, 18.0], 60.0)   # B 尾钩 x≈64.5
+tA = _mk(net_sig, [(e0.edge_id, 1)], [20.0], 20.0)          # A 头 x=20
+trains_sig = [tA, tB]
+tail = tB.kinematics.get_end_coupler_data(tB.state.s)[1]
+se, st = tA.current_edge_and_t(); sd = tA.current_direction()
+res = find_path_from_point(net_sig, se, st, sd, tail[1], tail[2], 1)
+p, so, eo = res
+tA.assign_route(p.edges[1:], max(0.0, p.total_cost - so - eo - head_hook_offset(tA)),
+                (tail[1], tail[2], 1))
+tA.couple_approach_partner = tB   # 连挂豁免
+tA.v_target = 10.0
+_run_until_settle(tA, trains_sig, dp_sig, bm_sig)
+assert tA.is_parked(), "连挂驶向应能到达目标停车，而非在信号前等待"
+# 车钩对齐：A 车头**车钩**应贴住 B 尾钩（转向架在尾钩前 head_offset≈2.5m，
+# 这是 stop_before 的设计意图——停车点是转向架，不是车钩）。
+a_head_hook = tA.kinematics.get_end_coupler_data(tA.state.s)[0][0]
+gap = (a_head_hook - tail[0]).length()
+assert gap < 1.0, f"A 车头车钩应贴住 B 尾钩，实际相距 {gap:.2f}m"
+print(f"✅ 信号豁免·连挂驶向冒进：A 驶入被占区间，车钩距 B 尾钩 {gap:.2f}m")
+
+# 4b. 解挂分离驶离：三节车停受保护区间，decouple 后前段 F 向前驶离到终点，
+#     split_sibling 豁免后段共享边的占用，不应 hard_stop 锁死。
+net_sig2 = RailNetwork()
+m0 = net_sig2.add_node(Vec3(0, 0, 0)); m1 = net_sig2.add_node(Vec3(40, 0, 0))
+m2 = net_sig2.add_node(Vec3(140, 0, 0))
+f0 = net_sig2.add_edge(m0, m1); f1 = net_sig2.add_edge(m1, m2)
+sig2 = SignalTable(); sig2.place(_directed_from(net_sig2, f1.edge_id, m1.node_id))
+bm_sig2 = BlockManager(); bm_sig2.rebuild(net_sig2, sig2)
+dp_sig2 = TrainDispatcher(net_sig2, sig2, bm_sig2)
+
+T = _mk(net_sig2, [(f1.edge_id, 1)], [20.0, 18.0, 22.0], 60.0)  # 三节, head x=100
+F, R = T.decouple_at(0)   # decouple_at 自动设 split_sibling 互指
+assert F.split_sibling is R and R.split_sibling is F, "解挂后应互设 split_sibling"
+trains_sig2 = [F, R]
+se, st = F.current_edge_and_t(); sd = F.current_direction()
+res = find_path_from_point(net_sig2, se, st, sd, f1.edge_id, 1.0, 1)
+p, so, eo = res
+F.assign_route(p.edges[1:], max(0.0, p.total_cost - so - eo), (f1.edge_id, 1.0, 1))
+F.v_target = 10.0
+_run_until_settle(F, trains_sig2, dp_sig2, bm_sig2)
+assert F.is_parked(), "解挂后前段应能驶离到终点，而非被后段占用锁死"
+assert _head_x(F) > 139.0, f"前段应到达终点 x=140，实际 {_head_x(F):.1f}"
+print("✅ 信号豁免·解挂分离驶离：前段驶离受保护区间，未被后段共享边卡住")
+
+# 4c. 安全网：豁免是"配对专属"，非豁免列车驶向被占用的受保护区间仍应被
+#     信号拦截（在信号前等待），不得借豁免绕行——这是维护要点，防止豁免
+#     退化成全局"无视红灯"。
+net_sig3 = RailNetwork()
+p0 = net_sig3.add_node(Vec3(0, 0, 0)); p1 = net_sig3.add_node(Vec3(40, 0, 0))
+p2 = net_sig3.add_node(Vec3(200, 0, 0))
+g0 = net_sig3.add_edge(p0, p1); g1 = net_sig3.add_edge(p1, p2)
+sig3 = SignalTable(); sig3.place(_directed_from(net_sig3, g1.edge_id, p1.node_id))
+bm_sig3 = BlockManager(); bm_sig3.rebuild(net_sig3, sig3)
+dp_sig3 = TrainDispatcher(net_sig3, sig3, bm_sig3)
+tB3 = _mk(net_sig3, [(g1.edge_id, 1)], [20.0, 18.0], 60.0)  # 占 e1
+tC3 = _mk(net_sig3, [(g0.edge_id, 1)], [20.0], 20.0)          # 无任何豁免
+trains_sig3 = [tB3, tC3]
+tail3 = tB3.kinematics.get_end_coupler_data(tB3.state.s)[1]
+se, st = tC3.current_edge_and_t(); sd = tC3.current_direction()
+res = find_path_from_point(net_sig3, se, st, sd, tail3[1], tail3[2], 1)
+p, so, eo = res
+tC3.assign_route(p.edges[1:], max(0.0, p.total_cost - so - eo), (tail3[1], tail3[2], 1))
+tC3.v_target = 10.0
+for _ in range(60 * 60):
+    dp_sig3.tick(tC3, DT, tC3.v_target, trains_sig3)
+    bm_sig3.tick_reservations(trains_sig3)
+    if tC3.is_holding():
+        break
+assert tC3.is_holding(), "非豁免列车驶向被占区间必须仍被信号拦截"
+print("✅ 安全网：豁免配对专属，第三方列车仍被信号拦截（不退化成无视红灯）")
+
+print("\n✅ 全部连挂/解挂交互 + 信号豁免回归通过")
 print("\n✅ 全部连挂/解挂交互回归通过")

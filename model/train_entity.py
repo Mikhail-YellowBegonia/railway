@@ -86,6 +86,16 @@ class TrainEntity:
         # update() 只读不递减。
         self.authority_remaining: float | None = None
 
+        # 编组作业信号豁免（docs/consist_ui.md §5.5，2026-09）：连挂驶向/解挂
+        # 分离时，本车与"配对列车"之间的物理占用检查需要放开——见
+        # model/dispatch.py::TrainDispatcher.tick 里 others_occupied 的豁免。
+        # - couple_approach_partner：本车正驶向该列车的端头车钩（A 在保护区外、
+        #   B 占着目标区间，两者不共享边）。指令结束清除。
+        # - split_sibling：本车是该列车的解挂前/后段（共享至少一条 occupied 边）。
+        #   豁免是否生效由 dispatch 每帧按"是否仍共享边"动态判定，无需手动清除。
+        self.couple_approach_partner: "TrainEntity | None" = None
+        self.split_sibling: "TrainEntity | None" = None
+
         self.kinematics = self._build_kinematics()
 
     def _build_kinematics(self) -> RigidWagonKinematics:
@@ -117,6 +127,9 @@ class TrainEntity:
         self.state.remaining_to_goal = remaining_to_goal
         self.state.goal = goal
         self.authority_remaining = None  # 新指令的授权由调度层下一帧重算
+        # 任何新指令都先清掉上一个连挂豁免伙伴（docs/consist_ui.md §5.5）；
+        # 连挂驶向的调用方会在 assign_route 之后重新写入 target。
+        self.couple_approach_partner = None
         self.controller = BrakingController(self.physics, self.state.consist)
         self.controller.reset()
 
@@ -429,6 +442,12 @@ class TrainEntity:
             occupancy=rear_occ, remaining_to_goal=0.0, v=0.0, consist=rear_consist,
         )
         rear_entity = TrainEntity(rear_state, self.network, self.physics)
+
+        # 解挂分离信号豁免（docs/consist_ui.md §5.5）：front/rear 互指
+        # split_sibling，dispatch 在两者仍共享 occupied 边时豁免彼此占用，
+        # 前段驶离不会被后段占的共享边卡住。
+        front_entity.split_sibling = rear_entity
+        rear_entity.split_sibling = front_entity
 
         return front_entity, rear_entity
 

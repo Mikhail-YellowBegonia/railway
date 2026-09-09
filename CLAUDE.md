@@ -276,6 +276,17 @@ OpenTTD Path Signal 调研笔记和分步实施状态。核心要点：
   只看预约表的缺口）。红灯语义从 Step 4 的"下达时拒绝指令"改为"接受指令、
   信号前等待、绿灯续行"。顺带修复 `find_path_from_point` `start_offset` 未
   考虑 `direction=-1` 的 bug（逆向起点 remaining 算成 0）。
+- **编组作业信号豁免**（roadmap #1 追加，2026-09 起，见 `docs/consist_ui.md`
+  §5.5）：连挂驶向 / 解挂后分离驶离，都是"列车要开进/开出被另一列车占用的
+  受保护闭塞区间"，必须冒进信号。**本仓库无碰撞判定**，所以不需要 OpenTTD
+  fork 的"旁路撞车 + 重定义连挂"——只在 `TrainDispatcher.tick` 构造
+  `others_occupied` 时排除两个**配对专属**豁免：`train.couple_approach_partner`
+  （驶向某列车端头车钩的连挂指令）与共享至少一条 occupied 边的
+  `train.split_sibling`（解挂出的前/后段）。**被绕开的只有这一处物理占用检查**；
+  `reserve_path`（预约表冲突）、`compute_colors`（红灯）、`_walk_frontier`/
+  授权边界计算都**不绕开**，授权仍 clamp 在车钩处（stop_before + `update` 的
+  `min(remaining, authority)`）。豁免按对象引用 + 共享边动态判定，第三方列车
+  不受影响（有回归测试兜底）。
 
 ## 渲染约定：Layout 模式
 

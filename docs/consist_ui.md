@@ -196,6 +196,46 @@ HOVER_COUPLE（悬停其它列车端头车钩）:
   "驶向并连挂"，5 m 只是吸附阈值不是距离限制；指令可达性交给 `find_path_from_point`
   判定，不可达则 console「不可达」，不留 pending。
 
+### 5.5 信号豁免（2026-09 追加，验收时发现的功能缺口）✅ 已实现
+
+**问题**：连挂驶向、解挂后分离驶离，本质都是"列车要开进/开出**被另一列车占用
+的受保护闭塞区间**"。信号系统的物理占用检查（`dispatcher.tick` 的
+`others_occupied`）会把这些区间判红灯，列车永远够不到目标（连挂），或在前段
+驶离时因后段仍占共享边而 hard_stop 锁死（解挂）。**本仓库无碰撞判定**，因此
+不需要 OpenTTD fork 的"旁路撞车判定 + 把撞车重定义为连挂"——只需对"编组作业
+的配对列车"放开信号闸，授权边界仍 clamp 在车钩处（§5.2 的 stop_before 已保证
+车钩对齐、不压线）。
+
+**实现（思路 2 窄化版，采纳用户拍板）**：
+
+1. **绕开的逻辑只有一处，且显式标注**：`model/dispatch.py::TrainDispatcher.tick`
+   构造 `others_occupied`（其它列车物理占用的 edge 集合）时，**排除**两个豁免
+   集合——本车的 `couple_approach_partner`、以及"与本车共享至少一条 occupied 边
+   的 `split_sibling`"。其余判定全部保留：
+   - `reserve_path`（预约表冲突）**不绕开**——若第三方也预约了目标边仍会被拦；
+   - `compute_colors`（信号灯红绿）**不绕开**——区间被占用时信号仍显示红灯
+     （视觉上就是"冒进信号"，符合 OpenTTD 语义）；
+   - `_walk_frontier`/授权边界计算**不绕开**——授权边界仍到下一信号，只因
+     `update()` 制动目标 = `min(remaining_to_goal, authority)`，到车钩的
+     `remaining_to_goal` 更近，所以车停在车钩前（运动控制无需改动，用户已确认
+     "驶到 edge 途中点"可靠）。
+
+2. **两个豁免标记**（`TrainEntity` 上的运行时字段，随指令生命周期）：
+   - `couple_approach_partner: TrainEntity | None`——下达"驶向某列车端头车钩"
+     的连挂指令时写入目标列车；用于 A 与 B **不共享边**的情形（A 在保护区外、
+     B 占着目标区间）。指令结束（停车）后由 `_merge_couple`/取消清除。
+   - `split_sibling: TrainEntity | None`——`decouple_at` 返回的 front/rear 互指
+     `split_sibling`；用于解挂后两段**共享边**的情形。豁免条件是"共享边"在
+     `dispatch` 每帧即时判定，两段驶离到不再重叠即自动失效，无需显式清除。
+
+3. **安全网**：豁免只影响"本车 vs 那一列配对车"的物理占用；配对车若在接近途中
+   移动/被解挂/消失，其占用集合变化后豁免自然缩小（因为豁免按对象引用 + 共享
+   边动态判定，不是按边 id 静态放行）。第三方列车不豁免。
+
+**绕开清单（供维护）**：
+- `model/dispatch.py` `tick()`：`others_occupied` 排除 `train.couple_approach_partner`
+  与共享边的 `train.split_sibling` 的 `occupancy.occupied`。**仅此一处**。
+
 ## 6. 渲染规格（Layout 模式，屏幕像素基准）
 
 沿用 `view/renderer.py` 现有约定（见文件顶部注释与 CLAUDE.md「Layout 模式」）：
