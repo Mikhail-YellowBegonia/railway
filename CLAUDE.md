@@ -206,6 +206,20 @@ tooltip「连挂目标 #k」→ K 确认（已贴住直接连挂；未贴住则�
 自动连挂）。任何右键寻路停车在其它停放列车端头车钩 1m 内也自动连挂（2026-09
 定稿，见 §9-4 决策记录）。判定逻辑在 `controller/coupling.py`（纯模型可测）。
 
+## PLAY 驾驶与巡航（2026-09 bug2 决策，勿回退）
+
+手动驾驶：`↑/↓` 按住累积目标巡航速度（`self.train_v_target`，±5 m/s·dt，
+上限 30 m/s），列车只在"有指令（route 非空）**且**巡航 > 0"时才行驶；停放车
+巡航=0 时下达指令不会自动起步（下达打印提示"按 ↑ 起步"）。
+
+**下达寻路指令不清零巡航**（bug2，勿回退）：`_issue_goal_order`（右键设目的地
+与 K 连挂驶向共用）**不得**把 `self.train_v_target` 清零——真实 GUI 主循环
+`run()` 每帧执行 `active_train.v_target = train_v_target`（巡航写回），清零会
+把玩家已建立的巡航抹掉：玩家"停车按 ↑ 设速 → 右键设目的地"或"行驶中右键改向"
+后列车刹停，表现为"橙色路径可见（route 已下达）但车不动"（2026-09 bug2，回归
+`tests/test_play_orders.py`）。巡航归零只允许在：空格急停、放置新车、换选到
+巡航 0 的车（各列车 v_target 存实体上，换选时按 822 行载入）。
+
 Modifier keys are polled per frame in `GameLoop._sync_modifiers`, not edge-triggered.
 
 ## Pathfinding (转向许可与寻路)
