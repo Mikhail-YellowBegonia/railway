@@ -1016,9 +1016,17 @@ class GameLoop:
                                  goal_edge_id, goal_t, goal_direction,
                                  stop_before_m=stop_before_m)
         self.train_path = None  # 可视化路径按需从 occupancy+route 重建，不再缓存
-        self.train_v_target = 0.0
+        # 不下达后清零巡航：真实 GUI 每帧把 self.train_v_target 写回
+        # active_train.v_target（run()），旧代码在这里清零会把玩家已用 ↑
+        # 建立的巡航抹掉——"停车 ↑ 设速→右键设目的地"或"行驶中右键改向"
+        # 后列车刹停不动（2026-09 bug2，橙色路径可见但车不走）。手动驾驶
+        # 语义不变：停放车巡航=0 下达后仍需按 ↑ 起步；急停（空格）才清零。
         idx = self.trains.index(train) + 1
-        print(f"PLAY: 列车 #{idx} → {label}，剩余 {train.state.remaining_to_goal:.0f} m")
+        cruise = train.v_target
+        cruise_hint = (f"，按 ↑ 起步" if cruise <= 0.0
+                       else f"，保持 {cruise:.1f} m/s 巡航")
+        print(f"PLAY: 列车 #{idx} → {label}，剩余 {train.state.remaining_to_goal:.0f} m"
+              f"{cruise_hint}")
 
     def _issue_path_order(self, world_pos: Vec3) -> None:
         """对 active_train 下达寻路指令（Edge 途中或 Node）。
