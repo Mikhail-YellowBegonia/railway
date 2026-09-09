@@ -233,4 +233,100 @@ finally:
         os.remove(_tmp_save)
     pygame.quit()
 
+# =========================================================================
+# 9. GameLoop 端到端：行驶中列车 S 保存 → 重载 → 续行到站（#2 验收闭环）
+# =========================================================================
+import pygame
+pygame.init()
+from model.vec3 import Vec3
+from model.rail_network import RailNetwork
+from model.geojson_writer import write_geojson
+from model.wagon import Consist as _C2, create_simple_wagon as _csw2
+from model.occupancy import OccupancyState as _Occ2
+from model.train_entity import TrainEntity as _TE2, TrainState as _TS2
+from model.train_physics import RealisticElectric as _RE2
+from model.pathfinding import find_path_from_point as _fpfp
+
+# 自建直线 0..360 每 60m（e0..e5），目标 e5 t=0.5（世界 x=330）。
+_net9 = RailNetwork()
+_n9 = [_net9.add_node(Vec3(i * 60.0, 0.0, 0.0)) for i in range(7)]
+_e9 = [_net9.add_edge(_n9[i], _n9[i + 1]) for i in range(6)]
+_save9 = os.path.join(tempfile.gettempdir(), "session_resume.geojson")
+if os.path.exists(_save9):
+    os.remove(_save9)
+write_geojson(_net9, _save9)
+
+_backup9 = gl_module.SAVE_PATH
+try:
+    gl_module.SAVE_PATH = _save9
+    from controller.game_loop import GameLoop
+    DT9 = 1.0 / 60.0
+
+    def _place9(eid, head_s, direction=1):
+        wagons = [_csw2(length=20.0, mass=50.0, P_rated=3000.0)]
+        occ = _Occ2(occupied=[(eid, direction)], occupied_offset=0.0,
+                    s=head_s, route=[])
+        t = _TE2(_TS2(occupancy=occ, remaining_to_goal=0.0, v=0.0,
+                      consist=_C2(wagons=wagons)), _net9, _RE2())
+        t.kinematics = t._build_kinematics()
+        return t
+
+    # 第一实例：e0 内 x=30 起步 → 下达 e5 t0.5 → 行驶 8s（中途态）→ S 保存
+    _glA = GameLoop(_save9)
+    _tA = _place9(_e9[0].edge_id, head_s=30.0)
+    _glA.trains = [_tA]
+    _glA.active_train = _tA
+    _glA.train_v_target = 10.0
+    _tA.v_target = 10.0
+    _se, _st = _tA.current_edge_and_t()
+    _sd = _tA.current_direction()
+    _res = _fpfp(_glA.network, _se, _st, _sd, _e9[5].edge_id, 0.5, 1)
+    _p, _so, _eo = _res
+    _tA.assign_route(_p.edges[1:], max(0.0, _p.total_cost - _so - _eo),
+                     (_e9[5].edge_id, 0.5, 1))
+    _tA.v_target = 10.0
+    for _ in range(int(8.0 / DT9)):
+        if _tA.is_parked():
+            break
+        _glA.active_train.v_target = _glA.train_v_target
+        _glA.dispatcher.tick(_tA, DT9, _tA.v_target, _glA.trains)
+        _glA.block_manager.rebuild(_glA.network, _glA.signals)
+        _glA.block_manager.tick_reservations(_glA.trains)
+    assert _tA.is_moving() and _tA.state.v > 3.0, "行驶中态应成立"
+    _mid_abs = _tA.state.abs_s
+    write_geojson(_glA.network, _save9, signals=_glA.signals,
+                  trains=_glA.trains)
+    print(f"✅ 保存行驶中列车（v={_tA.state.v:.1f} m/s, abs_s={_mid_abs:.1f}, "
+          f"route {len(_tA.state.occupancy.route)} 段）")
+    _glA.running = False
+
+    # 第二实例：重载 → 状态还原一致 → 续行到站（head 世界 x≈330）
+    _glB = GameLoop(_save9)
+    _tB = _glB.trains[0]
+    _glB.active_train = _tB
+    _glB.train_v_target = _tB.v_target
+    assert _tB.is_moving(), "行驶中列车重载应恢复 controller（is_moving）"
+    assert abs(_tB.state.v - _tA.state.v) < 1e-6, "v 应还原一致"
+    assert abs(_tB.v_target - 10.0) < 1e-6, "v_target 应还原 10"
+    assert abs(_tB.state.abs_s - _mid_abs) < 1e-6, "abs_s 应还原一致"
+    for _ in range(int(60.0 / DT9)):
+        if _tB.is_parked():
+            break
+        _glB.active_train.v_target = _glB.train_v_target
+        _glB.dispatcher.tick(_tB, DT9, _tB.v_target, _glB.trains)
+        _glB.block_manager.rebuild(_glB.network, _glB.signals)
+        _glB.block_manager.tick_reservations(_glB.trains)
+    assert _tB.is_parked(), "重载列车应续行到站（parked）"
+    _hx = _tB.kinematics._path_kin.pose_at(_tB.state.abs_s).position.x
+    assert abs(_hx - 330.0) < 1.0, \
+        f"续行应精确到 goal e5 t=0.5（x=330），实际 head_x={_hx:.1f}"
+    print(f"✅ GameLoop 端到端：行驶中 S 保存 → 重载 → 续行到站 "
+          f"(head_x={_hx:.1f} = goal)")
+    _glB.running = False
+finally:
+    gl_module.SAVE_PATH = _backup9
+    if os.path.exists(_save9):
+        os.remove(_save9)
+    pygame.quit()
+
 print("\n✅ 全部会话持久化回归通过")
