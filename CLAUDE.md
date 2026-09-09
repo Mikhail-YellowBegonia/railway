@@ -220,6 +220,20 @@ tooltip「连挂目标 #k」→ K 确认（已贴住直接连挂；未贴住则�
 `tests/test_play_orders.py`）。巡航归零只允许在：空格急停、放置新车、换选到
 巡航 0 的车（各列车 v_target 存实体上，换选时按 822 行载入）。
 
+**折返后 remaining 按几何重算 + 连挂驶向固定到达方向**（bug2 根因，勿回退）：
+用户实测"A 驶向 B 连挂却在下一个 node 停车"。两个叠加缺陷（commit 6a5e6b6）：
+1. `TrainEntity._do_auto_reversal` 折返后 `remaining_to_goal` 曾直接保留折返前
+   值——寻路被迫绕行、含死端折返往返段时（单向信号使直路被禁，如 manual_track
+   node700 信号把 660→700 禁成单行），该值仍按"继续正向行驶"计、虚高一条往返
+   段，列车越过 goal 冲到下一授权边界才停。现在按折返几何重算：车头前方到路径
+   尾弧长（occ 剩余 + route 全长）− goal 距其段尾折算(eo) − 停车提前量
+   （`train._stop_before_m`，`_apply_route_result` 下达时记录，连挂驶向=
+   head_hook_offset）。**不重新寻路**（避免折返振荡）。
+2. 连挂驶向（K/右键吸附）固定 `goal_direction = 目标列车 current_direction()`，
+   不再枚举 ±1——枚举可能选到"绕行后从反方向接近目标车尾"的路径（贴上了却因
+   `_ends_aligned` 朝向相反连不上）。被单向信号挡住无法正向到达时明确报不可达。
+   普通右键寻路仍枚举（玩家不表达进站方向）。
+
 Modifier keys are polled per frame in `GameLoop._sync_modifiers`, not edge-triggered.
 
 ## Pathfinding (转向许可与寻路)
