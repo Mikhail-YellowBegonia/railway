@@ -611,11 +611,13 @@ class GameLoop:
     def _couple_to_hovered(self, target_train: "TrainEntity", target_end: str) -> None:
         """K 键手动连挂确认（docs/consist_ui.md §5）：悬停其它列车端头车钩 + K。
 
-        三情形（§5.2）：
+        三情形（§5.2，就近对接语义，2026-09 用户拍板）：
         - 已贴住（<1m、同向、双停）→ 立即 couple；
-        - 需开过去 → 对焦点列车下达驶向该端头 (edge_id, t) 的寻路指令，
-          停车事件自动连挂接管（§5.2/§9-4 定稿：到位即自动挂，无需再按 K）；
-        - 自己端头 / 几何不可能 → 提示，不下达。
+        - 就近可前进对接（A 在 B 后方、同边、距离 ≤ DRIVE_COUPLE_MAX_DIST）→
+          下达短距离驶向指令，停车事件自动连挂接管（§5.2/§9-4 定稿）；
+        - 其余（已越过目标需倒车 / 不相邻 / 朝向不符 / 未停）→ 提示，不下达。
+        K 键与右键吸附车钩**语义等价**（§9 定稿），目标端 head/tail 都接受——
+        具体能否对接由 drive_couple_goal 的几何判定统一决定，不再区分端头。
         """
         if self.editor.mode != EditMode.PLAY:
             return
@@ -627,7 +629,7 @@ class GameLoop:
             print("PLAY: 悬停的是本车端头，请悬停其它列车的端头再按 K")
             return
 
-        from controller.coupling import try_couple_to
+        from controller.coupling import try_couple_to, drive_couple_goal, head_hook_offset
 
         # 情形 1：已贴住 → 立即连挂
         match = try_couple_to(front, target_train, target_end)
@@ -635,30 +637,23 @@ class GameLoop:
             self._merge_couple(match)
             return
 
-        # 情形 2/3：未贴住 → 看能否下达驶向指令
+        # 情形 2/3：未贴住 → 就近对接判定（仅前进对接，无倒车）
         if not front.is_parked():
             print("PLAY: 请先停车再连挂（空格键），或右键下达行驶指令")
             return
         if not target_train.is_parked():
             print("PLAY: 对方列车未停车，无法连挂")
             return
-        # 不再做"两车整车朝向"预检——可达性交给 find_path_from_point（它支持
-        # 折返 allow_reversal=True）。旧预检用首节车厢 heading 点积 >0.9 粗判
-        # "同向"，在 90° 弧上会误杀同向但相距较远的合法连挂（2026-09 实测，
-        # 见 docs/consist_ui.md §5.1 / coupling.end_heading）。
 
-        # 驶向目标限定为对方车尾：焦点列车车头同向行驶只能从后方接近并挂上
-        # 对方车尾（A.head ↔ B.tail）。悬停的是对方车头端时提示改悬停车尾端
-        # ——车头对车头的贴接在行驶指令里没有自然语义（需先反向）。
-        if target_end != "tail":
-            print(f"PLAY: 请悬停列车 #{self.trains.index(target_train)+1} 的"
-                  f"车尾端头（本车需从后方接近）")
+        goal = drive_couple_goal(front, target_train)
+        if goal is None:
+            print(f"PLAY: 无法连挂——两车需在**同一段轨道**上前后相邻且同向，"
+                  f"本车在对方后方才能前进对接；已越过对方则需先绕行到其后方"
+                  f"（本版本不支持倒车连挂）")
             return
-        from controller.coupling import end_coupler_pos
-        _edge_id, _t = end_coupler_pos(target_train, "tail")[1:]
+        _edge_id, _t = goal
         # stop_before = 本车车钩与头转向架的间距：停车点是头转向架，但连挂要让
         # **车钩** 停在对方尾钩处，须提前该距离停车（_apply_route_result 说明）。
-        from controller.coupling import head_hook_offset
         self._issue_goal_order(front, _edge_id, _t,
                                f"连挂 #{self.trains.index(target_train)+1} 车尾",
                                stop_before_m=head_hook_offset(front))
@@ -777,10 +772,12 @@ class GameLoop:
             if not node or not node.incident_edge_ids:
                 print(f"PLAY: 节点 {node_id} 无关联边，无法放置")
                 return
-            locomotive = create_simple_wagon(length=20.0, mass=50.0, P_rated=3000.0)
-            coach1     = create_simple_wagon(length=18.0, mass=45.0, P_rated=None)
-            coach2     = create_simple_wagon(length=22.0, mass=60.0, P_rated=None)
-            self.train_placement_consist = Consist(wagons=[locomotive, coach1, coach2])
+            # 默认编组：3 节相同车厢、全部有动力（便于测试，2026-09 用户要求）。
+            # 同长同质量同功率，解挂/连挂后任一段都能独立行驶，测试对称性好。
+            wagon1 = create_simple_wagon(length=20.0, mass=50.0, P_rated=3000.0)
+            wagon2 = create_simple_wagon(length=20.0, mass=50.0, P_rated=3000.0)
+            wagon3 = create_simple_wagon(length=20.0, mass=50.0, P_rated=3000.0)
+            self.train_placement_consist = Consist(wagons=[wagon1, wagon2, wagon3])
             self.train_placement_node_id = node_id
             print(f"PLAY: 节点 {node_id} 已选，左键点相邻节点指定朝向")
             return
@@ -968,38 +965,46 @@ class GameLoop:
         （停车事件自动连挂，docs/consist_ui.md §5.2/§9-4）自动连挂。
         """
 
-        # Couple-2：检查是否吸附到其他列车端头车钩
+        # Couple-2：检查是否吸附到其他列车端头车钩（5m 范围内）。
+        # 与 K 键语义等价（2026-09 定稿）：吸附命中后走 drive_couple_goal 就近
+        # 对接判定，不再是"无条件把车头开到任意端头坐标"（那会在目标在身后时
+        # 绕大圈/折返边，见 docs/consist_ui.md §5.2）。
         COUPLE_SNAP = 5.0
-        snapped_goal: tuple[int, float] | None = None
         snapped_target = None  # 被吸附端头车钩所属的列车（连挂豁免用，§5.5）
         for other in self.trains:
             if other is self.active_train:
                 continue
             head_data, tail_data = other.kinematics.get_end_coupler_data(other.state.s)
-            for cp_pos, cp_edge_id, cp_t in (head_data, tail_data):
+            for cp_pos, _cp_edge_id, _cp_t in (head_data, tail_data):
                 if (cp_pos - world_pos).length() < COUPLE_SNAP:
-                    snapped_goal = (cp_edge_id, cp_t)
                     snapped_target = other
-                    print(f"PLAY: 吸附到列车 #{self.trains.index(other)+1} 车钩 "
-                          f"(edge {cp_edge_id} t={cp_t:.2f})，到位后自动连挂")
                     break
-            if snapped_goal:
+            if snapped_target:
                 break
 
         train = self.active_train
-        goal = snapped_goal if snapped_goal is not None else self._snap_edge_at(world_pos)
+        if snapped_target is not None:
+            # 就近对接判定（与 K 键一致）
+            from controller.coupling import drive_couple_goal, head_hook_offset
+            goal = drive_couple_goal(train, snapped_target)
+            if goal is None:
+                print(f"PLAY: 无法连挂——两车需在同一段轨道上前后相邻且同向；"
+                      f"已越过对方则先绕行到其后方（不支持倒车连挂）")
+                return
+            goal_edge_id, goal_t = goal
+            self._issue_goal_order(train, goal_edge_id, goal_t,
+                                   f"连挂 #{self.trains.index(snapped_target)+1} 车尾",
+                                   stop_before_m=head_hook_offset(train))
+            train.couple_approach_partner = snapped_target
+            print(f"PLAY: 吸附到列车 #{self.trains.index(snapped_target)+1} 车钩，"
+                  f"到位后自动连挂")
+            return
+
+        goal = self._snap_edge_at(world_pos)
         if goal is not None:
             goal_edge_id, goal_t = goal
-            # 吸附到其它列车车钩 = 驶向连挂目标：提前 head_offset 停车，让本车
-            # **车钩** 停在目标点（docs/consist_ui.md §5.2，见 _apply_route_result）
-            from controller.coupling import head_hook_offset
-            stop_before = head_hook_offset(train) if snapped_goal is not None else 0.0
             self._issue_goal_order(train, goal_edge_id, goal_t,
-                                   f"edge {goal_edge_id} t={goal_t:.2f}",
-                                   stop_before_m=stop_before)
-            # 信号豁免：右键吸附车钩同样是"驶向连挂目标"（§5.5）
-            if snapped_target is not None:
-                train.couple_approach_partner = snapped_target
+                                   f"edge {goal_edge_id} t={goal_t:.2f}")
             return
 
         node_id = self._snap_node_at(world_pos)

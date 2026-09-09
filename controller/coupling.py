@@ -99,6 +99,63 @@ def _ends_aligned(a: "TrainEntity", a_end: str, b: "TrainEntity", b_end: str) ->
     return ha.dot(hb) >= HEADING_DOT
 
 
+# 连挂驶向的最大"就近"距离（米）：两车端头相距超过此值视为"不相邻"，
+# 不下达驶向连挂指令（避免长途寻路/绕大圈/折返边，见 docs/consist_ui.md §5.5）。
+# 语义是"就近微调对齐"，不是"长途寻路"。
+DRIVE_COUPLE_MAX_DIST = 300.0
+
+
+def drive_couple_goal(
+    train_a: "TrainEntity",
+    target_train: "TrainEntity",
+) -> tuple[int, float] | None:
+    """判定 train_a 能否"前进驶向 target_train 车尾"完成连挂，返回目标 (edge_id, t)。
+
+    就近对接语义（2026-09 用户拍板，docs/consist_ui.md §5.2）：连挂是"就近微调
+    对齐"，不是长途寻路。本仓库**没有倒车能力**（`advance_occupied_path` 只沿
+    route 正向推进，`reverse_in_place` 是原地掉头不是物理倒车），因此只支持
+    情形：A 车头朝前、B 尾钩在 A 前方、同向、就近。
+
+    判定依据（纯几何，不依赖寻路）：
+    - 两车都停放；
+    - 接触端切线一致（A 头端 · B 尾端，_ends_aligned）；
+    - A 头钩 → B 尾钩 的直线距离在 (0, DRIVE_COUPLE_MAX_DIST] 内（就近）；
+    - **B 尾钩在 A 前进方向的前半平面**：A 头钩指向 B 尾钩的方向 与 A 头端
+      切线 heading 的夹角 < 90°。这一条是区分"前方可对接" vs "身后需倒车"
+      的关键——身后时夹角 ≈180° 被拒，避免寻路绕大圈/折返边（2026-09 bug）。
+      弧线上成立的前提是弧角 < 180°（弦方向总在起点切线前半平面），
+      manual_track 最大弧 90°，安全。
+
+    返回 None = 不可"前进对接"（已越过需倒车 / 不相邻 / 朝向不符 / 未停），
+    调用方提示用户。返回 (edge_id, t) = B 尾钩所在 edge/t，调用方用
+    `_issue_goal_order(..., stop_before_m=head_hook_offset(A))` 下达。
+    """
+    if not train_a.is_parked() or not target_train.is_parked():
+        return None
+
+    a_head = end_coupler_pos(train_a, "head")
+    b_tail = end_coupler_pos(target_train, "tail")
+
+    # 接触端切线一致性（A 头端 · B 尾端）。
+    if not _ends_aligned(train_a, "head", target_train, "tail"):
+        return None
+
+    # 就近 + 前方判定。
+    delta = b_tail[0] - a_head[0]
+    dist = delta.length()
+    if not (0.0 < dist <= DRIVE_COUPLE_MAX_DIST):
+        return None
+    a_heading = end_heading(train_a, "head")
+    if a_heading is None:
+        return None
+    # 沿 A 前进方向的分量：> 0 表示 B 尾钩在 A 前方。
+    along = delta.dot(a_heading)
+    if along <= 0.0:
+        return None
+
+    return (b_tail[1], b_tail[2])
+
+
 def find_couple_pair(
     train_a: "TrainEntity",
     others: list["TrainEntity"],

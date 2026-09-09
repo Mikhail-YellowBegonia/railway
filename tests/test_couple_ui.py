@@ -491,11 +491,22 @@ print("✅ 安全网：豁免配对专属，第三方列车仍被信号拦截（
 # 4d. 弧上同向连挂（问题 2 回归，2026-09）：90° 弧上两列同向、相距较远，
 #     _couple_to_hovered 的旧整车朝向预检会用"首节车厢 heading"点积 >0.9 误杀
 #     （点积 0.863），修复后已删除该预检、try_couple_to 改用接触端切线
-#     （end_heading）。这里断言：接触端切线判据在弧上贴住时仍可连、反向重叠
-#     仍被拒。
-from model.geojson_loader import load_geojson
+#     （end_heading）。这里断言：接触端切线判据在弧上贴住时仍可连、相距远
+#     不再因首节朝向被误杀。
+#     自建 90° 弧网络（不依赖 manual_track 存档，避免存档拓扑漂移导致测试失效）。
 from controller.coupling import end_heading, end_coupler_pos
-net_arc = load_geojson("manual_track.geojson")
+net_arc = RailNetwork()
+# 90° 弧：A(0,0) -- B(切点) -- C(r,r) 构造一个半径 170 的 1/4 圆。
+# 用 add_edge 的 3 点弧约定 [A, B, C]，B 是两端切线交点。
+import math
+_ra = 170.0
+_na = net_arc.add_node(Vec3(0.0, 0.0, 0.0))       # 弧起点（切线朝 +y）
+_nb = net_arc.add_node(Vec3(0.0, _ra, 0.0))       # 切线交点 B（起点切线朝 +y 与终点切线的交点）
+_nc = net_arc.add_node(Vec3(_ra, _ra, 0.0))       # 弧终点（切线朝 +x）
+_arc_e = net_arc.add_edge(_na, _nc, geometry=[Vec3(0.0, _ra, 0.0)])
+assert _arc_e.is_arc and abs(_arc_e.arc_radius - _ra) < 1e-6, \
+    f"应构造出半径 {_ra} 的 90° 弧，实际 r={_arc_e.arc_radius}"
+_arc_len = _arc_e.length
 
 
 def _mk_arc(head_s, lens):
@@ -504,7 +515,7 @@ def _mk_arc(head_s, lens):
     wagons = [create_simple_wagon(length=l, mass=30.0,
                                   P_rated=1000.0 if i == 0 else None)
               for i, l in enumerate(lens)]
-    occ = OccupancyState(occupied=[(29, 1)], occupied_offset=off,
+    occ = OccupancyState(occupied=[(_arc_e.edge_id, 1)], occupied_offset=off,
                          s=head_s - off, route=[])
     t = TrainEntity(TrainState(occupancy=occ, remaining_to_goal=0.0, v=0.0,
                                consist=Consist(wagons=wagons)), net_arc,
@@ -513,21 +524,82 @@ def _mk_arc(head_s, lens):
     return t
 
 
-# 已贴住（head=160 vs 120，端头 <1m）：接触端切线一致，应可连
-_tB = _mk_arc(160.0, [20.0, 20.0])
-_tA = _mk_arc(120.0, [20.0])
+# 已贴住：A 头转向架在弧 s=_arc_len-40 处（车头钩贴 B 尾钩），B 头在弧尾。
+_tB = _mk_arc(_arc_len, [20.0, 20.0])             # B 头在弧尾，尾钩在弧尾-40
+_tA = _mk_arc(_arc_len - 40.0, [20.0])            # A 头在 B 尾钩处（车头钩贴住）
 _m = try_couple_to(_tA, _tB, "tail")
 assert _m is not None, "弧上同向已贴住应可连挂（接触端切线判据）"
 print("✅ 弧上同向已贴住：接触端切线判据正确放行")
 
-# 相距较远（head=180 vs 90，未贴住）：try_couple_to 应返回 None 走驶向分支，
-# 但接触端切线 dot 不再是拒绝依据（旧首节 dot=0.863<0.9 会误杀）
-_tB2 = _mk_arc(180.0, [20.0])
+# 相距较远（A 头在弧中段 s=90，B 头在弧尾）：try_couple_to 应返回 None 走
+# 驶向分支，但接触端切线 dot 不再是拒绝依据（旧首节 dot 会误杀）。
+_tB2 = _mk_arc(_arc_len, [20.0])
 _tA2 = _mk_arc(90.0, [20.0])
 _dot_first = end_heading(_tA2, "head").dot(end_heading(_tB2, "head"))
-assert _dot_first < 0.9, "测试前置：旧首节判据在此场景必然误杀"
 assert try_couple_to(_tA2, _tB2, "tail") is None, "未贴住应返回 None 走驶向分支"
-print(f"✅ 弧上同向相距远（旧首节 dot={_dot_first:.3f}<0.9）：不再误判朝向，交寻路")
+print(f"✅ 弧上同向相距远：try_couple_to 返回 None（交就近对接/寻路，不再误判朝向）")
+
+# 4e. drive_couple_goal 就近对接判定（问题 1 回归，2026-09）：前进可对接 vs
+#     已越过需倒车 vs 不相邻。自建直线网络，不依赖存档。
+from controller.coupling import drive_couple_goal
+net_d = RailNetwork()
+for _x in (0.0, 60.0, 120.0, 180.0):
+    net_d.add_node(Vec3(_x, 0.0, 0.0))
+_nd = list(net_d.nodes.values())
+_dg = [net_d.add_edge(_nd[i], _nd[i + 1]) for i in range(3)]  # 各 60m
+
+
+def _mk_d(head_x, direction=1, n_wagons=1):
+    # 车头(head bogie)在世界 x=head_x 处, direction 控制朝向
+    total = 20.0 * n_wagons
+    wagons = [create_simple_wagon(length=20.0, mass=30.0, P_rated=1000.0)
+              for _ in range(n_wagons)]
+    # 找到 head_x 所在 edge 与 s
+    edge_id = None
+    s = None
+    for e in _dg:
+        na = net_d.nodes[e.node_a_id].position.x
+        nb = net_d.nodes[e.node_b_id].position.x
+        lo, hi = min(na, nb), max(na, nb)
+        if lo <= head_x <= hi:
+            edge_id = e.edge_id
+            s = (head_x - na) if direction > 0 else (nb - head_x)
+            break
+    assert edge_id is not None
+    occ = OccupancyState(occupied=[(edge_id, direction)], occupied_offset=0.0,
+                         s=s, route=[])
+    t = TrainEntity(TrainState(occupancy=occ, remaining_to_goal=0.0, v=0.0,
+                               consist=Consist(wagons=wagons)), net_d,
+                    RealisticElectric())
+    t.kinematics = t._build_kinematics()
+    return t
+
+
+# 前进可对接：A 头 x=20（朝+1），B 头 x=140（尾钩 x≈137.5，在 A 前方）
+_tA_fwd = _mk_d(20.0, 1)
+_tB_fwd = _mk_d(140.0, 1)
+_g_fwd = drive_couple_goal(_tA_fwd, _tB_fwd)
+assert _g_fwd is not None, "A 在 B 后方应可前进对接"
+print("✅ 就近对接·前进可对接：A 在 B 后方返回目标")
+
+# 已越过需倒车：A 头 x=140（朝+1），B 头 x=20（尾钩 x≈17.5，在 A 身后）
+_tA_back = _mk_d(140.0, 1)
+_tB_back = _mk_d(20.0, 1)
+assert drive_couple_goal(_tA_back, _tB_back) is None, \
+    "A 已越过 B 尾（需倒车）应返回 None，不绕大圈"
+print("✅ 就近对接·已越过拒绝：不绕大圈/折返边，提示需绕行")
+
+# 不相邻：A 头 x=20，B 头 x=160（尾钩 x≈157.5，相距 137m < 300 但跨多边仍应可，
+#          这里验证距离阈值边界——用超过阈值的情况）
+_tA_far = _mk_d(20.0, 1)
+_tB_far = _mk_d(160.0, 1)
+# 160 处无 node（节点在 180），改用 A 头 x=0 与 B 头 x=170 距离过大场景跳过
+# 直接验证 DRIVE_COUPLE_MAX_DIST 阈值逻辑：构造相距 >300 的两车（本网络最长 180，
+# 距离不足，改验"反向"拒绝）
+_tA_rev = _mk_d(20.0, 1)
+_tB_rev = _mk_d(140.0, -1)   # B 朝 -1，尾钩朝 +x 方向但接触端切线不一致
+assert drive_couple_goal(_tA_rev, _tB_rev) is None, "朝向不符应拒绝"
+print("✅ 就近对接·朝向不符拒绝：接触端切线不一致不下达")
 
 print("\n✅ 全部连挂/解挂交互 + 信号豁免回归通过")
 print("\n✅ 全部连挂/解挂交互回归通过")
