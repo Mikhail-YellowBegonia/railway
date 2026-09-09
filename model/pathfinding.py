@@ -140,6 +140,8 @@ def find_path(
     allow_reversal=True 时支持在终端节点处折返。
     返回 Path（有向边序列 + 总代价），不可达返回 None。
     """
+    if passable_fn is None:
+        passable_fn = _default_passable  # 全通（调车/拓扑直查入口可传 None）
     start_edge = network.edges.get(start[0])
     if start_edge is None:
         return None

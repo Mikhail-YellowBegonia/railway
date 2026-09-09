@@ -7,25 +7,7 @@
         "type": "LineString",
         "coordinates": [
           [
-            -200.0,
-            20.0,
-            0.0
-          ],
-          [
-            0.0,
-            20.0,
-            0.0
-          ]
-        ]
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            -200.0,
+            -100.0,
             0.0,
             0.0
           ],
@@ -44,125 +26,12 @@
         "coordinates": [
           [
             0.0,
-            0.0,
-            0.0
-          ],
-          [
-            60.0,
-            0.0,
-            0.0
-          ]
-        ]
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            -200.0,
-            0.0,
-            0.0
-          ],
-          [
-            -260.0,
-            0.0,
-            0.0
-          ]
-        ]
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            200.0,
-            -20.0,
-            0.0
-          ],
-          [
-            400.0,
-            -20.0,
-            0.0
-          ]
-        ]
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            200.0,
-            -20.0,
-            0.0
-          ],
-          [
-            140.0,
-            -20.0,
-            0.0
-          ]
-        ]
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            400.0,
-            -20.0,
-            0.0
-          ],
-          [
-            460.0,
-            -20.0,
-            0.0
-          ]
-        ]
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            200.0,
-            0.0,
-            0.0
-          ],
-          [
-            400.0,
-            0.0,
-            0.0
-          ]
-        ]
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            60.0,
-            0.0,
-            0.0
-          ],
-          [
-            81.25,
             0.0,
             0.0
           ],
           [
             100.0,
-            -10.0,
+            0.0,
             0.0
           ]
         ]
@@ -175,601 +44,12 @@
         "coordinates": [
           [
             100.0,
-            -10.0,
-            0.0
-          ],
-          [
-            118.75,
-            -20.0,
-            0.0
-          ],
-          [
-            140.0,
-            -20.0,
-            0.0
-          ]
-        ]
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            -260.0,
-            0.0,
-            0.0
-          ],
-          [
-            -400.0,
-            0.0,
-            0.0
-          ]
-        ]
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            -400.0,
-            0.0,
-            0.0
-          ],
-          [
-            -460.0,
-            0.0,
-            0.0
-          ]
-        ]
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            -460.0,
-            0.0,
-            0.0
-          ],
-          [
-            -600.0,
-            0.0,
-            0.0
-          ]
-        ]
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            -460.0,
-            -20.0,
-            0.0
-          ],
-          [
-            -600.0,
-            -20.0,
-            0.0
-          ]
-        ]
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            -460.0,
-            -20.0,
-            0.0
-          ],
-          [
-            -443.3333333333333,
-            -20.0,
-            0.0
-          ],
-          [
-            -430.0,
-            -10.0,
-            0.0
-          ]
-        ]
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            -430.0,
-            -10.0,
-            0.0
-          ],
-          [
-            -416.6666666666667,
-            0.0,
-            0.0
-          ],
-          [
-            -400.0,
-            0.0,
-            0.0
-          ]
-        ]
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            -260.0,
-            0.0,
-            0.0
-          ],
-          [
-            -243.33333333333334,
-            0.0,
-            0.0
-          ],
-          [
-            -230.0,
-            10.0,
-            0.0
-          ]
-        ]
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            -230.0,
-            10.0,
-            0.0
-          ],
-          [
-            -216.66666666666666,
-            20.0,
-            0.0
-          ],
-          [
-            -200.0,
-            20.0,
-            0.0
-          ]
-        ]
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            0.0,
-            20.0,
-            0.0
-          ],
-          [
-            16.666666666666668,
-            20.0,
-            0.0
-          ],
-          [
-            30.0,
-            10.0,
-            0.0
-          ]
-        ]
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            30.0,
-            10.0,
-            0.0
-          ],
-          [
-            43.333333333333336,
-            0.0,
-            0.0
-          ],
-          [
-            60.0,
-            0.0,
-            0.0
-          ]
-        ]
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            140.0,
-            -20.0,
-            0.0
-          ],
-          [
-            156.66666666666666,
-            -20.0,
-            0.0
-          ],
-          [
-            170.0,
-            -10.0,
-            0.0
-          ]
-        ]
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            170.0,
-            -10.0,
-            0.0
-          ],
-          [
-            183.33333333333334,
             0.0,
             0.0
           ],
           [
             200.0,
             0.0,
-            0.0
-          ]
-        ]
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            660.0,
-            -20.0,
-            0.0
-          ],
-          [
-            700.0,
-            -20.0,
-            0.0
-          ]
-        ]
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            700.0,
-            -20.0,
-            0.0
-          ],
-          [
-            840.0,
-            -20.0,
-            0.0
-          ]
-        ]
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            840.0,
-            0.0,
-            0.0
-          ],
-          [
-            700.0,
-            0.0,
-            0.0
-          ]
-        ]
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            700.0,
-            0.0,
-            0.0
-          ],
-          [
-            687.5,
-            0.0,
-            0.0
-          ],
-          [
-            680.0,
-            -10.0,
-            0.0
-          ]
-        ]
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            680.0,
-            -10.0,
-            0.0
-          ],
-          [
-            672.5,
-            -20.0,
-            0.0
-          ],
-          [
-            660.0,
-            -20.0,
-            0.0
-          ]
-        ]
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            460.0,
-            -20.0,
-            0.0
-          ],
-          [
-            660.0,
-            -20.0,
-            0.0
-          ]
-        ]
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            400.0,
-            0.0,
-            0.0
-          ],
-          [
-            416.6666666666667,
-            0.0,
-            0.0
-          ],
-          [
-            430.0,
-            -10.0,
-            0.0
-          ]
-        ]
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            430.0,
-            -10.0,
-            0.0
-          ],
-          [
-            443.3333333333333,
-            -20.0,
-            0.0
-          ],
-          [
-            460.0,
-            -20.0,
-            0.0
-          ]
-        ]
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            -600.0,
-            0.0,
-            0.0
-          ],
-          [
-            -660.0,
-            0.0,
-            0.0
-          ]
-        ]
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            -660.0,
-            0.0,
-            0.0
-          ],
-          [
-            -800.0,
-            0.0,
-            0.0
-          ]
-        ]
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            -660.0,
-            0.0,
-            0.0
-          ],
-          [
-            -643.3333333333334,
-            0.0,
-            0.0
-          ],
-          [
-            -630.0,
-            -10.0,
-            0.0
-          ]
-        ]
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            -630.0,
-            -10.0,
-            0.0
-          ],
-          [
-            -616.6666666666666,
-            -20.0,
-            0.0
-          ],
-          [
-            -600.0,
-            -20.0,
-            0.0
-          ]
-        ]
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            840.0,
-            -20.0,
-            0.0
-          ],
-          [
-            880.0,
-            -20.0,
-            0.0
-          ]
-        ]
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            880.0,
-            -20.0,
-            0.0
-          ],
-          [
-            1100.0,
-            -20.0,
-            0.0
-          ]
-        ]
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            840.0,
-            0.0,
-            0.0
-          ],
-          [
-            852.5,
-            0.0,
-            0.0
-          ],
-          [
-            860.0,
-            -10.0,
-            0.0
-          ]
-        ]
-      }
-    },
-    {
-      "type": "Feature",
-      "geometry": {
-        "type": "LineString",
-        "coordinates": [
-          [
-            860.0,
-            -10.0,
-            0.0
-          ],
-          [
-            867.5,
-            -20.0,
-            0.0
-          ],
-          [
-            880.0,
-            -20.0,
             0.0
           ]
         ]
@@ -779,99 +59,256 @@
   "signals": [
     {
       "from": [
-        700.0,
-        -20.0,
-        0.0
-      ],
-      "to": [
-        660.0,
-        -20.0,
-        0.0
-      ]
-    },
-    {
-      "from": [
         0.0,
-        20.0,
-        0.0
-      ],
-      "to": [
-        30.0,
-        10.0,
-        0.0
-      ]
-    },
-    {
-      "from": [
-        400.0,
         0.0,
         0.0
       ],
       "to": [
-        430.0,
-        -10.0,
-        0.0
-      ]
-    },
-    {
-      "from": [
-        -460.0,
-        -20.0,
-        0.0
-      ],
-      "to": [
-        -430.0,
-        -10.0,
-        0.0
-      ]
-    },
-    {
-      "from": [
-        -200.0,
-        0.0,
-        0.0
-      ],
-      "to": [
-        -260.0,
+        100.0,
         0.0,
         0.0
       ]
     },
     {
       "from": [
+        100.0,
+        0.0,
+        0.0
+      ],
+      "to": [
         200.0,
-        -20.0,
-        0.0
-      ],
-      "to": [
-        140.0,
-        -20.0,
+        0.0,
         0.0
       ]
+    }
+  ],
+  "trains": [
+    {
+      "consist": [
+        {
+          "wagon_id": "05c79451-9284-4852-8a3e-717e3bff4279",
+          "length": 20.0,
+          "mass": 50.0,
+          "P_rated": 3000.0,
+          "coupler_1_pos": 0.0,
+          "coupler_2_pos": 20.0,
+          "bogies": [
+            {
+              "geometric_role": "leading",
+              "pos": 2.5,
+              "load_share": 0.5,
+              "axle_count": 2
+            },
+            {
+              "geometric_role": "trailing",
+              "pos": 17.5,
+              "load_share": 0.5,
+              "axle_count": 2
+            }
+          ]
+        },
+        {
+          "wagon_id": "eafbfc7f-23ed-4770-84e9-e6d48bb9b575",
+          "length": 20.0,
+          "mass": 50.0,
+          "P_rated": 3000.0,
+          "coupler_1_pos": 0.0,
+          "coupler_2_pos": 20.0,
+          "bogies": [
+            {
+              "geometric_role": "leading",
+              "pos": 2.5,
+              "load_share": 0.5,
+              "axle_count": 2
+            },
+            {
+              "geometric_role": "trailing",
+              "pos": 17.5,
+              "load_share": 0.5,
+              "axle_count": 2
+            }
+          ]
+        },
+        {
+          "wagon_id": "d2eb5008-8276-4e10-9b1f-f6f9344f3146",
+          "length": 20.0,
+          "mass": 50.0,
+          "P_rated": 3000.0,
+          "coupler_1_pos": 0.0,
+          "coupler_2_pos": 20.0,
+          "bogies": [
+            {
+              "geometric_role": "leading",
+              "pos": 2.5,
+              "load_share": 0.5,
+              "axle_count": 2
+            },
+            {
+              "geometric_role": "trailing",
+              "pos": 17.5,
+              "load_share": 0.5,
+              "axle_count": 2
+            }
+          ]
+        }
+      ],
+      "v": 0.0,
+      "v_target": 5.075,
+      "occupied": [
+        {
+          "a": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "b": [
+            100.0,
+            0.0,
+            0.0
+          ]
+        }
+      ],
+      "occupied_offset": 39.959865479954274,
+      "s": 60.0,
+      "route": [],
+      "remaining_to_goal": 0.0,
+      "goal": {
+        "edge": {
+          "a": [
+            100.0,
+            0.0,
+            0.0
+          ],
+          "b": [
+            200.0,
+            0.0,
+            0.0
+          ]
+        },
+        "t": 0.0,
+        "direction": 1
+      },
+      "physics": "realistic_electric"
     },
     {
-      "from": [
-        -600.0,
-        0.0,
-        0.0
+      "consist": [
+        {
+          "wagon_id": "99168cd7-2981-4939-bb90-7f7f4954e119",
+          "length": 20.0,
+          "mass": 50.0,
+          "P_rated": 3000.0,
+          "coupler_1_pos": 0.0,
+          "coupler_2_pos": 20.0,
+          "bogies": [
+            {
+              "geometric_role": "leading",
+              "pos": 2.5,
+              "load_share": 0.5,
+              "axle_count": 2
+            },
+            {
+              "geometric_role": "trailing",
+              "pos": 17.5,
+              "load_share": 0.5,
+              "axle_count": 2
+            }
+          ]
+        },
+        {
+          "wagon_id": "e5e6cb01-a9fa-4dc9-b1e7-96ae2c40cbba",
+          "length": 20.0,
+          "mass": 50.0,
+          "P_rated": 3000.0,
+          "coupler_1_pos": 0.0,
+          "coupler_2_pos": 20.0,
+          "bogies": [
+            {
+              "geometric_role": "leading",
+              "pos": 2.5,
+              "load_share": 0.5,
+              "axle_count": 2
+            },
+            {
+              "geometric_role": "trailing",
+              "pos": 17.5,
+              "load_share": 0.5,
+              "axle_count": 2
+            }
+          ]
+        },
+        {
+          "wagon_id": "09101c00-0e9a-4dd7-bf2b-a92b90c9115f",
+          "length": 20.0,
+          "mass": 50.0,
+          "P_rated": 3000.0,
+          "coupler_1_pos": 0.0,
+          "coupler_2_pos": 20.0,
+          "bogies": [
+            {
+              "geometric_role": "leading",
+              "pos": 2.5,
+              "load_share": 0.5,
+              "axle_count": 2
+            },
+            {
+              "geometric_role": "trailing",
+              "pos": 17.5,
+              "load_share": 0.5,
+              "axle_count": 2
+            }
+          ]
+        }
       ],
-      "to": [
-        -660.0,
-        0.0,
-        0.0
-      ]
-    },
-    {
-      "from": [
-        840.0,
-        0.0,
-        0.0
+      "v": 0.0,
+      "v_target": 14.880000000000065,
+      "occupied": [
+        {
+          "a": [
+            -100.0,
+            0.0,
+            0.0
+          ],
+          "b": [
+            0.0,
+            0.0,
+            0.0
+          ]
+        }
       ],
-      "to": [
-        860.0,
-        -10.0,
-        0.0
-      ]
+      "occupied_offset": 39.4561708875293,
+      "s": 60.0,
+      "route": [
+        {
+          "a": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "b": [
+            100.0,
+            0.0,
+            0.0
+          ]
+        }
+      ],
+      "remaining_to_goal": 40.5036945924249,
+      "goal": {
+        "edge": {
+          "a": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "b": [
+            100.0,
+            0.0,
+            0.0
+          ]
+        },
+        "t": 0.42459865479954273,
+        "direction": 1
+      },
+      "physics": "realistic_electric"
     }
   ]
 }

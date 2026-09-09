@@ -125,9 +125,12 @@ class GameLoop:
         if not os.path.exists(SAVE_PATH):
             return []
         from model.geojson_loader import load_trains
-        from model.session import rebuild_split_siblings
+        from model.session import rebuild_split_siblings, rebuild_couple_partners
         trains = load_trains(SAVE_PATH, self.network)
         rebuild_split_siblings(trains)
+        # 连挂驶向配对按 goal 几何一次性重建（运行时引用不落盘；否则重载后
+        # 带连挂指令的 holding 车无豁免、永久卡在信号前，2026-09 bug2 现场）
+        rebuild_couple_partners(trains, self.network)
         if trains:
             print(f"已还原 {len(trains)} 列列车")
         return trains
@@ -702,10 +705,12 @@ class GameLoop:
         self._issue_goal_order(front, _edge_id, _t,
                                f"连挂 #{self.trains.index(target_train)+1} 车尾",
                                stop_before_m=head_hook_offset(front),
-                               goal_direction=target_train.current_direction())
+                               goal_direction=target_train.current_direction(),
+                               ignore_signals=True)
         # 信号豁免（docs/consist_ui.md §5.5）：驶向连挂目标时，调度层对本车
-        # 豁免 target 的物理占用，允许冒进目标所在受保护区间；授权边界仍
-        # clamp 在车钩处。
+        # 全放行（dispatch._resolve_couple_target → 调车分支），允许开进对方
+        # 占用的受保护区间甚至逆单向；授权仍 clamp 在目标尾钩（stop_before +
+        # update 的 min(remaining, authority) 保证不压线）。
         front.couple_approach_partner = target_train
         print(f"PLAY: 已下达驶向 #{self.trains.index(target_train)+1} "
               f"车尾指令，到位后自动连挂")
@@ -887,6 +892,7 @@ class GameLoop:
         self, start_edge_id, start_t, start_direction, goal_edge_id, goal_t,
         *, allow_reversal, debug, consist_length,
         fixed_goal_direction: int | None = None,
+        ignore_signals: bool = False,
     ):
         """玩家点击目标点时不指定到达方向，分别尝试 +1/-1，取代价更低者。
 
@@ -900,6 +906,12 @@ class GameLoop:
         current_direction() 时只尝试该方向，绕行反向接近自然判不可达。其余
         场景（右键普通寻路）不传，保持枚举。
 
+        ignore_signals: 连挂驶向用（2026-09 bug2 现场，用户裁决"调车忽略
+        一切限制、只看轨道拓扑"）：连挂驶向要把车开到对方占用的受保护区间
+        甚至逆单向信号（相对信号把区间禁成单行时，正向追尾会因 One-Way
+        被判不可达/被迫绕行）。此时寻路过滤用 None（纯拓扑 + turn_allowed，
+        不看 One-Way 背面禁行）——调车引导语义，普通寻路不受影响。
+
         consist_length 必须传真实列车长度（Step 3 阶段 B）：决定折返在
         哪些 endpoint 可行——simple_segment 长度不足的死端会被寻路层直接
         排除，避免"折返后车尾越过 turnout"或"死端间无限振荡"的问题。
@@ -908,7 +920,7 @@ class GameLoop:
         可以直接复用其中一次的结果，不需要"先探路再提交"的两阶段流程。
 
         Step 5（远场/近场拆分，2026-09）：这是**唯一跑 Dijkstra 的地方**
-        （远场寻路），只用 `SignalTable.passable_topology_only` 过滤——
+        （远场寻路），默认只用 `SignalTable.passable_topology_only` 过滤——
         只看拓扑级的单向硬性限制（One-Way PBS 背面永久禁止），不看闭塞
         占用/预约状态。判定可达性、算出的是"理论上能不能走到"和"完整
         预期路径"，不该因为"眼前有别的车"就判不可达（红灯不代表这里
@@ -921,7 +933,8 @@ class GameLoop:
         （枚举方向都不可达）。
         """
         from model.pathfinding import find_path_from_point
-        passable_fn = self.signals.passable_topology_only
+        passable_fn = (None if ignore_signals
+                       else self.signals.passable_topology_only)
         best = None
         best_gd = None
         for gd in (fixed_goal_direction,) if fixed_goal_direction is not None \
@@ -983,16 +996,21 @@ class GameLoop:
         self, train, goal_edge_id: int, goal_t: float, label: str,
         stop_before_m: float = 0.0,
         goal_direction: int | None = None,
+        ignore_signals: bool = False,
     ) -> None:
         """对指定列车下达"驶向 (goal_edge_id, goal_t)"的远场寻路指令。
 
         由 _issue_path_order（右键）与 _couple_to_hovered（K 键连挂驶向）共用。
-        远场寻路（Dijkstra，只看拓扑 + One-Way PBS 反方向硬性禁止）选方向 ->
-        下达完整远场 route。
+        远场寻路（Dijkstra，默认只看拓扑 + One-Way PBS 反方向硬性禁止）选方向
+        -> 下达完整远场 route。
 
         goal_direction: 连挂驶向用——固定到达方向为目标列车 current_direction()
         （否则枚举 ±1 时，单向信号迫使绕行会让车从**反方向**接近目标车尾，
         贴上了却因朝向不符连不上）。普通右键寻路不传（保持枚举）。
+
+        ignore_signals: 连挂驶向用（2026-09 用户裁决"调车忽略一切限制"）——
+        寻路过滤用纯拓扑（忽略 One-Way 背面禁行），配合 dispatch 的调车全放行
+        分支，让驶向连挂能开进对方占用的受保护区间甚至逆单向。普通寻路不传。
 
         find_path_from_point 不再修改网络（起点/终点都不分割），一次调用即可
         拿到可下达的干净路径，不再需要"探路+提交"两阶段流程。
@@ -1021,6 +1039,7 @@ class GameLoop:
             start_edge_id, start_t, start_direction, goal_edge_id, goal_t,
             allow_reversal=True, debug=True, consist_length=consist_length,
             fixed_goal_direction=goal_direction,
+            ignore_signals=ignore_signals,
         )
         if result is None:
             print(f"PLAY: 不可达 ({label})")
@@ -1084,7 +1103,8 @@ class GameLoop:
             self._issue_goal_order(train, goal_edge_id, goal_t,
                                    f"连挂 #{self.trains.index(snapped_target)+1} 车尾",
                                    stop_before_m=head_hook_offset(train),
-                                   goal_direction=snapped_target.current_direction())
+                                   goal_direction=snapped_target.current_direction(),
+                                   ignore_signals=True)
             train.couple_approach_partner = snapped_target
             print(f"PLAY: 吸附到列车 #{self.trains.index(snapped_target)+1} 车钩，"
                   f"到位后自动连挂")

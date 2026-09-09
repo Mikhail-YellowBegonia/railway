@@ -75,6 +75,27 @@ class TrainDispatcher:
         if train.is_parked():
             return  # 无指令，无动作
 
+        # 调车全放行（2026-09 bug2 现场，用户裁决"调车忽略一切限制"）：
+        # 列车正在"驶向某停放列车端头车钩"（couple_approach_partner 指向它，
+        # 连挂驶向指令）时，整条预约/闭塞/占用链对它不适用——它就是要开进
+        # 对方占用的受保护区间，授权直接给到目标停点（remaining_to_goal），
+        # 由 update 的 min(remaining, authority) + stop_before 保证不压目标车钩。
+        # holding（信号前等待）状态在此分支按剩余授权直接恢复，不再依赖 block
+        # 续约。partner 是同会话显式设置（K/右键吸附）；会话重载后由
+        # model/session.rebuild_couple_partners 按 goal 几何一次性重建（运行时
+        # 引用不落盘）——**不做每帧几何猜测**，否则"普通寻路碰巧把 goal 设在
+        # 别人车钩处"的第三方会被误豁免（回归安全网 tests/test_couple_ui.py）。
+        partner = train.couple_approach_partner
+        if partner is not None:
+            if train.is_holding():
+                if train.state.remaining_to_goal > BrakingController.STOP_EPSILON:
+                    train.resume()
+                else:
+                    return
+            train.authority_remaining = max(0.0, train.state.remaining_to_goal)
+            train.update(dt, v_target)
+            return
+
         others_occupied: set[int] = set()
         if trains is not None:
             for other in trains:

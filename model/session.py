@@ -269,3 +269,52 @@ def rebuild_split_siblings(trains: list["TrainEntity"]) -> None:
             if a_edges & b_edges:
                 trains[i].split_sibling = trains[j]
                 trains[j].split_sibling = trains[i]
+
+
+def rebuild_couple_partners(
+    trains: list["TrainEntity"], network: RailNetwork,
+) -> None:
+    """会话重载后一次性重建 couple_approach_partner（决策 2 的连挂侧）。
+
+    couple_approach_partner 是运行时对象引用、不落盘。带**未完成指令**的列车
+    （controller 或 route 仍存在）若 goal 几何点落在另一停放列车端头车钩
+    1m 内 = 保存时正驶向该车尾钩的连挂指令 → 重建配对。否则 dispatch 的调车
+    全放行分支失效，重载后这类车会在信号前永久 holding（2026-09 bug2 现场：
+    用户 3 边 2 信号最小复现，#2 驶向 #1 车尾走到 node 前卡死）。
+
+    只在 load 时做一次、且只匹配"进行中指令"——不做每帧几何猜测，避免普通
+    寻路碰巧把 goal 设在别人车钩旁的第三方列车被误豁免（回归安全网
+    tests/test_couple_ui.py）。
+    """
+    tol = 1.0  # 车钩容差，与 COUPLE_DIST 一致
+    parked = {
+        t: t.kinematics.get_end_coupler_data(t.state.s)
+        for t in trains if t.is_parked()
+    }
+    for t in trains:
+        if t.is_parked() or t.couple_approach_partner is not None:
+            continue
+        goal = t.state.goal
+        if goal is None:
+            continue
+        goal_pos = _edge_point(network, goal[0], goal[1])
+        for other, (head_data, tail_data) in parked.items():
+            for cp_pos, _eid, _t in (head_data, tail_data):
+                if (cp_pos - goal_pos).length() <= tol:
+                    t.couple_approach_partner = other
+                    break
+            if t.couple_approach_partner is not None:
+                break
+
+
+def _edge_point(network: RailNetwork, edge_id: int, t: float):
+    """Edge 上参数 t（node_a→node_b）处的世界坐标（直/弧），goal 几何判定用。"""
+    edge = network.edges[edge_id]
+    na = network.nodes[edge.node_a_id].position
+    nb = network.nodes[edge.node_b_id].position
+    if not edge.is_arc:
+        return na + (nb - na) * t
+    from model.geom_utils import rotate_around_axis
+    return edge.arc_center + rotate_around_axis(
+        edge.arc_start_dir, edge.arc_normal, edge.arc_angle_rad * t
+    ) * edge.arc_radius
