@@ -302,6 +302,30 @@ assert len(gl.trains) == 1 and len(gl.trains[0].state.consist.wagons) == 3, \
     f"手动连挂应还原 3 节: {[len(tt.state.consist.wagons) for tt in gl.trains]}"
 print("✅ 手动连挂（悬停端头 + K，已贴住）: 1+2 → 3")
 
+# 3b2. bug1 回归（2026-09）：解挂两段紧贴，悬停**错误端**（不贴住的端）按 K
+#      也应能撤销解挂——情形 1 两端都试，修复"显然可连却被提示方向不对"。
+gl.trains.clear()
+gl._hovered_coupler = None
+tB1x = make_train(netT, [(et[0].edge_id, 1), (et[1].edge_id, 1), (et[2].edge_id, 1)],
+                  [20.0, 20.0, 20.0])
+tB1x.state.occupancy = OccupancyState(
+    occupied=[(et[0].edge_id, 1), (et[1].edge_id, 1), (et[2].edge_id, 1)],
+    occupied_offset=0.0, s=60.0, route=[])
+tB1x.kinematics = tB1x._build_kinematics()
+Fx, Rx = tB1x.decouple_at(0)   # 1+2, 紧贴（F 尾贴 R 头）
+def _hx(tt):
+    return tt.kinematics._path_kin.pose_at(tt.state.abs_s).position.x
+gl.trains.append(Fx); gl.trains.append(Rx)
+gl.active_train = Fx   # 前段
+gl.editor.set_mode(EditMode.PLAY)
+# 悬停 R 的 **tail** 端（不贴住的那端）——贴住的是 R 的 head 端
+gl._hovered_coupler = (Rx, "end", "tail")
+pygame.event.post(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_k))
+drive_frames(3)
+assert len(gl.trains) == 1 and len(gl.trains[0].state.consist.wagons) == 3, \
+    f"悬停错误端也应撤销解挂（另一端贴住）: trains={[len(tt.state.consist.wagons) for tt in gl.trains]}"
+print("✅ bug1 回归：解挂两段悬停非贴住端 + K 也能撤销解挂")
+
 # 3c. 停车事件自动连挂（docs/consist_ui.md §5.2/§9-4）：真实驱车路径。
 # A 停在 x=20（车身 0..20），B 停在 x=40..80；对 A 下达"驶向 B 车尾端头"的
 # K 连挂指令（_couple_to_hovered → 提前 head_offset 停车），跑仿真帧直到

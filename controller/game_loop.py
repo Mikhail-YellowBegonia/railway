@@ -545,6 +545,16 @@ class GameLoop:
                 self._signal_left_click(self._mouse_world_pos())
                 return
 
+        # DELETE 模式：左键优先删除命中的列车（2026-09 用户要求，测试需要清理
+        # 错放的列车）；未命中列车才交编辑器删轨道。不触发平移。
+        if self.editor.mode == EditMode.DELETE and event.button == 1:
+            world_pos = self._mouse_world_pos()
+            hit = self._hit_test_train(world_pos)
+            if hit is not None:
+                self._delete_train(hit)
+                return
+            # 未命中列车 → 落到编辑器删轨道（下方 handle_click）
+
         pan_buttons = self._pan_buttons_for_mode()
         if event.button in pan_buttons:
             # 进入"待定平移"状态：先记录按下，移动后才算真正平移
@@ -658,8 +668,15 @@ class GameLoop:
 
         from controller.coupling import try_couple_to, drive_couple_goal, head_hook_offset
 
-        # 情形 1：已贴住 → 立即连挂
+        # 情形 1：已贴住 → 立即连挂。悬停端只是玩家"意图"，但贴住可能是另一端
+        # （例如解挂后两段紧贴，玩家悬停任意端都该能撤销解挂）。两端都试一次，
+        # 任一贴住（<1m 且接触端切线一致）即连挂——修复"显然可连却被提示方向
+        # 不对"的 bug（2026-09：旧实现只试悬停端，另一端贴住时误落 drive 分支）。
         match = try_couple_to(front, target_train, target_end)
+        if match is None and target_end == "head":
+            match = try_couple_to(front, target_train, "tail")
+        elif match is None:
+            match = try_couple_to(front, target_train, "head")
         if match is not None:
             self._merge_couple(match)
             return
@@ -730,6 +747,24 @@ class GameLoop:
                 if (pose.position - world_pos).length() < HIT_RADIUS:
                     return train
         return None
+
+    def _delete_train(self, train: "TrainEntity") -> None:
+        """DELETE 模式点击列车 → 删除该列车（2026-09 用户要求，测试清理用）。
+
+        列车从 trains 列表移除；其预约由 tick_reservations 下一帧按"不在列表"
+        自动清理，split_sibling 伙伴的互指引用随对象一起释放（豁免自然失效）。
+        若删除的是焦点列车，清空焦点/悬停/编组面板状态。
+        """
+        idx = self.trains.index(train) + 1
+        self.trains.remove(train)
+        if self.active_train is train:
+            self.active_train = None
+            self.train_path = None
+        if self.inspect_train is train:
+            self.inspect_train = None
+        if self._hovered_coupler is not None and self._hovered_coupler[0] is train:
+            self._hovered_coupler = None
+        print(f"PLAY: 已删除列车 #{idx}")
 
     def _hit_test_coupler(self, _world_pos: Vec3,
                           screen_pos: tuple[int, int] | None = None) \
