@@ -625,5 +625,53 @@ _tB_rev = _mk_d(140.0, -1)   # B 朝 -1，尾钩朝 +x 方向但接触端切线�
 assert drive_couple_goal(_tA_rev, _tB_rev) is None, "朝向不符应拒绝"
 print("✅ 就近对接·朝向不符拒绝：接触端切线不一致不下达")
 
+# 4f. 放宽回归（2026-09 bug1，用户拍板"先放宽就近对接门槛"）：旧判据两处误杀——
+#     1) 300m 直线距离上限挡住合法远距驶向；2) 端头切线一致（HEADING_DOT=0.9）
+#     在同向弧上相距较远时随弧角分叉、误杀合法追尾。放宽后：
+#     同向停放 + B 尾钩在 A 前方半平面 + 距离 ≤ DRIVE_COUPLE_MAX_DIST(2000) 即放行，
+#     真实可达性交给寻路。
+net_l = RailNetwork()
+for _lx in range(0, 481, 60):          # 8 节点 × 60m = 480m 长直轨
+    net_l.add_node(Vec3(_lx, 0.0, 0.0))
+_nl_nodes = list(net_l.nodes.values())
+_edges_l = [net_l.add_edge(_nl_nodes[i], _nl_nodes[i + 1]) for i in range(7)]
+
+
+def _mk_long(head_x, direction=1):
+    total = 20.0
+    wagons = [create_simple_wagon(length=20.0, mass=30.0, P_rated=1000.0)]
+    edge_id, s = None, None
+    for e in _edges_l:
+        na = net_l.nodes[e.node_a_id].position.x
+        nb = net_l.nodes[e.node_b_id].position.x
+        lo, hi = min(na, nb), max(na, nb)
+        if lo <= head_x <= hi:
+            edge_id = e.edge_id
+            s = (head_x - na) if direction > 0 else (nb - head_x)
+            break
+    assert edge_id is not None
+    occ = OccupancyState(occupied=[(edge_id, direction)], occupied_offset=0.0,
+                         s=s, route=[])
+    t = TrainEntity(TrainState(occupancy=occ, remaining_to_goal=0.0, v=0.0,
+                               consist=Consist(wagons=wagons)), net_l,
+                    RealisticElectric())
+    t.kinematics = t._build_kinematics()
+    return t
+
+
+# 放宽 1：同向相距 >300m（旧上限 300 会拒）仍应放行 → 可达性交给寻路。
+_tA_long = _mk_long(20.0, 1)     # 头在 x=20
+_tB_long = _mk_long(400.0, 1)    # 头在 x=400，尾钩 x≈377，相距 ~355m > 300
+_g_long = drive_couple_goal(_tA_long, _tB_long)
+assert _g_long is not None, "同向相距 >300m 应放行（放宽后距离交给寻路）"
+print(f"✅ 放宽·远距同向（相距 >300m）：drive_couple_goal 返回目标 {_g_long}")
+
+# 放宽 2：90° 弧上同向相距远（_tA2 头 s=90m、_tB2 头在弧尾，相距 ~150m）。
+#     端头切线随弧角分叉（cos≈0.57 < HEADING_DOT 0.9）旧判据误杀；车列方向近似
+#     判同向不再分叉 → 放行，驶向交给寻路。
+assert drive_couple_goal(_tA2, _tB2) is not None, \
+    "弧上同向相距远应放行（车列方向判据不再随弧角误杀端头切线）"
+print("✅ 放宽·弧上同向相距远：drive_couple_goal 放行（旧端头切线 0.9 误杀场景）")
+
 print("\n✅ 全部连挂/解挂交互 + 信号豁免回归通过")
 print("\n✅ 全部连挂/解挂交互回归通过")

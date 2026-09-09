@@ -18,12 +18,15 @@
 根因是朝向参照端选错：连挂"追尾"接触的是 A 车头 + B **车尾**，首节朝向只代表
 各自车头端，弧上首尾朝向随弧角分叉，长编组更甚。
 
-修复（两层）：
-1. 朝向判据改为**接触端各自的切线方向**（end_heading：head 端取首节车厢
-   heading，tail 端取末节车厢 heading）——已贴住（<1m）时两端头位置几乎重合，
-   切线天然一致，不会误杀；反向重叠（头对头贴住）时接触端切线相反，正确拒绝。
-2. `game_loop._couple_to_hovered` 的"驶向分支"不再做整车朝向预检——可达性
-   交给 find_path_from_point（支持折返 allow_reversal=True）。
+修复（三层，判据按使用场景分家，勿回退）：
+1. **已贴住（<1m）判定**用接触端各自的切线方向（end_heading：head 端取首节
+   车厢 heading，tail 端取末节车厢 heading）——贴住时两端头位置几乎重合，切线
+   天然一致，不会误杀；反向重叠（头对头贴住）时接触端切线相反，正确拒绝。
+2. **驶向连挂（未贴住）预判**用**整列车列方向**（头钩−尾钩连线近似）判同向，
+   不用端头切线（端头切线随弧角分叉，同向弧上相距远会误杀合法追尾）——
+   只保留"同向 + 前方 + 护栏距离"宽松栅栏，**可达性交给 find_path_from_point**
+   （支持折返 allow_reversal=True，隔弧/隔节点/隔岔路都能驶向）。见
+   `drive_couple_goal` 与 docs/consist_ui.md §5.2（2026-09 bug1 放宽记录）。
 """
 from __future__ import annotations
 
@@ -99,10 +102,11 @@ def _ends_aligned(a: "TrainEntity", a_end: str, b: "TrainEntity", b_end: str) ->
     return ha.dot(hb) >= HEADING_DOT
 
 
-# 连挂驶向的最大"就近"距离（米）：两车端头相距超过此值视为"不相邻"，
-# 不下达驶向连挂指令（避免长途寻路/绕大圈/折返边，见 docs/consist_ui.md §5.5）。
-# 语义是"就近微调对齐"，不是"长途寻路"。
-DRIVE_COUPLE_MAX_DIST = 300.0
+# 连挂驶向的护栏距离（米）：A 头钩 → B 尾钩 直线距离超过此值不下达。这只是
+# 防"点到天边另一辆列车就开一整张图"的误触护栏——**真实可达性交给寻路**
+# （_issue_goal_order → find_path_from_point，支持折返/绕行），不再做"就近微调"
+# 级别的几何预判（2026-09 bug1 用户拍板放宽，见 docs/consist_ui.md §5.2）。
+DRIVE_COUPLE_MAX_DIST = 2000.0
 
 
 def drive_couple_goal(
@@ -111,22 +115,28 @@ def drive_couple_goal(
 ) -> tuple[int, float] | None:
     """判定 train_a 能否"前进驶向 target_train 车尾"完成连挂，返回目标 (edge_id, t)。
 
-    就近对接语义（2026-09 用户拍板，docs/consist_ui.md §5.2）：连挂是"就近微调
-    对齐"，不是长途寻路。本仓库**没有倒车能力**（`advance_occupied_path` 只沿
-    route 正向推进，`reverse_in_place` 是原地掉头不是物理倒车），因此只支持
-    情形：A 车头朝前、B 尾钩在 A 前方、同向、就近。
+    本仓库**没有倒车能力**（`advance_occupied_path` 只沿 route 正向推进，
+    `reverse_in_place` 是原地掉头不是物理倒车），因此只支持一种布局：A 与
+    target 同向停放、A 车头朝前、target 尾钩在 A 车头前方。判定是"必要不充分"
+    的宽松栅栏，**能否真到由寻路决定**（两车隔着弧/节点/岔路都能驶向，只要
+    沿轨道正向可达）。
 
-    判定依据（纯几何，不依赖寻路）：
-    - 两车都停放；
-    - 接触端切线一致（A 头端 · B 尾端，_ends_aligned）；
-    - A 头钩 → B 尾钩 的直线距离在 (0, DRIVE_COUPLE_MAX_DIST] 内（就近）；
-    - **B 尾钩在 A 前进方向的前半平面**：A 头钩指向 B 尾钩的方向 与 A 头端
-      切线 heading 的夹角 < 90°。这一条是区分"前方可对接" vs "身后需倒车"
-      的关键——身后时夹角 ≈180° 被拒，避免寻路绕大圈/折返边（2026-09 bug）。
-      弧线上成立的前提是弧角 < 180°（弦方向总在起点切线前半平面），
-      manual_track 最大弧 90°，安全。
+    2026-09 bug1 放宽记录（用户拍板"先放宽就近对接门槛"）：旧版两处误杀——
+    1) 端头切线一致判据（`_ends_aligned`，HEADING_DOT=0.9 ≈ 25.8°）：同向两车
+    在**同一条弧上相距较远**时，端头切线随弧角分叉（如 170m 半径弧相距 87m →
+    夹角 29° → dot 0.875），合法追尾被拒。贴住判据用它没问题（贴住时端头几乎
+    同点、切线天然一致），但驶向预判不能用。
+    2) 300m 直线距离上限：合法远距驶向被拒。
+    放宽后：
+    - **同向判据用整列车列方向**（头钩−尾钩连线近似，弧上同向几乎不随弧角
+      分叉）：(A 头钩−A 尾钩)·(B 头钩−B 尾钩) > 0。直轨对顶/逆行（B 车头朝
+      A 来向）→ 点积 < 0 被拒（那种布局 A 开过去也接不上，需倒车/掉头）。
+    - 距离上限 300 → DRIVE_COUPLE_MAX_DIST（护栏，防误触天边列车）。
+    - 保留"B 尾钩在 A 前进方向的前半平面"判据：防"A 已越过 B 尾"时寻路绕大圈/
+      折返边（2026-09 绕行 bug）。弧线上前提是弧角 < 180°（manual_track 最大
+      弧 90°，安全；大弧/S 弯的极端误杀留给寻路不可达兜底提示）。
 
-    返回 None = 不可"前进对接"（已越过需倒车 / 不相邻 / 朝向不符 / 未停），
+    返回 None = 不可"前进对接"（已越过 / 逆行对顶 / 相距超护栏 / 未停），
     调用方提示用户。返回 (edge_id, t) = B 尾钩所在 edge/t，调用方用
     `_issue_goal_order(..., stop_before_m=head_hook_offset(A))` 下达。
     """
@@ -134,23 +144,23 @@ def drive_couple_goal(
         return None
 
     a_head = end_coupler_pos(train_a, "head")
+    a_tail = end_coupler_pos(train_a, "tail")
     b_tail = end_coupler_pos(target_train, "tail")
+    b_head = end_coupler_pos(target_train, "head")
 
-    # 接触端切线一致性（A 头端 · B 尾端）。
-    if not _ends_aligned(train_a, "head", target_train, "tail"):
-        return None
-
-    # 就近 + 前方判定。
-    delta = b_tail[0] - a_head[0]
-    dist = delta.length()
+    # 护栏：直线距离（防误触远方列车；可达性交给寻路）。
+    dist = (b_tail[0] - a_head[0]).length()
     if not (0.0 < dist <= DRIVE_COUPLE_MAX_DIST):
         return None
-    a_heading = end_heading(train_a, "head")
-    if a_heading is None:
+
+    # 同向判据（车列方向 = 头钩 − 尾钩，弧上同向不随弧角分叉）。
+    a_forward = a_head[0] - a_tail[0]
+    b_forward = b_head[0] - b_tail[0]
+    if a_forward.dot(b_forward) <= 0.0:
         return None
-    # 沿 A 前进方向的分量：> 0 表示 B 尾钩在 A 前方。
-    along = delta.dot(a_heading)
-    if along <= 0.0:
+
+    # 前方判据：B 尾钩须在 A 车头前进方向的前半平面（防已越过/身后绕大圈）。
+    if (b_tail[0] - a_head[0]).dot(a_forward) <= 0.0:
         return None
 
     return (b_tail[1], b_tail[2])
