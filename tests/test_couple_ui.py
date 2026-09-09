@@ -84,6 +84,47 @@ mhead = merged.kinematics._path_kin.pose_at(merged.state.abs_s).position
 assert abs(mhead.x - 80.0) < 1e-6, f"还原后车头位置漂移: {mhead.x}"
 print("✅ 模型层 couple 还原：车头位置不变")
 
+# 1b. 连挂合并几何（2026-09 用户实机 bug：60m+60m>100m 车厢压扁折叠）——
+#     旧 couple_with 用前车单侧 path sub_path 截合并车身，越界 clamp 成前车
+#     覆盖长，尾段车厢被压进不足弧长。修复后跨两车 occupied 拼接窗口。
+#     构造：后车跨 e0(-100..0)尾 20m + e1(0..100)前 40m（尾 x=-20、头 x=40）；
+#     前车全在 e1（x=40..100）。贴住连挂 → 6 节应 20m 等距铺满 120m
+#     （首节中心 ≈92.5、尾节中心 ≈-7.5，覆盖 ≈ -17.5..102.5）。
+fold_net = RailNetwork()
+fold_n0 = fold_net.add_node(Vec3(-100.0, 0.0, 0.0))
+fold_n1 = fold_net.add_node(Vec3(0.0, 0.0, 0.0))
+fold_n2 = fold_net.add_node(Vec3(100.0, 0.0, 0.0))
+fold_e0 = fold_net.add_edge(fold_n0, fold_n1)
+fold_e1 = fold_net.add_edge(fold_n1, fold_n2)
+
+
+def _fold_w3():
+    return [create_simple_wagon(length=20.0, mass=50.0, P_rated=3000.0)
+            for _ in range(3)]
+
+
+fold_A = TrainEntity(TrainState(
+    occupancy=OccupancyState(occupied=[(fold_e0.edge_id, 1), (fold_e1.edge_id, 1)],
+                             occupied_offset=80.0, s=60.0, route=[]),
+    remaining_to_goal=0.0, v=0.0, consist=Consist(wagons=_fold_w3())),
+    fold_net, RealisticElectric())
+fold_A.kinematics = fold_A._build_kinematics()
+fold_B = TrainEntity(TrainState(
+    occupancy=OccupancyState(occupied=[(fold_e1.edge_id, 1)],
+                             occupied_offset=40.0, s=60.0, route=[]),
+    remaining_to_goal=0.0, v=0.0, consist=Consist(wagons=_fold_w3())),
+    fold_net, RealisticElectric())
+fold_B.kinematics = fold_B._build_kinematics()
+fold_m = fold_B.couple_with(fold_A)
+fold_xs = [p.position.x for p in fold_m.kinematics.get_all_wagon_poses(fold_m.state.s)]
+assert len(fold_xs) == 6, "合并应为 6 节"
+for i in range(5):
+    assert abs(abs(fold_xs[i + 1] - fold_xs[i]) - 20.0) < 1e-6, \
+        f"车厢应 20m 等距铺开无折叠: {[round(x, 1) for x in fold_xs]}"
+assert abs(fold_xs[0] - 92.5) < 1.5 and abs(fold_xs[-1] - (-7.5)) < 1.5, \
+    f"首/尾节中心应 ≈92.5 / -7.5（120m 覆盖），实际 {[round(x, 1) for x in fold_xs]}"
+print("✅ 连挂合并几何：6 节 20m 等距铺满 120m（跨两车窗口拼接，无折叠）")
+
 # ---------------------------------------------------------------------------
 # 2. coupling 纯判定
 # ---------------------------------------------------------------------------

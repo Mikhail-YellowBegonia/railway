@@ -495,16 +495,29 @@ class TrainEntity:
 
         new_consist = self.state.consist.merged_with(rear.state.consist)
 
-        self_path_kin = self.kinematics._path_kin
-        abs_s_head = self.state.abs_s
-        combined_length = new_consist.total_length
-        s_tail_new = max(0.0, abs_s_head - combined_length)
-        new_path, new_initial_offset = self_path_kin.sub_path(s_tail_new, abs_s_head)
+        # 合并窗口（2026-09 修复，勿回退）：两车贴住时 rear(后车) 头钩 ≈
+        # self(前车) 尾钩，两者 occupied 窗口（tail→head 的整边集）在该点
+        # 邻接/共享——合并边链 = rear 窗口 + self 窗口中 rear 没有的新边，
+        # 连续覆盖 [合并车尾(rear 尾), 合并车头(self 头)]。
+        # 旧实现用 self(前车) 单侧 path_kin 的 sub_path(车头-120m, 车头)
+        # 截取合并车身——前车窗口只有 ~60m，越界被 clamp，120m 车厢被压进
+        # 不足的弧长 → 尾段车厢几何折叠/重叠（用户实机：60m+60m>100m 压扁）。
+        rear_ids = {eid for eid, _d in rear.state.occupancy.occupied}
+        merged_edges = (
+            list(rear.state.occupancy.occupied)
+            + [de for de in self.state.occupancy.occupied if de[0] not in rear_ids]
+        )
+        occ_total = sum(self.network.edges[eid].length for eid, _d in merged_edges)
+        offset = rear.state.occupancy.occupied_offset  # 车尾在窗口起点后的弧长
+        combined = new_consist.total_length
+        if occ_total - offset < combined - 1e-6:
+            print("⚠️ couple: 合并车身超过可用轨道覆盖，几何可能异常"
+                  f"（窗口 {occ_total - offset:.1f} m < 车身 {combined:.1f} m）")
 
         new_occ = OccupancyState(
-            occupied=list(new_path.edges),
-            occupied_offset=new_initial_offset,
-            s=abs_s_head - s_tail_new,
+            occupied=merged_edges,
+            occupied_offset=offset,
+            s=combined,  # 窗口正常时 s（头相对尾偏移）= 车长
             route=[],
         )
         new_state = TrainState(
