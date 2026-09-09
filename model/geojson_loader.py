@@ -65,6 +65,24 @@ def load_signals(path: str | Path, network: RailNetwork, epsilon: float = 0.01):
     return signals
 
 
+def load_trains(path: str | Path, network: RailNetwork, epsilon: float = 0.01):
+    """从同一份 GeoJSON 的顶层 "trains" 字段还原全部列车（roadmap #2）。
+
+    与 write_geojson(trains=...) 配对：序列化/反序列化逻辑在
+    model/session.py，这里只负责读文件 + 转发。旧存档没有 "trains" 字段
+    时返回空列表（优雅退化，不报错）。
+
+    返回 list[TrainEntity]；单列车反查失败由 session.deserialize_trains
+    静默跳过（容错优先，见 docs/session_persistence.md §6 决策 4）。
+    """
+    from model.session import deserialize_trains
+
+    with open(path, "r") as f:
+        data = json.load(f)
+    records = data.get("trains", [])
+    return deserialize_trains(records, network)
+
+
 def _validate_linestring(coords: list[tuple[float, float, float]]) -> bool:
     n = len(coords)
     if n < 2:

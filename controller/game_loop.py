@@ -68,6 +68,10 @@ class GameLoop:
         self.editor = Editor(self.network)
         self.running = True
 
+        # roadmap #2 会话持久化：列车列表在下方（trains 声明处）初始化，因为
+        # 反查需要 network 就绪。这里先留个占位标记，实际加载见 __init__ 末尾。
+        self._loaded_trains: list["TrainEntity"] | None = None
+
         # Step 3：固定闭塞管理（block 划分 + 占用推导信号颜色，每帧 rebuild，
         # 见 model/block.py 顶部关于重算频率的说明）
         from model.block import BlockManager
@@ -97,7 +101,10 @@ class GameLoop:
         self.train_placement_consist = None        # 待放置的车组
 
         # 列车列表 + 焦点（E 阶段）
-        self.trains: list["TrainEntity"] = []
+        # roadmap #2 会话持久化：从存档还原列车（含行驶中列车的 route/goal/剩余
+        # 距离），并重建 split_sibling 互指（解挂两段共享边的信号豁免）。旧存档
+        # 无 "trains" 字段 → 空列表。
+        self.trains: list["TrainEntity"] = self._load_saved_trains()
         self.active_train: "TrainEntity | None" = None
         self.train_v_target: float = 0.0           # 焦点列车的巡航速度（m/s）
         self.inspect_train: "TrainEntity | None" = None  # 编组面板目标（I 键切换）
@@ -108,6 +115,22 @@ class GameLoop:
         self._hovered_coupler: tuple["TrainEntity", str, int | str] | None = None
         # self.signals（DirectedEdge -> SignalState 旁挂表）已在上方加载
         # 网络时同步初始化/还原，不在这里重复创建。
+
+    def _load_saved_trains(self) -> list["TrainEntity"]:
+        """从存档还原列车（roadmap #2 会话持久化，见 docs/session_persistence.md）。
+
+        在 __init__ 里、network 就绪后调用。旧存档无 "trains" 字段 → 空列表。
+        还原后重建 split_sibling 互指（解挂两段共享边的信号豁免）。
+        """
+        if not os.path.exists(SAVE_PATH):
+            return []
+        from model.geojson_loader import load_trains
+        from model.session import rebuild_split_siblings
+        trains = load_trains(SAVE_PATH, self.network)
+        rebuild_split_siblings(trains)
+        if trains:
+            print(f"已还原 {len(trains)} 列列车")
+        return trains
 
     def run(self) -> None:
         while self.running:
@@ -438,11 +461,15 @@ class GameLoop:
             # P 键切换平行吸附(Simple/Complex Case)；独立开关
             self.editor.parallel_snap_enabled = not self.editor.parallel_snap_enabled
         elif event.key == pygame.K_s:
-            # S 键保存当前路网 + 信号到固定存档（启动时会优先加载它）
+            # S 键保存当前路网 + 信号 + 列车到固定存档（启动时会优先加载它）。
+            # roadmap #2 会话持久化：列车状态（位置/速度/编组/route/goal/v_target）
+            # 一并落盘，见 docs/session_persistence.md。
             from model.geojson_writer import write_geojson
-            write_geojson(self.editor.network, SAVE_PATH, signals=self.signals)
+            write_geojson(self.editor.network, SAVE_PATH,
+                          signals=self.signals, trains=self.trains)
             print(f"已保存 {len(self.editor.network.edges)} 条边 + "
-                  f"{len(self.signals.all_signals())} 个信号到 {SAVE_PATH}")
+                  f"{len(self.signals.all_signals())} 个信号 + "
+                  f"{len(self.trains)} 列列车到 {SAVE_PATH}")
         elif event.key == pygame.K_i:
             if self.editor.mode == EditMode.PLAY:
                 # PLAY 模式：I 键切换焦点列车编组面板

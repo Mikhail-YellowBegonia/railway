@@ -137,6 +137,28 @@ the tangent-intersection. Constraints: A/B/C not collinear, `|BA| = |BC|`.
 Arc metadata (center/radius/normal) is reconstructed deterministically from B
 on load — round-trip is bit-stable for arc geometry within 1e-4.
 
+## 会话持久化 (Session persistence, roadmap #2)
+
+见 `docs/session_persistence.md`（完整规格与决策记录）。核心约定：
+
+- `S` 键把 network + signals + **trains** 一起写进 `manual_track.geojson`；
+  启动时 `load_geojson` + `load_signals` + `load_trains` 还原。
+- **有向边不存 edge_id**（每次加载重分配），而是存"从 a 端走到 b 端"的两端
+  节点坐标 `{"a":[...],"b":[...]}`，加载按坐标反查节点→找边→据 a→b 顺序恢复
+  direction（`model/session.py::_directed_to_coords/_coords_to_directed`，与
+  信号持久化同一套坐标匹配语义）。列车 `occupied`/`route`/`goal` 里的
+  DirectedEdge 都走这个转换。
+- 存：`consist`（wagon_id uuid 直存 + 几何/质量/功率/转向架）、`v`、`v_target`、
+  `occupied`/`occupied_offset`/`s`（窗口三件套必须一起存，否则
+  `_build_kinematics` 重建的车头位置错位）、`route`、`remaining_to_goal`、
+  `goal`、`physics` 类型标记。
+- 不存：`controller`/`authority_remaining`（运行时派生，行驶中列车由
+  `assign_route` 重建 controller）、`consist.velocity/acceleration/data_log`
+  （冗余/空）、`split_sibling`/`couple_approach_partner`（运行时对象引用）。
+  `split_sibling` 加载后由 `rebuild_split_siblings` 按"共享 occupied 边"动态
+  重建（与豁免前置条件语义等价）；`couple_approach_partner` 由续行/重寻路重建。
+- 容错：单列车反查失败静默跳过（与 signals 逐条容错一致）。
+
 ## Input reference
 
 | Key / mouse | Mode | Action |
@@ -147,7 +169,7 @@ on load — round-trip is bit-stable for arc geometry within 1e-4.
 | `Esc` | other | Switch to IDLE |
 | Right click | BUILD_ACTIVE | Cancel current build (same as Esc) |
 | `Q` | any | Quit program |
-| `S` | any | Save network to manual_track.geojson (loaded on startup if exists) |
+| `S` | any | Save network + signals + trains to manual_track.geojson (loaded on startup if exists) |
 | `F` | any | Toggle pathfinding test mode (debug) |
 | `I` | any | Toggle spatial index visualization (debug) |
 | `C` | any | Toggle camera follow (train tracking) |

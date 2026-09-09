@@ -6,8 +6,8 @@ from pathlib import Path
 from model.rail_network import RailNetwork
 
 
-def write_geojson(network: RailNetwork, path: str | Path, signals=None) -> None:
-    """写出网络（+ 可选信号数据）。
+def write_geojson(network: RailNetwork, path: str | Path, signals=None, trains=None) -> None:
+    """写出网络（+ 可选信号数据 + 可选列车状态）。
 
     signals: model.signal.SignalTable | None。Step 2 阶段的最简持久化：
     node_id/edge_id 每次加载都重新分配，不能直接存 id，改存"信号所在
@@ -16,6 +16,11 @@ def write_geojson(network: RailNetwork, path: str | Path, signals=None) -> None:
     "features" 平级——不进 LineString 几何格式，旧存档没有这个字段时
     优雅退化成"无信号"。这是刻意从简的表示，后续如果需要更稳定的引用
     方式（比如给 Node 加持久 UUID）可以替换，不影响这里的调用方接口。
+
+    trains: list[model.train_entity.TrainEntity] | None。roadmap #2 会话持久化：
+    列车占用/route/goal 的 DirectedEdge 按坐标存（见 model/session.py），
+    存成顶层 "trains" 数组，与 "features"/"signals" 平级。旧存档没有该字段
+    优雅退化为"无列车"。
 
     Step 3 起不再存储颜色——颜色由占用状态实时推导（BlockManager），
     持久化的只是"信号放置在哪"这个事实。
@@ -64,6 +69,10 @@ def write_geojson(network: RailNetwork, path: str | Path, signals=None) -> None:
                 "to": [to_pos.x, to_pos.y, to_pos.z],
             })
         data["signals"] = signal_records
+
+    if trains is not None:
+        from model.session import serialize_trains
+        data["trains"] = serialize_trains(trains)
 
     with open(path, "w") as f:
         json.dump(data, f, indent=2)

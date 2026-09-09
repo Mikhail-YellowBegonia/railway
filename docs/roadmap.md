@@ -14,6 +14,8 @@
 - 连挂/解挂完整交互（roadmap 待办 #1，2026-09）——规格与决策见
   `docs/consist_ui.md`，PLAY 模式下任意节间解挂、悬停端头连挂、驶向车尾
   到位自动连挂。
+- 会话持久化（roadmap 待办 #2，2026-09）——`S` 键存列车状态、启动还原，
+  规格见 `docs/session_persistence.md`。
 
 进行中：
 - 无
@@ -29,10 +31,12 @@ review 出的第一版 demo 缺口；信号接入运动控制已在此轮完成�
    提前 head_offset 停车），到位停车事件帧自动连挂；任何右键寻路停在其它
    列车端头车钩 1m 内同样自动连挂（§9-4 定稿）。回归测试
    `tests/test_couple_ui.py`（模型层 + GameLoop 端到端）。
-2. **会话持久化**：`S` 键只存轨道几何（`manual_track.geojson`），列车
-   位置/速度/编组、信号布局、调度指令全部不落盘，退出重进就清空。
-   完整存档系统（相机、命名存档）可以晚做，但列车状态起步是最低
-   可用性要求。
+2. **会话持久化** ✅ 已完成（2026-09）：列车位置/速度/编组/待走 route/goal/
+   目标速度随 `S` 键连同轨道、信号一起写入 `manual_track.geojson` 顶层
+   `"trains"` 字段，启动自动还原（含行驶中列车）。规格与决策见
+   `docs/session_persistence.md`，序列化逻辑在 `model/session.py`（有向边按坐标
+   反查、wagon_id 直存、split_sibling 按共享边动态重建、单列反查失败跳过）。
+   回归 `tests/test_session.py`（模型层 7 项 + GameLoop 端到端）。
 3. 真实物理扩展（RealisticElectric: 牵引曲线、黏着、阻力）——
    `SimplePhysics` 已支撑基本"能开能停"体验，这是手感打磨，不阻塞
    demo 可玩性。
@@ -46,6 +50,6 @@ review 出的第一版 demo 缺口；信号接入运动控制已在此轮完成�
 2. 再按实施风险，简单改动优先
 3. 美工/UI 按需穿插，永远排最后
 
-当前重心：会话持久化（roadmap #1 连挂/解挂真实交互已完成，见上）
+当前重心：真实物理扩展（roadmap #3；#1 连挂/解挂、#2 会话持久化已完成）
 
 
