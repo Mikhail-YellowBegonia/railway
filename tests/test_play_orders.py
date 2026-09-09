@@ -97,6 +97,27 @@ try:
     assert gl.train_v_target == 0.0, "停放巡航 0 下达后应仍为 0（需玩家 ↑ 起步）"
     print("✅ 手动驾驶语义：巡航 0 下达后不自动起步（打印按 ↑ 提示）")
 
+    # ---- 场景 C：死端折返后精确到 goal（bug2 现场：折返绕行 remaining 虚高）
+    # 直线 0..240（e0..e3），A 头 x=145 朝 +x（前方死端 240）；goal x=84 在
+    # A 身后（e1 t=0.4）→ 唯一路径 = 开到 240 死端原地折返再回来。旧代码
+    # _do_auto_reversal 折返后 remaining 仍按"正向继续"计、虚高一条往返段，
+    # 列车越过 goal 冲到 0 端授权边界才停（表现为"驶向目标却停到下一个
+    # node"）。修复后折返按几何重算 remaining → 精确停在 x≈84。
+    tC = place(e2.edge_id, head_s=25.0)   # 头在 e2(120..180) 内 x=145，朝 +x
+    gl.trains = [tC]
+    gl.active_train = tC
+    gl.train_v_target = 8.0
+    tC.v_target = 8.0
+    gl._issue_goal_order(tC, net.edges[1].edge_id, 0.4, "bug2 场景 C（死端折返）")
+    assert (tC.state.occupancy.route or tC.state.remaining_to_goal > 0.5), \
+        "折返路径应已下达"
+    sim(tC, 120.0)
+    assert tC.is_parked(), f"折返后应到站 park，实际 not parked"
+    cx = tC.kinematics._path_kin.pose_at(tC.state.abs_s).position.x
+    assert abs(cx - 84.0) < 2.0, \
+        f"死端折返后应精确停在 goal x≈84，实际 head_x={cx:.1f}（修复前会冲过到 x≈0）"
+    print(f"✅ bug2 场景 C：死端折返后精确到 goal（head_x={cx:.1f}，不再冲过）")
+
     gl.running = False
 finally:
     gl_module.SAVE_PATH = _backup

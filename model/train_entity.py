@@ -343,7 +343,28 @@ class TrainEntity:
         self.controller = None  # reverse_in_place 要求静止（controller is None）
         self.reverse_in_place()
         self.state.occupancy.route = remaining_route
-        self.state.remaining_to_goal = remaining_to_goal
+        # 折返后 remaining 按几何重算（2026-09 bug2 现场修复，勿回退）：
+        # 寻路被迫绕行、含"死端折返往返"段时（如单向信号使直路被禁），
+        # 折返前 remaining 仍按"继续正向行驶到 goal"计，会虚高一条往返段，
+        # 列车因此越过 goal、一路冲到下一授权边界/信号才停（表现为"驶向连挂
+        # 却运动到下一个 node 停车"）。折返后车头方向已反向，正确剩余 =
+        # 车头前方到路径尾的弧长（当前 occupied 段内剩余 + remaining_route
+        # 全长）- goal 距其所在段"路径终点"的折算(eo) - 本次指令的停车提前量。
+        # 公式用折返后的几何状态直接计算，不重新寻路（不引入折返振荡）。
+        if goal is not None and remaining_route and remaining_route[-1][0] == goal[0]:
+            occ_total = sum(self.network.edges[eid].length
+                            for eid, _d in self.state.occupancy.occupied)
+            route_total = sum(self.network.edges[eid].length
+                              for eid, _d in remaining_route)
+            goal_seg = self.network.edges[goal[0]]
+            t_g, gd = goal[1], goal[2]
+            # goal 距其所在有向边的"路径终点"（gd=+1 → node_b 端；gd=-1 → node_a 端）。
+            eo = (goal_seg.length * (1.0 - t_g)) if gd > 0 else (goal_seg.length * t_g)
+            new_rem = (occ_total - self.state.abs_s) + route_total - eo
+            new_rem -= getattr(self, "_stop_before_m", 0.0)
+            self.state.remaining_to_goal = max(0.0, new_rem)
+        else:
+            self.state.remaining_to_goal = remaining_to_goal
         self.state.goal = goal
         self.authority_remaining = None  # 折返后几何方向变了，授权由调度层重算
         self.controller = BrakingController(self.physics, self.state.consist)

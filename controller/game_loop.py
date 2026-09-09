@@ -701,7 +701,8 @@ class GameLoop:
         # **车钩** 停在对方尾钩处，须提前该距离停车（_apply_route_result 说明）。
         self._issue_goal_order(front, _edge_id, _t,
                                f"连挂 #{self.trains.index(target_train)+1} 车尾",
-                               stop_before_m=head_hook_offset(front))
+                               stop_before_m=head_hook_offset(front),
+                               goal_direction=target_train.current_direction())
         # 信号豁免（docs/consist_ui.md §5.5）：驶向连挂目标时，调度层对本车
         # 豁免 target 的物理占用，允许冒进目标所在受保护区间；授权边界仍
         # clamp 在车钩处。
@@ -885,12 +886,19 @@ class GameLoop:
     def _find_path_any_goal_direction(
         self, start_edge_id, start_t, start_direction, goal_edge_id, goal_t,
         *, allow_reversal, debug, consist_length,
+        fixed_goal_direction: int | None = None,
     ):
         """玩家点击目标点时不指定到达方向，分别尝试 +1/-1，取代价更低者。
 
         Step 2：find_path_from_point 现在要求显式 goal_direction（消除到达
         方向歧义），但 PLAY 模式下玩家右键点选轨道并不表达"以哪个方向进站"
         的意图，所以在这一层统一枚举两个方向。
+
+        fixed_goal_direction: 连挂驶向用（2026-09 bug2）：到达方向必须使
+        车头在目标钩位处与目标列车同向——枚举 -1 时可能找到"绕行后从反方向
+        接近目标车尾"的路径（A 冲到 B 尾旁却因朝向不符连不上）。传 B 的
+        current_direction() 时只尝试该方向，绕行反向接近自然判不可达。其余
+        场景（右键普通寻路）不传，保持枚举。
 
         consist_length 必须传真实列车长度（Step 3 阶段 B）：决定折返在
         哪些 endpoint 可行——simple_segment 长度不足的死端会被寻路层直接
@@ -910,13 +918,14 @@ class GameLoop:
         `requesting_train` 参数。
 
         返回 (path, start_offset, end_offset, goal_direction) 或 None
-        （两个方向都不可达）。
+        （枚举方向都不可达）。
         """
         from model.pathfinding import find_path_from_point
         passable_fn = self.signals.passable_topology_only
         best = None
         best_gd = None
-        for gd in (1, -1):
+        for gd in (fixed_goal_direction,) if fixed_goal_direction is not None \
+                else (1, -1):
             result = find_path_from_point(
                 self.network, start_edge_id, start_t, start_direction,
                 goal_edge_id, goal_t, gd,
@@ -964,18 +973,26 @@ class GameLoop:
                 return
         remaining_to_goal = (path.total_cost - start_offset - end_offset
                              - stop_before_m)
+        # 记录本次指令的停车提前量（连挂驶向用）；折返（_do_auto_reversal）
+        # 后按几何重算 remaining 时要减去同一个提前量（2026-09 bug2 修复）。
+        train._stop_before_m = stop_before_m
         train.assign_route(route, max(0.0, remaining_to_goal),
                            (goal_edge_id, goal_t, goal_direction))
 
     def _issue_goal_order(
         self, train, goal_edge_id: int, goal_t: float, label: str,
         stop_before_m: float = 0.0,
+        goal_direction: int | None = None,
     ) -> None:
         """对指定列车下达"驶向 (goal_edge_id, goal_t)"的远场寻路指令。
 
         由 _issue_path_order（右键）与 _couple_to_hovered（K 键连挂驶向）共用。
         远场寻路（Dijkstra，只看拓扑 + One-Way PBS 反方向硬性禁止）选方向 ->
         下达完整远场 route。
+
+        goal_direction: 连挂驶向用——固定到达方向为目标列车 current_direction()
+        （否则枚举 ±1 时，单向信号迫使绕行会让车从**反方向**接近目标车尾，
+        贴上了却因朝向不符连不上）。普通右键寻路不传（保持枚举）。
 
         find_path_from_point 不再修改网络（起点/终点都不分割），一次调用即可
         拿到可下达的干净路径，不再需要"探路+提交"两阶段流程。
@@ -1003,6 +1020,7 @@ class GameLoop:
         result = self._find_path_any_goal_direction(
             start_edge_id, start_t, start_direction, goal_edge_id, goal_t,
             allow_reversal=True, debug=True, consist_length=consist_length,
+            fixed_goal_direction=goal_direction,
         )
         if result is None:
             print(f"PLAY: 不可达 ({label})")
@@ -1065,7 +1083,8 @@ class GameLoop:
             goal_edge_id, goal_t = goal
             self._issue_goal_order(train, goal_edge_id, goal_t,
                                    f"连挂 #{self.trains.index(snapped_target)+1} 车尾",
-                                   stop_before_m=head_hook_offset(train))
+                                   stop_before_m=head_hook_offset(train),
+                                   goal_direction=snapped_target.current_direction())
             train.couple_approach_partner = snapped_target
             print(f"PLAY: 吸附到列车 #{self.trains.index(snapped_target)+1} 车钩，"
                   f"到位后自动连挂")
