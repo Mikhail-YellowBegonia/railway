@@ -24,7 +24,7 @@ import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 
-from model.wagon_data import ConsistDataLog
+from model.wagon_data import WagonDataLog
 
 
 class GeometricRole(Enum):
@@ -64,9 +64,22 @@ class WagonConfig:
     # 它不回答"这节车厢是不是机车"——那是 have_control 的事。
     wagon_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     # [A·身份] 车厢身份，与物理车厢 1:1 绑定，供按 wagon_id 挂靠车厢级数据。
-    # 镜像/复制时必须原样传递（镜像只是重新定义朝向，不是新车厢），不能重新生成——
-    # 否则折返一次就会让车厢彻底失去身份，外部按 wagon_id 挂靠的状态（货物/损耗/
-    # 计划）都会失联。
+    # 复制/新建车厢时必须重新生成；**同一节物理车厢的等价副本必须原样传递**，
+    # 否则外部按 wagon_id 挂靠的状态（货物/损耗/计划）都会失联。
+    have_control: bool = False
+    # [A·决定性] 控制车标志：决定"这节车厢能不能持有并执行调度计划"。
+    # 2026-09-10 定（Q2）：控制是**决定性属性**（与身份同级），动力只是物理参数。
+    # 四种组合都合法：控制+动力=机车 / 控制无动力=驾驶拖车 / 有动力无控制=补机 /
+    # 都无=普通车厢。**当前无人读取本字段**（惰性落地 T2-1），消费点（渲染、
+    # 解挂提示、计划遴选）待计划层定稿后再接。
+    priority: int = 0
+    # [A·决定性] 多控制车冲突时的遴选优先级（**不查重**，允许重复）；
+    # 相同优先级用 wagon_id 大小决断（Q4 最简解法；"取小还是取大"待拍板 = Q5）。
+    # 同样**当前无人读取**。
+    data_log: WagonDataLog = field(default_factory=WagonDataLog)
+    # [A·状态] 本车厢自己的数据包（未来承载调度命令/状态标记；近期无生产者）。
+    # 2026-09-10 从 Consist 迁入（T2-2）：数据包**随车厢走**，解挂/连挂不再需要
+    # 任何归并/拆分记账——车厢是同一批对象，它自己的包自然跟着它（见 Q9）。
 
     def __post_init__(self):
         """自动填充 coupler_2_pos = length（如果未显式设置）。"""
@@ -106,14 +119,19 @@ class Consist:
       或让编组级字段承担"跨编组交割"的语义——解挂/连挂时它们会被重建。
     """
     wagons: list[WagonConfig]       # 成员与顺序（身份指向 A 桶；不是数据副本）
-    data_log: ConsistDataLog = field(default_factory=ConsistDataLog)
-    # 车厢级数据包日志，按 wagon_id 归属。couple/decouple 时用 merge/split
-    # 维护，与 wagons 列表的增减保持同步（同一组 wagon_id）。
 
     @property
     def total_mass(self) -> float:
         """编组总质量（吨）。"""
         return sum(w.mass for w in self.wagons)
+
+    def control_cars(self) -> list[WagonConfig]:
+        """本编组里的**控制车**（A 桶 `have_control`）——未来"遴选计划"的输入面。
+
+        2026-09-10 预留（惰性落地 T2-3）：**当前无调用者**。计划层定稿后，
+        编组按"控制车优先级 → wagon_id"遴选要执行哪节控制车的计划（Q4/Q6）。
+        """
+        return [w for w in self.wagons if w.have_control]
 
     @property
     def total_length(self) -> float:
@@ -123,28 +141,22 @@ class Consist:
     def split_at(self, wagon_idx: int) -> tuple["Consist", "Consist"]:
         """按 wagon_idx 拆分编组（0-indexed，前段含 wagons[0..wagon_idx]）。
 
-        车厢列表与 data_log 一起拆分，保证 wagon_id 归属和数据包归属
-        始终同步——这是 decouple_at 的核心依赖，几何切分见
-        TrainEntity.decouple_at。
+        只切**成员列表**：车厢级数据（A 桶，含各自的 `data_log`）随车厢对象
+        自然归属，不需要任何拆分记账——这是 data_log 迁入车厢后（T2-2）的直接
+        简化，原来的 `wagon_id` 归属分配逻辑已整体删除。
+        几何切分见 `TrainEntity.decouple_at`。
         """
         front_wagons = self.wagons[:wagon_idx + 1]
         rear_wagons = self.wagons[wagon_idx + 1:]
-        front_ids = {w.wagon_id for w in front_wagons}
-        front_log, rear_log = self.data_log.split(front_ids)
-        return (
-            Consist(wagons=front_wagons, data_log=front_log),
-            Consist(wagons=rear_wagons, data_log=rear_log),
-        )
+        return Consist(wagons=front_wagons), Consist(wagons=rear_wagons)
 
     def merged_with(self, rear: "Consist") -> "Consist":
         """将 rear 编组连挂到本编组车尾，返回合并后的新编组。
 
-        车厢列表拼接 + data_log 归并，保证两侧车厢原有的数据包都保留。
+        只拼**成员列表**：两侧车厢各自的域数据（含 `data_log`）随车厢对象保留，
+        不再需要归并记账（T2-2）。
         """
-        return Consist(
-            wagons=self.wagons + rear.wagons,
-            data_log=self.data_log.merge(rear.data_log),
-        )
+        return Consist(wagons=self.wagons + rear.wagons)
 
 
 # ===== D2: 弧长/割线求解器 =====
@@ -293,13 +305,19 @@ def create_simple_wagon(
     length: float = 20.0,
     mass: float = 50.0,
     P_rated: float | None = None,
+    have_control: bool | None = None,
+    priority: int = 0,
 ) -> WagonConfig:
     """创建一个简单的标准车厢（两转向架，对称布局）。
 
     参数:
         length: 车厢长度（米），默认 20m
         mass: 质量（吨），默认 50 吨
-        P_rated: 额定功率（kW），None = 拖车，非 None = 动力车
+        P_rated: 额定功率（kW），None = 无动力，非 None = 有动力
+        have_control: 是否控制车。**None = 暂按 `P_rated is not None` 推导**
+            （2026-09-10 惰性落地 T2-1 的临时策略：当前无消费点，故不影响行为；
+            四种控制/动力组合最终如何由工厂默认产出，待计划层定稿 = Q2 细节）
+        priority: 控制车遴选优先级（**不查重**；当前无消费点）
 
     转向架布局：前后各占 1/8 长度处（即两转向架间距 = 3/4 长度）。
     """
@@ -307,10 +325,15 @@ def create_simple_wagon(
     bogie_1_pos = length * 0.125
     bogie_2_pos = bogie_1_pos + bogie_spacing
 
+    if have_control is None:
+        have_control = P_rated is not None
+
     return WagonConfig(
         length=length,
         mass=mass,
         P_rated=P_rated,
+        have_control=have_control,
+        priority=priority,
         bogies=[
             BogieConfig(geometric_role=GeometricRole.LEADING, pos=bogie_1_pos, load_share=0.5),
             BogieConfig(geometric_role=GeometricRole.TRAILING, pos=bogie_2_pos, load_share=0.5),

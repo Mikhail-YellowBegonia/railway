@@ -110,6 +110,11 @@ def serialize_trains(trains: list["TrainEntity"]) -> list[dict]:
                 "length": w.length,
                 "mass": w.mass,
                 "P_rated": w.P_rated,
+                # A 桶决定性字段（2026-09-10 T2-1）：控制车标志与遴选优先级。
+                # 当前无消费点，落盘是为了不丢——将来计划挂到控制车上时，
+                # 这两个字段就是"谁的司机在开车"的依据。
+                "have_control": w.have_control,
+                "priority": w.priority,
                 "coupler_1_pos": w.coupler_1_pos,
                 "coupler_2_pos": w.coupler_2_pos,
                 "bogies": [
@@ -173,7 +178,7 @@ def deserialize_trains(
     from model.wagon import WagonConfig, Consist, BogieConfig, GeometricRole
     from model.occupancy import OccupancyState
     from model.train_entity import TrainEntity, TrainState
-    from model.train_physics import RealisticElectric
+    from model.train_physics import DEFAULT_PHYSICS
 
     trains: list["TrainEntity"] = []
     for rec in data:
@@ -221,6 +226,10 @@ def deserialize_trains(
                 length=w["length"],
                 mass=w["mass"],
                 P_rated=w.get("P_rated"),
+                # A 桶新字段（2026-09-10 惰性落地 T2-1）：旧存档没有这两个键时
+                # 按当时的行为推导（控制车 ⇔ 有动力），保证旧档读回语义不变。
+                have_control=w.get("have_control", w.get("P_rated") is not None),
+                priority=w.get("priority", 0),
                 coupler_1_pos=w.get("coupler_1_pos", 0.0),
                 coupler_2_pos=w.get("coupler_2_pos", w["length"]),
                 bogies=bogies,
@@ -243,7 +252,7 @@ def deserialize_trains(
             consist=consist,
             goal=goal,
         )
-        train = TrainEntity(state, network, RealisticElectric())
+        train = TrainEntity(state, network, DEFAULT_PHYSICS)
         train.v_target = rec.get("v_target", 0.0)
         # 行驶中（有 route）：重建 controller
         if route:

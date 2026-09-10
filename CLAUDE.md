@@ -278,11 +278,18 @@ ab8a5ea 门槛放宽）后**能用了**，但用户明确表示：实现仍不�
 
 **未修复的风险（动手做计划系统 #7/#9 前必读；完整清单与证据见
 `docs/roadmap.md` #9 章节 A/B）**：
+
+⚠ **状态更新（2026-09-10，T0~T2 落地后）**：**B2 / B4 / B5 / B6 已修或已结构性
+消失**（physics 去身份共享、死字段删除、`couple_with(self)` 自反断言、`data_log`
+迁入车厢后拆分/归并记账消失）；**B3 的答案是"计划归控制车（车厢），不能挂
+`TrainEntity`"**（设计已定，实现属任务 3）；**B1 仍待 T3**——物理属性**只读尚未
+强制**（`WagonConfig` 仍是可变 dataclass，`bogies` 还是可变 list），所以下面第 1 条
+"**不要把新状态加到 `WagonConfig` 字段上**"**依然有效**。以下 6 条保留作背景与证据。
+
 1. **车厢是共享可变别名**：解挂后两段与父列车、连挂后 merged 与两个来源**都是
    同一批 `WagonConfig` 对象**——就地改一个字段会跨编组串味（实测 `mass` 传播
    到父列车）。**不要把新状态加到 `WagonConfig` 字段上**；车厢级元数据应走
-   `WagonDataPacket.payload`（split/merge 已验证，但目前全仓零生产/消费者，
-   `data_log` 恒为空）。
+   `WagonDataPacket.payload`（**T2 起已随车厢托管**；但全仓仍零生产/消费者）。
 2. **`physics` 交接无规则**：解挂后两段共享父的 physics；连挂后 merged 用
    **前车**的 physics，后车的被静默丢弃。今天全员 `RealisticElectric()` 默认
    参数故无差异；roadmap #3 落地前必须定"物理属于编组还是属于机车"。
@@ -372,14 +379,25 @@ A 车厢域数据 / B 编组运行期派生 / C 基础设施侧 / D 删除·迁�
 「非法的调度计划」）——**执行期跳过**，不是编辑期拒绝（与 DELETE 保护策略不同，
 可并存）。**仍待研讨**：Q3、Q4、Q5、Q7、Q9 细节、Q10、Q12、Q13。
 
-**可"无感落地"的准备工作**见研讨稿 **§8**（用户要求"先把不添加新功能的部分做掉"）：
-T0 纯注释 / **T1 删死代码**（`Consist.velocity`·`acceleration`、`reversed_consist`·
-`reversed_config`）/ **T2 惰性结构准备**（加 `have_control`·`priority` 但不接消费点、
-`data_log` 迁入车厢、physics 去身份、`control_cars()`、`couple_with(self)` 断言）/
-T3 明确现在不做（只读冻结、载货、计划类型、POI 等）。
-⚠ **T1/T2 涉及改代码且此前约定"审计发现只汇报不修复"→ 未获用户点头前不要执行**；
-在 Q3 等未定稿前，仍不要按本设想做结构性改动（`model/wagon.py` /
-`train_entity.py` / `session.py`）。
+**可"无感落地"的准备工作**见研讨稿 **§8**（用户要求"先把不添加新功能的部分做掉"）。
+✅ **T0 / T1 / T2 已于 2026-09-10 全部落地**（用户批准；三次提交：`4919434` T0 注释、
+`fc6808f` T1 删死代码、T2 惰性结构准备）：
+- **T0**：归属规则 + 四桶写进 `model/wagon.py` / `model/train_entity.py` 模块 docstring
+  与 `docs/session_persistence.md` §2.1（新字段先问"域数据还是运行期派生"）。
+- **T1**：删 `Consist.velocity`/`acceleration`（死字段）与
+  `WagonConfig.reversed_config()`/`Consist.reversed_consist()`（死代码 + 身份隐患）。
+- **T2**：`WagonConfig` 增 `have_control`/`priority`（**加了但当前无任何消费点**，
+  session 已存取且兼容旧档：缺键时按当时行为推导"控制车⇔有动力"）；`data_log` 从
+  `Consist` **迁入车厢**（容器改名 `WagonDataLog`，`split/merge` 记账删除，
+  `split_at`/`merged_with` 只切/拼成员列表）；新增 `Consist.control_cars()`（无调用者）；
+  physics **去身份**（模块级 `train_physics.DEFAULT_PHYSICS` 全列车共享，B2 从结构上消失）；
+  `couple_with(self)` 加自反断言（B5 关闭）。
+  验证：全套 14 项回归通过 + 真实存档往返（旧档读回按当时行为推导、往返字节稳定、
+  `manual_track.geojson` 未被改动）。
+- **T3 仍未做**（等定稿）：只读冻结、载货、**计划/命令类型**、POI、`route`/`goal` 投影重构。
+  ⚠ 在 Q3/Q5/Q13 等定稿前，**不要**按本设想继续做结构性改动；
+  但注意这批字段已在代码里（`have_control`/`priority`/`control_cars`），
+  **在计划层定稿前不要给它们接消费点**（否则等于提前定行为）。
 
 ## Input reference
 

@@ -547,6 +547,12 @@ class TrainEntity:
         调用方负责：
         - 从 trains 列表移除 self 和 rear，加入返回的新实体
         """
+        # 自反断言（2026-09-10，惰性落地 T2-5 / 审计 B5）：UI 层已挡住"自己连自己"
+        # （GameLoop._couple_to_hovered 的 `target_train is front`、coupling.find_couple_pair
+        # 排除自身），但模型层原先没有防线——实测 couple_with(self) 不报错，会产出
+        # "同一 WagonConfig 对象在编组内重复、total_mass 翻倍、几何重叠"的损坏编组。
+        if rear is self:
+            raise ValueError("couple_with: 不能把列车连挂到它自己")
         if not self.is_parked() or not rear.is_parked():
             raise RuntimeError("couple_with: 两列车都必须先停车")
 

@@ -872,7 +872,7 @@ class GameLoop:
     def _play_left_click(self, world_pos: Vec3) -> None:
         """左键：切换焦点列车 / 放置新列车（两步流程）。"""
         from model.pathfinding import Path, _directed_from
-        from model.train_physics import RealisticElectric
+        from model.train_physics import DEFAULT_PHYSICS
         from model.wagon import create_simple_wagon, Consist
         from model.train_entity import TrainEntity, TrainState
 
@@ -927,7 +927,7 @@ class GameLoop:
         park_occ = OccupancyState(occupied=[park_directed], occupied_offset=0.0, s=0.0, route=[])
         state = TrainState(occupancy=park_occ, remaining_to_goal=0.0, v=0.0,
                            consist=self.train_placement_consist)
-        new_train = TrainEntity(state, self.network, RealisticElectric())
+        new_train = TrainEntity(state, self.network, DEFAULT_PHYSICS)
         self.trains.append(new_train)
         self.active_train = new_train
         self.train_v_target = 0.0
