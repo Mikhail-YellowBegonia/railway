@@ -320,12 +320,26 @@ ab8a5ea 门槛放宽）后**能用了**，但用户明确表示：实现仍不�
 退化为无状态公式集、计划归车厢所以编组变化不丢、`Consist.velocity` 可删、
 `data_log` 移入车厢后拆分/归并记账消失）；**B5 仍需单独补自反断言**。
 
-⚠ **最大分歧（未决，动手前必须先答）**：设想说"编组不存任何持久化数据"，但当前
-**位置真值是编组级的**（`TrainState.s` + `occupancy` 窗口 + `RigidWagonKinematics`
-刚体链）且**必须随存档还原**（`docs/session_persistence.md`）。要么把"持久化数据"
-限定为域数据（物理/载货/计划）而把速度位置归为运行期派生状态，要么把运动学真值
-下沉到车厢（大改）。**这是 `docs/wagon_centric_data.md` 的 Q1，未定前不要动
-`model/wagon.py` / `model/train_entity.py` / `model/session.py` 的结构。**
+✅ **Q1 已拍板（2026-09-10）= 方案 A**：**域数据（物理属性 / 载货 / 计划）归
+车厢所有**（只读，载货量等由车厢自力更新）；**运行期派生状态**（`v`、
+`occupancy` 窗口、`controller`、`authority_remaining`、`v_target`，以及**由选中
+计划投影出来的 `route`/`goal`**）**由编组持有、可随时重算**，存档时仍写位置快照
+（`docs/session_persistence.md` 的机制不变）。**不做"运动学真值下沉车厢"**——
+`RigidWagonKinematics` 刚体链与 `session` 位置还原**保持现状、不重写**。
+
+**新字段的判定规则（先问这一句）**：它是**域数据**（描述这节车厢本身 → 车厢拥有、
+随车厢走、只读）还是**运行期派生**（描述此刻这列编组怎么跑 → 编组持有、可随时
+重算/丢弃）？**编组持有的字段不得被当作域数据长期保存或跨编组交割。**
+
+因此：计划在控制车上、编组的 `route`/`goal` 只是它的**投影**——解挂/连挂丢投影
+**不是丢数据**，新编组会重新遴选控制车并重新投影（这正是"司机与列车无关"）。
+`Consist.velocity/acceleration` 与 `data_log` 判定为违规（前者编组持有域数据性
+质的字段且从不更新；后者车厢级数据却托管于编组）→ 分别按 B4/Q9 处理。
+
+⚠ **Q2~Q10 仍未定**（`have_control` 与 `P_rated` 的关系、只读如何强制、计划生命
+周期、落选计划去留、POI、`data_log` 去向、死代码清理…）：**在它们定稿前，不要按
+本设想动手改 `model/wagon.py` / `model/train_entity.py` / `model/session.py` 的
+结构**——只可做与设想无关的独立小修（如 B5 自反断言）。
 
 ## Input reference
 
