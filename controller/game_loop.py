@@ -504,6 +504,22 @@ class GameLoop:
                     self._couple_to_hovered(train, key)
             elif event.key == pygame.K_k and self.editor.mode == EditMode.PLAY:
                 print("PLAY: 悬停列车内部车钩按 K 解挂，悬停其它列车端头车钩按 K 连挂")
+        elif event.key == pygame.K_r:
+            # R 键（PLAY 模式）：选中列车原地折返——只切换前进方向（逻辑），
+            # 不改编组顺序；任意位置可用，但要求列车停放、车身所在段无道岔。
+            # 2026-09 用户要求（服务"玩家手动要求列车折返"场景）。
+            if self.editor.mode != EditMode.PLAY:
+                print("PLAY: R 折返只在 PLAY 模式可用（P 键进入）")
+            elif self.active_train is None:
+                print("PLAY: 未选中列车，左键先选中再按 R 折返")
+            elif self.active_train.is_moving():
+                print("PLAY: 请先让列车完全停车（空格急停）再按 R 折返")
+            else:
+                t = self.active_train
+                if t.reverse_in_place():
+                    print(f"PLAY: 列车 #{self.trains.index(t)+1} 已原地折返"
+                          f"（只换前进方向，编组顺序不变）")
+                # 失败原因由 reverse_in_place 打印（跨道岔等）
         elif event.key == pygame.K_SPACE:
             # 空格键：PLAY 模式且悬停内部车钩(停放) = 解挂确认；否则 = 列车紧急停止
             # （行驶中按空格仍应能紧急停车，不能被悬停语义吞掉；非 PLAY 模式
@@ -556,7 +572,15 @@ class GameLoop:
             if hit is not None:
                 self._delete_train(hit)
                 return
-            # 未命中列车 → 落到编辑器删轨道（下方 handle_click）
+            # 拒绝删除被列车占用/预约的轨道（2026-09 用户报"删有列车的轨道
+            # 崩溃"；TF2/OpenTTD 同样拒绝删除有车/有进路的区段）。列车
+            # occupied/route 里的 edge_id 一旦被删即成悬空引用，下一帧
+            # dispatcher.tick / kinematics 直接 KeyError 崩溃。
+            reason = self._rail_delete_blocked_reason()
+            if reason is not None:
+                print(f"DELETE 拒绝：{reason}（先把列车开走或删除列车）")
+                return
+            # 未命中列车、轨道也没被占用 → 落到编辑器删轨道（下方 handle_click）
 
         pan_buttons = self._pan_buttons_for_mode()
         if event.button in pan_buttons:
@@ -773,6 +797,38 @@ class GameLoop:
             self._hovered_coupler = None
         print(f"PLAY: 已删除列车 #{idx}")
 
+    def _train_locked_edges(self) -> set[int]:
+        """所有列车当前占用（occupied）或已预约/待走（route）的 edge_id 集合。"""
+        locked: set[int] = set()
+        for t in self.trains:
+            locked |= {eid for eid, _d in t.state.occupancy.occupied}
+            locked |= {eid for eid, _d in t.state.occupancy.route}
+        return locked
+
+    def _rail_delete_blocked_reason(self) -> str | None:
+        """DELETE 点击轨道前的安全检查：命中对象是否被列车占用/预约。
+
+        返回拒绝原因字符串（应拒绝删除），或 None（可安全删除）。与
+        Transport Fever 2 / OpenTTD 一致：有车或有进路的区段不允许拆除。
+        被删的 edge_id 会留在列车 occupied/route 里成悬空引用，下一帧
+        dispatcher.tick（network.edges[eid]）或 kinematics 重建即崩溃
+        （2026-09 用户实测）。
+        """
+        locked = self._train_locked_edges()
+        if not locked:
+            return None
+        # editor._delete 的命中优先级是 Node > Edge，这里按同一优先级检查：
+        # 删节点走"合并两条边"（同样会移除旧 edge_id/新建边），也要拦。
+        nid = self.editor.hovered_node_id
+        if nid is not None:
+            node = self.network.nodes.get(nid)
+            if node is not None and (set(node.incident_edge_ids) & locked):
+                return f"节点 {nid} 关联的轨道正被列车占用或预约"
+        eid = self.editor.hovered_edge_id
+        if eid is not None and eid in locked:
+            return f"轨道 edge {eid} 正被列车占用或预约"
+        return None
+
     def _hit_test_coupler(self, _world_pos: Vec3,
                           screen_pos: tuple[int, int] | None = None) \
             -> tuple["TrainEntity", str, int | str] | None:
@@ -978,7 +1034,9 @@ class GameLoop:
             # advance_occupied_path 的中途检测），这里改为显式调用
             # reverse_in_place 后再走一次 assign_route。
             if train.is_parked():
-                train.reverse_in_place()
+                if not train.reverse_in_place():
+                    print("PLAY: 无法起步行车方向（原地折返被拒，见上方原因）")
+                    return
                 head_directed = train.head_directed_edge()
                 route = path.edges[1:] if (path.edges and path.edges[0] == head_directed) else path.edges
             else:

@@ -6,7 +6,7 @@ from model.pathfinding import DirectedEdge, Path
 from model.wagon import Consist
 from model.occupancy import (
     OccupancyState, advance_occupied_path, occupied_as_path,
-    reverse_occupancy, truncate_to_segment,
+    reverse_occupancy,
 )
 from model.rigid_kinematics import RigidWagonKinematics
 from model.train_physics import TrainPhysics
@@ -200,36 +200,64 @@ class TrainEntity:
         self.controller = BrakingController(self.physics, self.state.consist)
         self.controller.reset()
 
-    def reverse_in_place(self) -> None:
-        """原地折返：车头车尾互换，车身占用的物理边集合不变。
+    def reverse_in_place(self) -> bool:
+        """原地掉头：车头车尾定义互换，车身占用的物理边集合不变。
 
-        只允许停车时调用（折返不是物理倒车，是逻辑方向翻转，要求先静止）。
-        调用后 route 清空、remaining_to_goal 归零——旧指令基于旧车头方向，
-        折返后必须重新寻路才有意义，不会自动继续。
+        2026-09 语义（用户拍板，勿回退）：**只切换前进方向（逻辑），不反转
+        列车编组（不调 reversed_consist）**。车厢在轨道上的前后位置随掉头
+        对调（等价整列车原地旋转 180°），而 consist 列表顺序保持不变——
+        `wagons[0]` 仍是同一节车厢，成为新前进方向的头部。
+        （历史：早期实现同时 reversed_consist，会把编组顺序也倒过来，与
+        "掉头只换向、不改编组"的现实调车语义不符。）
 
-        车厢本身没有物理旋转（车厢没有转身，只是重新定义哪端朝前），所以
-        必须同步反转 Consist（reversed_consist），否则 get_all_wagon_poses
-        仍按旧的 wagons[0] 链式求解，会在几何上出现车厢错位/重叠——这正是
-        最初报告的"转向架反弹"bug 的根源。
+        **任意位置可调用**（不限死端），但要求列车车身所在轨道段没有道岔：
+        车身覆盖的 occupied 边链内部节点若 `connection_count() >= 3`（道岔），
+        掉头会把分歧边一起镜像（Step3 死循环 bug 同源），直接拒绝。
 
-        前置条件用 `controller is None`（= 静止）而非 `is_parked()`（= 无指令）：
-        行驶途中触发折返标记（`_do_auto_reversal`）时 route 仍非空，但车已
-        静止、可以折返；这里不该因为 route 非空就拒绝。
+        前置条件：必须静止（`controller is None`）——折返不是物理倒车，
+        行驶中换向无意义。
+
+        返回 True = 已折返；False = 拒绝（原因已打印，调用方提示玩家）。
+        调用后 route 清空、remaining_to_goal 归零（旧指令基于旧方向）。
         """
         if self.controller is not None:
-            raise RuntimeError("reverse_in_place: 只能在停车状态下折返")
+            print("折返拒绝：列车必须完全停车后再折返")
+            return False
 
-        # 折返前先截断掉 occupied 中不属于当前 simple_segment 的前缀
-        # （turnout 背面的边）——否则反转会把这些边也带上，车头折返后
-        # 会沿着错误方向走上原路径（Step3 死循环 bug 的真正成因）。
-        from model.pathfinding import head_node
-        endpoint_node_id = head_node(self.network, self.state.occupancy.occupied[-1])
-        _seg_len, _turnout, segment_edge_ids = self.network.simple_segment_from_endpoint(
-            endpoint_node_id,
-        )
-        self.state.occupancy = truncate_to_segment(
-            self.state.occupancy, set(segment_edge_ids), self.network,
-        )
+        occ = self.state.occupancy
+        if not occ.occupied:
+            print("折返拒绝：列车没有占用任何轨道")
+            return False
+
+        # 车身链：丢弃滑动窗口里"车身之前"的冗余前缀边（occupied_offset 已经
+        # 定位车尾在 occupied[0] 内的位置，超出部分与车身无关，可能跨道岔而
+        # 误判，先裁掉）。
+        occupied = list(occ.occupied)
+        offset = occ.occupied_offset
+        k = 0
+        while k < len(occupied) - 1:
+            elen = self.network.edges[occupied[k][0]].length
+            if offset > elen + 1e-9:
+                offset -= elen
+                k += 1
+            else:
+                break
+        body_edges = occupied[k:]
+        body_occ = OccupancyState(occupied=body_edges, occupied_offset=offset,
+                                  s=occ.s, route=[])
+
+        # 车身段不得含道岔：检查边链内部连接节点（相邻两条边共享的节点）。
+        for i in range(len(body_edges) - 1):
+            eid, direction = body_edges[i]
+            edge = self.network.edges[eid]
+            shared_nid = (edge.node_b_id if direction > 0 else edge.node_a_id)
+            node = self.network.nodes.get(shared_nid)
+            if node is not None and node.connection_count() >= 3:
+                print(f"折返拒绝：车身所在轨道段含道岔（节点 {shared_nid}，"
+                      f"{node.connection_count()} 条分支），请先驶入无分歧线段")
+                return False
+
+        self.state.occupancy = body_occ
         self.kinematics = self._build_kinematics()
 
         real_tail_bogie_abs_s = self.kinematics.real_tail_bogie_abs_s(self.state.s)
@@ -237,9 +265,13 @@ class TrainEntity:
             self.network, self.state.occupancy,
             real_tail_bogie_abs_s, self.state.consist.total_length,
         )
-        self.state.consist = self.state.consist.reversed_consist()
+        # 不反转 consist（用户语义）：车厢位置随 occupied 镜像对调，
+        # wagons 顺序保持——新车头 = 原车尾那一侧的车厢。
+        self.state.occupancy.route = []
         self.state.remaining_to_goal = 0.0
+        self.authority_remaining = None
         self.kinematics = self._build_kinematics()
+        return True
 
     # ------------------------------------------------------------------
     # 每帧更新
@@ -323,11 +355,12 @@ class TrainEntity:
         导致折返→重新寻路→又判定折返的无限振荡（已实测复现：两个死端间
         每 6 秒振荡一次，永远到不了终点）。
 
-        真正的修复是 Step3 阶段 C：reverse_in_place() 在反转前用
-        truncate_to_segment() 把 occupied 精确截断到 simple_segment 范围
-        （丢弃 turnout 背面的边）。只要这个截断是对的，折返后的新车头就
-        必然落在 simple_segment 内部，而 route 剩余部分（advance_occupied_path
-        已经弹出了折返标记边）本来就是 Dijkstra 一次性算好的、从 turnout
+        真正的修复是 Step3 阶段 C：reverse_in_place() 在反转前把 occupied
+        截断到"车身所在段"（丢弃窗口里车身之前的冗余边；2026-09 起改为
+        "车身链裁剪 + 车身跨道岔则拒绝"，见 reverse_in_place docstring）。
+        只要车身没有被镜像到分歧之外，折返后的新车头就必然落在同一
+        无分歧段内部，而 route 剩余部分（advance_occupied_path
+        已经弹出了折返标记边）本来就是 Dijkstra 一次性算好的、从折返点
         出发的正确路径——不需要重算，直接接上即可，这样"重新寻路"带来的
         振荡风险完全消失（寻路只发生一次，折返只是几何操作）。
 
@@ -341,7 +374,13 @@ class TrainEntity:
         self.state.v = 0.0
         self.last_a = 0.0
         self.controller = None  # reverse_in_place 要求静止（controller is None）
-        self.reverse_in_place()
+        if not self.reverse_in_place():
+            # 折返被拒（车身跨道岔等）：放弃指令，停稳等玩家重新下达，
+            # 不留半失效的 route/goal（避免列车带着旧方向继续走）。
+            self.emergency_stop()
+            self.state.goal = None
+            print("折返失败：已放弃当前指令，请重新下达")
+            return
         self.state.occupancy.route = remaining_route
         # 折返后 remaining 按几何重算（2026-09 bug2 现场修复，勿回退）：
         # 寻路被迫绕行、含"死端折返往返"段时（如单向信号使直路被禁），

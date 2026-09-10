@@ -161,16 +161,36 @@ on load — round-trip is bit-stable for arc geometry within 1e-4.
 
 ## 已知限制：调车/倒车（2026-09 #1 验收反馈记录）
 
-连挂/解挂已完成，但编组作业局限在"前进对接 + 原方向驶离"——**无物理倒车**
-（`advance_occupied_path` 只沿 route 正向推进，没有负向推进原语）且**无玩家手动
-掉头入口**（键盘没有折返键；折返只在寻路含折返边到端点、或 `_apply_route_result`
-首边不匹配时自动发生）。因此 AB 顺序相连解挂后，A 在 B 前方想"倒出去"（沿
-反方向退回）时，玩家没有掉头键让 A 先转向，只能沿原方向寻路——若前方是 B 等
-列车，无碰撞模型下表现为视觉穿过（非碰撞）。`reverse_in_place` 本身在环线/直线
-中段**也能**掉头（内部 `truncate_to_segment` 截断），只是玩家无法主动触发。
-**这是预期内结果非 bug**（几乎所有铁路游戏都简化或回避调车）。详细认知记录在
-`docs/roadmap.md`「已知限制与未来方向」；将来做真实调车需先补"负向推进（倒车）
-原语"或"玩家手动掉头入口"。
+连挂/解挂已完成，编组作业局限在"前进对接 + 原方向驶离"。**仍无物理倒车
+（推挽/负向推进）**：`advance_occupied_path` 只沿 route 正向推进，没有负向推进
+原语，列车不能"倒着开"（车厢物理位置不动、车尾在前）。因此 AB 顺序相连解挂后，
+A 在 B 前方想"倒出去"时只能先掉头（R 键）再前进——若前方是 B 等列车，无碰撞
+模型下表现为**视觉穿过（非碰撞）**（用户已知问题 1，**有意取舍不修**）。
+
+**玩家手动折返已提供**（2026-09 临时追加功能 1，`reverse_in_place` 改造，
+回归 `tests/test_reverse_in_place.py`）：
+- PLAY 模式选中**停放**列车按 `R` 原地掉头；**任意位置**可用，但要求车身所在
+  轨道段无道岔（`connection_count() >= 3` 的节点），否则拒绝并提示。
+- 语义（用户拍板，勿回退）：**只切换前进方向（逻辑），不反转列车编组（物理）**
+  ——`consist` 顺序不变（**不调 `reversed_consist`**），车厢在轨道上的前后位置
+  随掉头对调（等价整列车原地旋转 180°）。历史：早期实现同时反转 consist，
+  会把编组顺序倒过来，与"掉头只换向、不改编组"的现实调车语义不符。
+- `reverse_in_place() -> bool`（True 成功 / False 拒绝并打印原因）；调用后清
+  route/remaining；行驶中（controller 非 None）拒绝。指令场景（寻路折返标记
+  消费）仍走 `_do_auto_reversal` → 同一原语。
+- 将来做真实调车（倒车/推挽）需先补"负向推进原语"。详细认知记录在
+  `docs/roadmap.md`「已知限制与未来方向」。
+
+## DELETE 保护：拒绝删除列车占用/预约的路段（2026-09）
+
+用户报"删除有列车的轨道时游戏崩溃"。根因：列车 `occupied`/`route` 里的
+`edge_id` 一旦被删即成悬空引用，下一帧 `TrainDispatcher.tick`
+（`network.edges[eid]`）直接 KeyError（已复现）。修复（与 Transport Fever 2 /
+OpenTTD 一致）：DELETE 模式点击轨道前由 `GameLoop._rail_delete_blocked_reason`
+按 editor 的命中优先级（Node > Edge）检查命中对象是否落在
+`_train_locked_edges()`（所有列车 `occupied ∪ route`）内 → 拒绝并打印提示；
+`Editor` 保持对列车零耦合。自由路段照常可删。回归
+`tests/test_delete_guard.py`。
 
 ## 连挂/解挂可靠性现状（2026-09 用户结论，勿过度承诺）
 
@@ -203,6 +223,7 @@ ab8a5ea 门槛放宽）后**能用了**，但用户明确表示：实现仍不�
 | `I` | any | Toggle spatial index visualization (debug) |
 | `C` | any | Toggle camera follow (train tracking) |
 | `K` | PLAY | 编组确认键：悬停内部车钩=解挂；悬停其它列车端头车钩=连挂（规格见 `docs/consist_ui.md`） |
+| `R` | PLAY | 选中停放列车原地折返（任意位置；只换前进方向、编组顺序不变；要求车身所在段无道岔） |
 | `Space` | PLAY | 悬停内部车钩(停放)=解挂确认；否则 = 紧急停止 |
 | `Enter` | PLAY | 悬停内部车钩(停放)=解挂确认（同 K） |
 | `↑` | Train active | Throttle (accelerate) |
