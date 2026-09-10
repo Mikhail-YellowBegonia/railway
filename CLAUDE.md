@@ -18,15 +18,25 @@ Python railway sandbox game inspired by Transport Fever 2 + AutoCAD. MVC archite
   没有"计划"这一层。**设计待研讨、尚无结论**，权威研讨记录见 `docs/roadmap.md`
   「计划式自动驾驶」（含 10 条待研讨问题）。**不得照抄任何一个同类游戏**，
   先研讨再实现；**研讨定稿前不要当"已规划"引用，也不要先写实现代码**。
+  **前置依赖**：**POI / 站台概念尚未定义**，调度命令没有下达依据（roadmap #9
+  第 2 项），落地顺序是 POI → 计划数据类型 → 接入列车逻辑。
+- **demo 要做（与上一条绑定）**：**编组元数据交割复核**（roadmap #9）——本项目
+  主张**以车厢为最小单位**（同类游戏多以编组为原子单位），G 阶段原本就是为
+  "拆分/拼合时元数据与调度计划交割不当"这一风险准备的。因顺序倒置（连挂/解挂
+  先于计划系统落地）该风险未真正暴露，但现在要**回头补检查**：roadmap #9 的
+  4 项任务是 ①检查数据结构（**已执行，只汇报不修复**）②构思 POI ③新增调度
+  计划数据类型 ④接入列车逻辑；②~④ 与 #7 合并研讨。详见 `docs/roadmap.md`
+  「G 阶段背景与四项任务」与 `docs/train_control.md` G 章节。
 - **demo 最后一步**：**开源发布**（demo 完成同时开源；许可协议 / README /
   仓库卫生待办）。
 - **demo 不做**：LOD（代码零实现）、真实物理扩展（roadmap #3）、无物理倒车
   （负向推进原语）、碰撞模型（无碰撞是有意取舍，见下「已知限制：调车/倒车」）。
   ⚠ **注意"瓦片化数据结构（tiling）"不在这一列**——它**已经实现**了，就是
   `model/spatial_index.py`（uniform grid，340× 加速）；其设计稿
-  `docs/tiling.md` 实施完成后已主动删除（`b8c9209`），但代码注释里仍有
-  悬空引用（`model/spatial_index.py` / `model/rail_network.py`，待清理）。
-  不追加投入的理由同样是"无性能瓶颈"。
+  `docs/tiling.md` 实施完成后已主动删除（`b8c9209`），指向它的 9 处陈旧引用
+  （`model/spatial_index.py` 5 处 / `model/rail_network.py` 3 处 /
+  `docs/editor.md` §3.4）已于 2026-09-10 全部清理。不追加投入的理由同样是
+  "无性能瓶颈"。
 - **未拍板是否 demo 不做**：UI 图形化（roadmap #5）、建造时自动合并临近 Node
   （#6）——文档里只写"排最后"，没有"demo 不做"结论。
 - 约定：`docs/roadmap.md` 待办清单每项**必须显式标注**三种状态之一（✅ 已完成 /
@@ -255,6 +265,39 @@ ab8a5ea 门槛放宽）后**能用了**，但用户明确表示：实现仍不�
    合并窗口 = 后车 occupied + 前车 occupied 中后车没有的新边（贴住时后车头≈
    前车尾、窗口邻接连续），`occupied_offset` 继承后车、`s=合并车长`。回归
    `tests/test_couple_ui.py` §1b。若再出现折叠/几何异常先查此处窗口拼接。
+
+## 编组数据结构审计结论（roadmap #9 第 1 项，2026-09-10，**只汇报未修复**）
+
+用户要求复核"以车厢为最小单位"下的元数据交割（G 阶段原始风险）。**已确立的
+不变量（实测）**：`wagon_id` 与 `WagonConfig` 对象跨 解挂↔连挂 往返保持
+（顺序 + 对象同一性 + 车头世界坐标 <1e-6）；`data_log` 按 `wagon_id` 正确拆分/
+归并且日志 id ⊆ 编组 wagon id；子段 `occupied` 是独立 list、父对象不被就地改动；
+**`decouple_at`/`couple_with` 都断言 `is_parked()`（controller None **且** route
+空）→ 行驶中与信号前等待（holding）的列车都不能改变编组**（这是 G 阶段风险没
+爆发的关键原因）；`tick_reservations` 按对象身份清除被替换实体的预约。
+
+**未修复的风险（动手做计划系统 #7/#9 前必读；完整清单与证据见
+`docs/roadmap.md` #9 章节 A/B）**：
+1. **车厢是共享可变别名**：解挂后两段与父列车、连挂后 merged 与两个来源**都是
+   同一批 `WagonConfig` 对象**——就地改一个字段会跨编组串味（实测 `mass` 传播
+   到父列车）。**不要把新状态加到 `WagonConfig` 字段上**；车厢级元数据应走
+   `WagonDataPacket.payload`（split/merge 已验证，但目前全仓零生产/消费者，
+   `data_log` 恒为空）。
+2. **`physics` 交接无规则**：解挂后两段共享父的 physics；连挂后 merged 用
+   **前车**的 physics，后车的被静默丢弃。今天全员 `RealisticElectric()` 默认
+   参数故无差异；roadmap #3 落地前必须定"物理属于编组还是属于机车"。
+3. **列车级元数据在编组变化时全部丢弃且无交割通道**（`goal`/`remaining_to_goal`/
+   `v_target`/`authority_remaining`/`_stop_before_m`/`couple_approach_partner`/
+   `controller` 实测全部重置）→ **"计划"不能挂在 `TrainEntity` 上**，否则解挂/
+   连挂会静默丢掉计划。
+4. **`Consist.velocity` / `Consist.acceleration` 是死字段**（全仓零引用、永远 0，
+   与 `TrainState.v` 构成双重真源且从不更新），命名极易误导。
+5. **`couple_with(self)` 无自反断言**：实测不报错 → 同一 `WagonConfig` 对象在
+   编组内重复、`total_mass` 翻倍、几何重叠。UI 层有防护（`target_train is front`
+   检查 / `find_couple_pair` 排除自身），模型层没有。
+6. `data_log.split` 把**非车厢归属**的包一律归后段；`merge` **不去重**（同一
+   包对象跨两段时合并后重复）。今天 `WagonDataPacket` 从未被实例化，故无现行
+   影响，但第 3 项任务若想用它承载列车级/计划级数据会踩到。
 
 ## Input reference
 

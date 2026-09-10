@@ -77,7 +77,7 @@ class RailNetwork:
         self._next_node_id: int = 0
         self._next_edge_id: int = 0
         self._connectivity: dict[int, list[set[int]]] = {}
-        # 空间索引（旁挂，见 docs/tiling.md §5）
+        # 空间索引（旁挂，见 docs/editor.md §11）
         self._spatial_index = SpatialIndex()
 
     def add_node(self, position: Vec3) -> Node:
@@ -444,7 +444,7 @@ class RailNetwork:
         """返回距 pos 世界距离可能 <= radius 的 Node ID 候选集。
 
         候选集可能略多（瓦片邻域粒度），调用方需按实际距离精算筛选。
-        见 docs/tiling.md §6。
+        实现见 model/spatial_index.py（设计依据 docs/editor.md §11）。
         """
         return self._spatial_index.nearby_node_ids(pos, radius)
 
@@ -452,7 +452,7 @@ class RailNetwork:
         """返回距 pos 世界距离可能 <= radius 的 Edge ID 候选集。
 
         候选集可能略多（瓦片邻域粒度），调用方需按实际距离精算筛选。
-        见 docs/tiling.md §6。
+        实现见 model/spatial_index.py（设计依据 docs/editor.md §11）。
         """
         return self._spatial_index.nearby_edge_ids(pos, radius)
 
