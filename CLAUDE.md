@@ -5,8 +5,32 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Project
 
 Python railway sandbox game inspired by Transport Fever 2 + AutoCAD. MVC architecture.
-Editor is the current focus — see `docs/editor.md` for the authoritative design spec
-and step-by-step implementation status.
+
+**编辑器已稳固**（Steps 0–6 + 吸附 + 空间索引全部完成，权威规格 `docs/editor.md`）。
+当前重心不在编辑器，而在**补齐 demo 缺口并发布**：最大缺口是**计划式自动驾驶**
+（demo 要做、设计待研讨）。**进度总账与优先级看 `docs/roadmap.md`**（含
+「计划式自动驾驶」专项章节与「当前重心」）。
+
+## demo 范围拍板（2026-09-10，用户）
+
+- **demo 要做（最大缺口）**：**计划式自动驾驶**——创建计划并跟随计划。现状是
+  "去哪里"仍由玩家逐次人工下达（右键设 goal / 车钩连挂指令 / `↑` 设巡航），
+  没有"计划"这一层。**设计待研讨、尚无结论**，权威研讨记录见 `docs/roadmap.md`
+  「计划式自动驾驶」（含 10 条待研讨问题）。**不得照抄任何一个同类游戏**，
+  先研讨再实现；**研讨定稿前不要当"已规划"引用，也不要先写实现代码**。
+- **demo 最后一步**：**开源发布**（demo 完成同时开源；许可协议 / README /
+  仓库卫生待办）。
+- **demo 不做**：LOD（代码零实现）、真实物理扩展（roadmap #3）、无物理倒车
+  （负向推进原语）、碰撞模型（无碰撞是有意取舍，见下「已知限制：调车/倒车」）。
+  ⚠ **注意"瓦片化数据结构（tiling）"不在这一列**——它**已经实现**了，就是
+  `model/spatial_index.py`（uniform grid，340× 加速）；其设计稿
+  `docs/tiling.md` 实施完成后已主动删除（`b8c9209`），但代码注释里仍有
+  悬空引用（`model/spatial_index.py` / `model/rail_network.py`，待清理）。
+  不追加投入的理由同样是"无性能瓶颈"。
+- **未拍板是否 demo 不做**：UI 图形化（roadmap #5）、建造时自动合并临近 Node
+  （#6）——文档里只写"排最后"，没有"demo 不做"结论。
+- 约定：`docs/roadmap.md` 待办清单每项**必须显式标注**三种状态之一（✅ 已完成 /
+  ⚠ demo 不做 / 未拍板），不留空——此前 #3~#6 正因留空而与代码实况脱节。
 
 ## Commands
 
@@ -16,6 +40,13 @@ and step-by-step implementation status.
   established pattern is heredoc scripts that import editor/network modules,
   drive them programmatically, and assert. Examples appear throughout the
   conversation history when verifying each Step.
+- **Regression scripts**: `tests/test_*.py` — 每个脚本自带断言并打印 ✅，无 test
+  runner，逐个直接执行：
+  `PYTHONPATH=. SDL_VIDEODRIVER=dummy .venv/bin/python tests/test_x.py`。
+  覆盖几何/编辑、寻路、运动学与刚体车厢、物理、信号（放置 / 闭塞 / 预约 /
+  远近场 / 调度）、连挂解挂、会话持久化、DELETE 保护、折返、PLAY 指令。
+  改动 `model/` 或 `controller/` 后跑全套。（注意：某些沙箱环境里 `uv run` 会因
+  `~/.cache/uv` 不可写而失败，直接调 `.venv/bin/python` 更稳。）
 
 There are no lint, typecheck, or unit-test commands configured. Don't add them
 without asking.
@@ -39,7 +70,7 @@ view/        pygame-ce rendering only
 controller/  Wires it together
   game_loop.py       Event loop, key/mouse routing, modifier-key polling
   editor.py          Editor state machine (modes + build substates)
-  snap.py            SnapSystem with PointSnapProvider + PathSnapProvider
+  snap.py            SnapSystem: Point/Grid/Path/Parallel SnapProviders + 长度/角度吸附
   build_plan.py      ConstructionPlan / PreviewGeometry dataclasses
 ```
 
@@ -101,11 +132,18 @@ track**, not cursor.
 
 ## Snap system
 
-`SnapSystem.snap(world_pos, network, reference_pos)` tries Providers in order:
+`SnapSystem.snap(world_pos, network, reference_pos)` tries Providers in order
+（`controller/snap.py`，顺序与 `SnapSystem.snap` 实现一致）：
 1. **PointSnapProvider** (threshold 0.3) — snaps to nearest Node, returns all
    incident-edge tangent candidates (endpoint=1, switch=N, isolated=0)
-2. **PathSnapProvider** (threshold 0.3) — snaps to closest Edge, returns
+2. **GridSnapProvider**（格点吸附，`G` 键）— 公制格点
+3. **ParallelSnapProvider**（平行吸附，`P` 键，spacing 5.0）— Simple / Complex Case
+4. **PathSnapProvider** (threshold 0.3) — snaps to closest Edge, returns
    `[forward, reverse]` tangent candidates
+
+另有**长度吸附（`L` 键，仅直线）/ 角度吸附（`A` 键，仅单弧）**：由 `Editor` 的
+`length_snap_enabled` / `angle_snap_enabled` 标志实现（`controller/editor.py`），
+与 `G` 格点吸附**互斥**，不是 SnapProvider。
 
 `reference_pos` is M1 in BUILD_ACTIVE, None otherwise. Used by PathSnapProvider
 to pick the "best" tangent for live preview display (does not affect the
@@ -413,10 +451,14 @@ OpenTTD Path Signal 调研笔记和分步实施状态。核心要点：
 The editor design doc is the source of truth for behavior. §3 covers the full
 snap system (Point/Grid/Parallel/Path + length/angle), §7 lists the completed
 scope (Steps 0–6, §10.1–§10.5, §12.1, snap features, and spatial index, all ✅).
-§11 records the current stance: editor stays the focus, spatial index shipped
+§11 records the editor's own stance, spatial index shipped
 (340× speedup, satisfies 60fps), next direction is advanced parallel snap
 (multi-segment along shortest path); Z-axis deferred until visual debugging
-catches up. **Pseudocode blocks in the doc are non-normative — implement to the
+catches up. **（2026-09-10 更新：§11 里"近期开发重点仍是编辑器"已不代表项目
+重心——编辑器已稳固，重心转为 roadmap #7 计划式自动驾驶；§12 的"瓦片化数据
+结构"**已实施**，即 `model/spatial_index.py`，不要误记为待办。）**
+
+**Pseudocode blocks in the doc are non-normative — implement to the
 behavior description, not the code samples.** When changing editor behavior,
 update the relevant §3 / §4 / §5 sections; when adding new follow-up
 requirements, append them as §12+ items.
