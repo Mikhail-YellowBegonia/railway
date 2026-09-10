@@ -1,10 +1,30 @@
+"""车厢（Car）与编组（Consist）的数据模型。
+
+## 归属规则（2026-09-10 定案，完整研讨见 docs/wagon_centric_data.md）
+
+**加新字段前先问一句**：它是**域数据**（描述"这节车厢是什么"）还是**运行期派生**
+（描述"此刻这列编组怎么跑"）？
+
+- **A 车厢域数据**：物理属性（长度/质量/功率/转向架/车钩位置）、载货量、
+  **调度计划** → **归车厢所有**，随车厢走（解挂带走、连挂随车、逐车厢落盘）。
+  **只读**——列车/编组不得写入（唯一例外：载货量等状态由车厢**自力更新**）。
+- **B 编组运行期派生**：速度、位置窗口（occupancy）、controller、运动授权、
+  由选中计划投影出的 route/goal → **归编组持有**，可随时重算；
+  **禁止被当作域数据长期保存或跨编组交割**。
+- **C 基础设施侧**（POI、信号等）：挂在 node/edge 上、随轨道落盘——不在本文件。
+
+**车厢对象在解挂/连挂后是同一批对象（别名共享）**：这是**正确的同一性**而不是
+隐患——同一节车厢当然只有一份状态。前提是 A 桶的物理属性**只读**、可变状态
+（载货量）本来就该随车厢共享。实测证据（就地改 `mass` 会串味到父列车）见
+`docs/roadmap.md` #9-B1。
+"""
 from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 
-from model.wagon_data import ConsistDataLog, WagonDataPacket
+from model.wagon_data import ConsistDataLog
 
 
 class GeometricRole(Enum):
@@ -29,21 +49,24 @@ class BogieConfig:
 
 @dataclass
 class WagonConfig:
-    """车厢配置（刚体车厢模型的元数据）。
+    """车厢配置（A 桶：车厢域数据；只读，见模块顶部归属规则）。
 
-    定义一节车厢的几何、质量、动力属性。是真实物理层的输入。
+    定义一节车厢的几何、质量、动力属性 —— 是真实物理层的输入。
+    **列车/编组不得写入本对象的字段**（加新字段前先确认它属于 A 桶）。
     """
-    length: float                   # 车厢总长（米，车钩到车钩）
-    mass: float                     # 质量（吨）
-    bogies: list[BogieConfig] = field(default_factory=list)  # 转向架列表（通常 2 个）
-    coupler_1_pos: float = 0.0      # 前车钩位置（米，逻辑原点，通常 0）
-    coupler_2_pos: float = 0.0      # 后车钩位置（米，= length 或略小）
-    P_rated: float | None = None    # 额定功率（kW），None = 拖车，非 None = 动力车
+    length: float                   # [A·物理] 车厢总长（米，车钩到车钩）
+    mass: float                     # [A·物理] 空载质量（吨）；载货量另计（未来）
+    bogies: list[BogieConfig] = field(default_factory=list)  # [A·物理] 转向架（通常 2 个）
+    coupler_1_pos: float = 0.0      # [A·物理] 前车钩位置（米，逻辑原点，通常 0）
+    coupler_2_pos: float = 0.0      # [A·物理] 后车钩位置（米，= length 或略小）
+    P_rated: float | None = None    # [A·物理] 额定功率（kW），None = 无动力。
+    # 注意（2026-09-10 定，Q2）：**动力只是物理参数**（与 mass 同级，无足轻重），
+    # 它不回答"这节车厢是不是机车"——那是 have_control 的事。
     wagon_id: str = field(default_factory=lambda: str(uuid.uuid4()))
-    # 车厢身份，与物理车厢 1:1 绑定，供 ConsistDataLog 按 id 追踪数据包。
-    # reversed_config() 必须原样传递（镜像只是重新定义朝向，不是新车厢），
-    # 不能重新生成——否则折返一次就会让车厢彻底失去身份，
-    # 外部按 wagon_id 挂靠的任何状态（货物/损耗/数据包）都会失联。
+    # [A·身份] 车厢身份，与物理车厢 1:1 绑定，供按 wagon_id 挂靠车厢级数据。
+    # 镜像/复制时必须原样传递（镜像只是重新定义朝向，不是新车厢），不能重新生成——
+    # 否则折返一次就会让车厢彻底失去身份，外部按 wagon_id 挂靠的状态（货物/损耗/
+    # 计划）都会失联。
 
     def __post_init__(self):
         """自动填充 coupler_2_pos = length（如果未显式设置）。"""
@@ -62,47 +85,27 @@ class WagonConfig:
 
     @property
     def is_powered(self) -> bool:
-        """是否为动力车（有额定功率）。"""
-        return self.P_rated is not None
+        """是否有牵引动力（`P_rated` 非 None）。
 
-    def reversed_config(self) -> "WagonConfig":
-        """返回车厢物理掉头后的等价配置（车厢没有旋转，只是重新定义哪端朝前）。
-
-        用于列车折返（reverse_in_place）：整节车厢的几何量相对车厢中点镜像。
-        - 车钩位置互换：new_coupler_1 = length - old_coupler_2，反之同理
-        - 转向架位置镜像 + 前后角色互换，顺序反转（保持"新前"在 bogies[0]）
+        ⚠ **这不是"是不是机车"**（2026-09-10 定，Q2）：控制属性见 `have_control`。
+        本 property 只回答物理问题，保留给牵引计算使用；渲染/提示等"语义"用途
+        应改判为 `have_control`（见 docs/wagon_centric_data.md §6.2）。
         """
-        new_bogies = [
-            BogieConfig(
-                geometric_role=(GeometricRole.TRAILING if b.geometric_role == GeometricRole.LEADING
-                                else GeometricRole.LEADING),
-                pos=self.length - b.pos,
-                load_share=b.load_share,
-                axle_count=b.axle_count,
-            )
-            for b in reversed(self.bogies)
-        ]
-        return WagonConfig(
-            length=self.length,
-            mass=self.mass,
-            bogies=new_bogies,
-            coupler_1_pos=self.length - self.coupler_2_pos,
-            coupler_2_pos=self.length - self.coupler_1_pos,
-            P_rated=self.P_rated,
-            wagon_id=self.wagon_id,
-        )
+        return self.P_rated is not None
 
 
 @dataclass
 class Consist:
-    """列车编组（多节车厢的集合 + 全局运动状态）。
+    """列车编组（B 桶：只汇总 + 成员引用；**不存任何域数据**，见模块顶部归属规则）。
 
-    管理多节车厢的串联、速度、加速度等全局属性。
-    单节车厢是特例（wagons 只有一个元素）。
+    管理多节车厢的串联。单节车厢是特例（wagons 只有一个元素）。
+
+    - 允许：**只读汇总**（`total_mass` / `total_length` 等 property）、
+      成员顺序（"此刻由哪些车厢按什么顺序组成"，随位置快照落盘）。
+    - 禁止：把 A 桶域数据（物理属性副本 / 载货 / 计划）缓存在这里，
+      或让编组级字段承担"跨编组交割"的语义——解挂/连挂时它们会被重建。
     """
-    wagons: list[WagonConfig]       # 车厢列表（按车头到车尾顺序）
-    velocity: float = 0.0           # 全车共享速度（m/s，质心或前转向架）
-    acceleration: float = 0.0       # 全车共享加速度（m/s²）
+    wagons: list[WagonConfig]       # 成员与顺序（身份指向 A 桶；不是数据副本）
     data_log: ConsistDataLog = field(default_factory=ConsistDataLog)
     # 车厢级数据包日志，按 wagon_id 归属。couple/decouple 时用 merge/split
     # 维护，与 wagons 列表的增减保持同步（同一组 wagon_id）。
@@ -111,21 +114,6 @@ class Consist:
     def total_mass(self) -> float:
         """编组总质量（吨）。"""
         return sum(w.mass for w in self.wagons)
-
-    def reversed_consist(self) -> "Consist":
-        """返回整个编组折返后的等价配置（车厢顺序反转 + 每节车厢自身镜像）。
-
-        用于列车原地折返：新 wagons[0] = 原 wagons[-1] 的镜像配置，
-        这样 RigidWagonKinematics.get_all_wagon_poses 仍可直接从 wagons[0]
-        开始链式求解，无需改动运动学层代码。
-
-        data_log 原样带过——折返不改变车厢集合，只重新定义朝向，
-        wagon_id 集合不变（reversed_config 保留原 id），数据包无需变动。
-        """
-        return Consist(
-            wagons=[w.reversed_config() for w in reversed(self.wagons)],
-            data_log=self.data_log,
-        )
 
     @property
     def total_length(self) -> float:
