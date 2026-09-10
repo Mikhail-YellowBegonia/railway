@@ -1,3 +1,20 @@
+"""列车实体与列车状态（B 桶：编组级**运行期派生**状态）。
+
+## 归属规则（2026-09-10 定案，完整研讨见 docs/wagon_centric_data.md）
+
+本文件里的字段都是**运行期派生**：描述"此刻这列编组怎么跑"，由编组持有、
+**可随时从"车厢域数据（A 桶）+ 轨道 + 运行期输入"重算**。
+
+- **允许**：速度 `v`、位置窗口 `occupancy`（occupied/occupied_offset/s）、
+  `controller`、`authority_remaining`、`v_target`、`last_a`、`kinematics`，
+  以及**由选中计划投影出来的** `route`/`goal`/`remaining_to_goal`、
+  连挂/解挂的运行时引用（`couple_approach_partner`/`split_sibling`）。
+- **禁止**：把"这节车厢是什么"（物理属性 / 载货 / **调度计划**）挂到这里——
+  计划归**控制车（车厢）**所有（"每个控制车都有一个司机，有自己的任务，与列车
+  无关"）。解挂/连挂会重建编组实体，挂在这里的域数据会被**静默丢弃**
+  （实测证据见 `docs/roadmap.md` #9-B3）。
+- 位置真值仍是 B 桶（方案 A）：**不把运动学真值下沉到车厢**，位置随存档写快照。
+"""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -204,7 +221,8 @@ class TrainEntity:
         """原地掉头：车头车尾定义互换，车身占用的物理边集合不变。
 
         2026-09 语义（用户拍板，勿回退）：**只切换前进方向（逻辑），不反转
-        列车编组（不调 reversed_consist）**。车厢在轨道上的前后位置随掉头
+        列车编组**（历史实现曾反转 consist，其镜像函数已于 2026-09-10 作为死代码
+        删除，见 docs/wagon_centric_data.md §6.2/T1-2）。车厢在轨道上的前后位置随掉头
         对调（等价整列车原地旋转 180°），而 consist 列表顺序保持不变——
         `wagons[0]` 仍是同一节车厢，成为新前进方向的头部。
         （历史：早期实现同时 reversed_consist，会把编组顺序也倒过来，与

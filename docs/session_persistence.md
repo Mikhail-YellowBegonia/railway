@@ -84,6 +84,12 @@
 
 ### 2.1 关键约定
 
+- **归属规则（2026-09-10 定，见 `docs/wagon_centric_data.md`）**：本存档面里
+  **车厢条目 = A 桶「车厢域数据」**（物理属性；未来在此基础上逐车厢追加：
+  `have_control`/`priority`/调度计划/载货量）——**随车厢走**；而
+  `v`/`v_target`/`occupied`/`occupied_offset`/`s`/`route`/`goal`/`remaining_to_goal`
+  = **B 桶「运行期派生」的位置快照**，只为恢复"此刻这列编组在哪、怎么跑"，
+  随时可从 A 桶 + 轨道重算。**新增字段前先问它属于哪一桶**。
 - **有向边按坐标反查**（与 `"signals"` 同一套语义）：存 `{a:[x,y,z], b:[x,y,z]}`
   表示"这条边从 a 端走到 b 端"（direction = +1 若加载后该边的 `node_a` 坐标 ≈ a，
   否则 -1）。反查用 `network.node_id_at(coord, epsilon)` 定位两端节点，再找它们
