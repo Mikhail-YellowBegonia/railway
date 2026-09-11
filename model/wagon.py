@@ -49,10 +49,15 @@ class BogieConfig:
 
 @dataclass
 class WagonConfig:
-    """车厢配置（A 桶：车厢域数据；只读，见模块顶部归属规则）。
+    """车厢**配置**（A 桶·只读：描述"这节车厢是什么"）。
 
-    定义一节车厢的几何、质量、动力属性 —— 是真实物理层的输入。
-    **列车/编组不得写入本对象的字段**（加新字段前先确认它属于 A 桶）。
+    定义一节车厢的几何、质量、动力属性与身份 —— 是真实物理层的输入。
+    **列车/编组不得写入本对象的字段**（加新字段前先确认它属于 A 桶）；
+    会变的状态（`data_log`、未来的载货/计划）不放这里，放 `Wagon`。
+
+    2026-09-10 拍板（`docs/wagon_centric_data.md` §9.1）：**配置与运行时状态分家**——
+    `WagonConfig`（本类，只读）+ `Wagon`（运行时对象，带 `tick`）。用"分家"代替
+    "用语言机制强制只读"（Q3："只读是设计准则，不是强制逻辑"）。
     """
     length: float                   # [A·物理] 车厢总长（米，车钩到车钩）
     mass: float                     # [A·物理] 空载质量（吨）；载货量另计（未来）
@@ -74,12 +79,8 @@ class WagonConfig:
     # 解挂提示、计划遴选）待计划层定稿后再接。
     priority: int = 0
     # [A·决定性] 多控制车冲突时的遴选优先级（**不查重**，允许重复）；
-    # 相同优先级用 wagon_id 大小决断（Q4 最简解法；"取小还是取大"待拍板 = Q5）。
+    # 相同优先级用 wagon_id 取**小**者胜（Q4 最简解法 + Q5 定方向）。
     # 同样**当前无人读取**。
-    data_log: WagonDataLog = field(default_factory=WagonDataLog)
-    # [A·状态] 本车厢自己的数据包（未来承载调度命令/状态标记；近期无生产者）。
-    # 2026-09-10 从 Consist 迁入（T2-2）：数据包**随车厢走**，解挂/连挂不再需要
-    # 任何归并/拆分记账——车厢是同一批对象，它自己的包自然跟着它（见 Q9）。
 
     def __post_init__(self):
         """自动填充 coupler_2_pos = length（如果未显式设置）。"""
@@ -107,6 +108,89 @@ class WagonConfig:
         return self.P_rated is not None
 
 
+@dataclass(eq=False)
+class Wagon:
+    """车厢**运行时对象**（A 桶：描述"这节车厢此刻有什么状态"，并有自己的 tick）。
+
+    2026-09-10 拍板拆分（`docs/wagon_centric_data.md` §9.1）：**配置与状态分家**——
+    - `WagonConfig` = **只读配置**（几何/质量/功率/身份/控制车标志）→ `self.config`
+    - `Wagon` = **运行时对象**：持有会变的状态（当前只有 `data_log`；未来：载货、
+      调度计划与指令指针），并提供 `tick()`。
+    **只读属性一律委托给 `config`**，所以读代码（运动学/物理/渲染/存档）不需要区分两者。
+    身份语义同 `TrainEntity`：**按对象身份**（`eq=False`），编组变化时是**同一批对象**
+    （这是正确的同一性，见模块顶部归属规则）。
+    """
+    config: WagonConfig
+    data_log: WagonDataLog = field(default_factory=WagonDataLog)
+    # [A·状态] 本车厢自己的数据包（未来承载调度命令/状态标记；近期无生产者）。
+    # 2026-09-10 从 `Consist` 迁入、再从 `WagonConfig` 移到本类（T2-2 → 本次拆分）：
+    # 数据包**随车厢走**，解挂/连挂不需要任何归并/拆分记账（见 Q9）。
+
+    # ------------------------------------------------------------------
+    # 只读委托：配置字段（读方不必知道 Wagon / WagonConfig 的分工）
+    # ------------------------------------------------------------------
+    @property
+    def wagon_id(self) -> str:
+        return self.config.wagon_id
+
+    @property
+    def length(self) -> float:
+        return self.config.length
+
+    @property
+    def mass(self) -> float:
+        return self.config.mass
+
+    @property
+    def bogies(self) -> list[BogieConfig]:
+        return self.config.bogies
+
+    @property
+    def coupler_1_pos(self) -> float:
+        return self.config.coupler_1_pos
+
+    @property
+    def coupler_2_pos(self) -> float:
+        return self.config.coupler_2_pos
+
+    @property
+    def P_rated(self) -> float | None:
+        return self.config.P_rated
+
+    @property
+    def have_control(self) -> bool:
+        return self.config.have_control
+
+    @property
+    def priority(self) -> int:
+        return self.config.priority
+
+    @property
+    def is_powered(self) -> bool:
+        return self.config.is_powered
+
+    @property
+    def bogie_spacing(self) -> float:
+        return self.config.bogie_spacing
+
+    # ------------------------------------------------------------------
+    # 每帧更新钩子（车厢 tick）
+    # ------------------------------------------------------------------
+    def tick(self, dt: float) -> None:
+        """**车厢自己的每帧更新钩子**（当前是空实现、**未接线**）。
+
+        调用约定（2026-09-10 定，见 `docs/wagon_centric_data.md` §9.1）：
+        - **由所属编组在自身 update 里遍历自己的车厢**调用
+          （`for w in consist.wagons: w.tick(dt)`）——满足"外部只能调用车厢方法"（Q3），
+          不需要全局注册表，且顺序天然确定（车头→车尾，顺带解决"轮询顺序"问题）。
+        - **物理不得下放**：位置真值仍是编组的单一 `TrainState.s`（`RigidWagonKinematics`
+          链式解算）。车厢 tick 只做**逻辑/服务**类更新（载货、状态自更新等）。
+        - **计划指针的推进不在这里**：它是"到达事件"由列车**直接调用控制车的方法**
+          （Q14），而不是每帧 tick 自己往前走。
+        """
+        return None
+
+
 @dataclass
 class Consist:
     """列车编组（B 桶：只汇总 + 成员引用；**不存任何域数据**，见模块顶部归属规则）。
@@ -118,18 +202,27 @@ class Consist:
     - 禁止：把 A 桶域数据（物理属性副本 / 载货 / 计划）缓存在这里，
       或让编组级字段承担"跨编组交割"的语义——解挂/连挂时它们会被重建。
     """
-    wagons: list[WagonConfig]       # 成员与顺序（身份指向 A 桶；不是数据副本）
+    wagons: list[Wagon]             # 成员与顺序（身份指向 A 桶；不是数据副本）
+
+    def __post_init__(self) -> None:
+        """允许传入裸 `WagonConfig` 或 `Wagon`——裸配置自动包成运行时对象。
+
+        这样既有的构造点（`Consist(wagons=[create_simple_wagon(...)])`）不用改，
+        而编组内部**统一**持有 `Wagon`（车厢 tick 的宿主）。
+        """
+        self.wagons = [w if isinstance(w, Wagon) else Wagon(w) for w in self.wagons]
 
     @property
     def total_mass(self) -> float:
         """编组总质量（吨）。"""
         return sum(w.mass for w in self.wagons)
 
-    def control_cars(self) -> list[WagonConfig]:
+    def control_cars(self) -> list[Wagon]:
         """本编组里的**控制车**（A 桶 `have_control`）——未来"遴选计划"的输入面。
 
         2026-09-10 预留（惰性落地 T2-3）：**当前无调用者**。计划层定稿后，
-        编组按"控制车优先级 → wagon_id"遴选要执行哪节控制车的计划（Q4/Q6）。
+        编组按"控制车 `priority` 大者胜 → `wagon_id` **小**者胜"遴选要执行哪节
+        控制车的计划（Q4/Q5/Q6）。
         """
         return [w for w in self.wagons if w.have_control]
 
@@ -339,3 +432,21 @@ def create_simple_wagon(
             BogieConfig(geometric_role=GeometricRole.TRAILING, pos=bogie_2_pos, load_share=0.5),
         ],
     )
+
+
+def create_simple_car(
+    length: float = 20.0,
+    mass: float = 50.0,
+    P_rated: float | None = None,
+    have_control: bool | None = None,
+    priority: int = 0,
+) -> Wagon:
+    """便捷工厂：**配置 + 运行时对象**一步到位（= `Wagon(create_simple_wagon(...))`）。
+
+    参数含义同 `create_simple_wagon`。编组会自动把裸配置包成 `Wagon`，
+    所以两种工厂都能用；这个入口给"需要车厢运行时对象（tick/状态）"的调用方。
+    """
+    return Wagon(create_simple_wagon(
+        length=length, mass=mass, P_rated=P_rated,
+        have_control=have_control, priority=priority,
+    ))
