@@ -62,7 +62,7 @@
 
 ## 3. 代码状态（截至快照）
 
-**已落地的四次提交**（均在 2026-09-10；每次都有全套 14 项回归 + 存档往返验证）：
+**已落地的提交**（均在 2026-09-10；每次都有全套回归 + 存档往返验证）：
 
 | 提交 | 内容 |
 |---|---|
@@ -70,6 +70,10 @@
 | `fc6808f` | **T1**：删死代码（`Consist.velocity/acceleration`、`reversed_config`/`reversed_consist`） |
 | `0c62497` | **T2**：`have_control`/`priority`（惰性）、`data_log` 迁入车厢、`Consist.control_cars()`、physics 去身份（`DEFAULT_PHYSICS` 共享）、`couple_with(self)` 自反断言 |
 | `36894e2` | **拆分**：`WagonConfig`（只读配置）+ `Wagon`（运行时对象 + `tick`）；`Consist.wagons: list[Wagon]`，裸配置自动包装；只读属性委托给 `config`；新增 `create_simple_car()` |
+| **P0** | **计划层 P0：分段器与校验** —— 新增 `model/segments.py`（`Segment`/`SegmentPartition`/`is_cut_node`/`build_partition`/`validate_partition`）与 `tests/test_segments.py`；**纯模型、无消费点、不改既有行为**（`simple_segment_from_endpoint` 语义未动，测试内有对照断言）。**回归 15/15 通过**（新增第 15 个脚本）；真实存档只读未改：**22 节点 / 24 边 → 6 段**、切割点 = 4 个道岔、段长 400.00/405.29/1071.24 m、**段内双向逐点非法转向 0 个**。详见 `plan_layer_roadmap.md` §3.1 |
+| **登记** | ⚠ **`simple_segment_from_endpoint` 的急折盲区**（P0 施工时发现）：只看度数、不看 `turn_allowed` ⇒ 走不通的链会被当成一整段、长度被高估（影响"折返可行性"与信号"安全停车位置"两处既有判断）。当前存档此类节点 = **0** ⇒ 不咬人。**用户拍板"不修"**，就地登记于 `model/rail_network.py` 该函数 docstring + `plan_layer_roadmap.md` §6.4。**通用准则（用户口径）**：**分段宁可更激进——多切总是安全的，少切才会把走不通的链当成一段** |
+
+**下一步 = P1（计划数据类型 `model/plan.py` + `tests/test_plan.py`；纯模型、无消费点）。**
 
 **读代码时要知道的三件事**：
 1. `Consist.wagons` 里是 **`Wagon`**；它对 `length`/`mass`/`bogies`/`coupler_*`/`P_rated`/
