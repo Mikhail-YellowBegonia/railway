@@ -8,8 +8,8 @@ Python railway sandbox game inspired by Transport Fever 2 + AutoCAD. MVC archite
 
 **编辑器已稳固**（Steps 0–6 + 吸附 + 空间索引全部完成，权威规格 `docs/editor.md`）。
 当前重心不在编辑器，而在**补齐 demo 缺口并发布**：最大缺口是**计划式自动驾驶**
-——**✅ 设计已研讨完毕、规划已封口（2026-09-10）**；**P0（分段器与校验）已落地，
-下一步 = P1（计划数据类型 `model/plan.py`，纯模型无消费点）**。
+——**✅ 设计已研讨完毕、规划已封口（2026-09-10）**；**P0（分段器与校验）与 P1（计划数据类型）已落地，
+下一步 = P2（锚点解析器 `model/plan_path.py`）**。
 **实施路线看 `docs/plan_layer_roadmap.md`（P0~P9，已封口）**；**总账看 `docs/roadmap.md`**
 （含「计划式自动驾驶」专项章节与「当前重心」）。
 ⚡ **上下文吃紧 / 换新会话时，先读 `docs/progress_snapshot.md`**——进度快照与研讨
@@ -104,6 +104,7 @@ model/       Pure data + geometry, no view/controller deps
   geojson_loader.py  / geojson_writer.py — round-trip-safe arc serialization
   pathfinding.py     Edge-based Dijkstra, Path dataclass, turn_allowed integration
   segments.py        simple_segment 全图分区（计划层 P0；切分点 = 度数≠2 或过境转向不许可）
+  plan.py            调度计划数据类型（计划层 P1；条目+指针+锚点/控制点，纯数据无消费点）
   spatial_index.py   Tile-based spatial index (340× speedup, 60fps保障)
 
 view/        pygame-ce rendering only

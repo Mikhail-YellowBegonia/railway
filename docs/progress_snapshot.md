@@ -73,7 +73,9 @@
 | **P0** | **计划层 P0：分段器与校验** —— 新增 `model/segments.py`（`Segment`/`SegmentPartition`/`is_cut_node`/`build_partition`/`validate_partition`）与 `tests/test_segments.py`；**纯模型、无消费点、不改既有行为**（`simple_segment_from_endpoint` 语义未动，测试内有对照断言）。**回归 15/15 通过**（新增第 15 个脚本）；真实存档只读未改：**22 节点 / 24 边 → 6 段**、切割点 = 4 个道岔、段长 400.00/405.29/1071.24 m、**段内双向逐点非法转向 0 个**。详见 `plan_layer_roadmap.md` §3.1 |
 | **登记** | ⚠ **`simple_segment_from_endpoint` 的急折盲区**（P0 施工时发现）：只看度数、不看 `turn_allowed` ⇒ 走不通的链会被当成一整段、长度被高估（影响"折返可行性"与信号"安全停车位置"两处既有判断）。当前存档此类节点 = **0** ⇒ 不咬人。**用户拍板"不修"**，就地登记于 `model/rail_network.py` 该函数 docstring + `plan_layer_roadmap.md` §6.4。**通用准则（用户口径）**：**分段宁可更激进——多切总是安全的，少切才会把走不通的链当成一段** |
 
-**下一步 = P1（计划数据类型 `model/plan.py` + `tests/test_plan.py`；纯模型、无消费点）。**
+| **P1** | **计划层 P1：计划数据类型** —— 新增 `model/plan.py` + `tests/test_plan.py`；**纯数据类型、无消费点**（不被任何运行链路引用）。`PlanCommand`（goto / goto_couple / wait_couple，**无跳转**）+ `Goal=(edge_id,t,direction)` + `Anchor(node_id, exit_edge_id)`（**出口给定时即控制点**）+ `TrainRef(wagon_id, end)`（连挂目标按**车厢 id** 指认，比列车对象引用稳）+ `PlanItem` + `Plan(items, pointer)`；`validate(network=None)` 同时落地 **Q23-2 的"永久失效"判据**（节点/边不存在、出口不接在该节点上、死出口）；指针语义只做纯位移（**走完回绕第一项**），**步进策略属 P3**。**回归 16/16 通过**。详见 `plan_layer_roadmap.md` §3.1 |
+
+**下一步 = P2（锚点解析器 `model/plan_path.py`：逐段寻路补全 + 硬约束校验 → `(route, remaining_to_goal)`；纯模型、无 UI）。**
 
 **读代码时要知道的三件事**：
 1. `Consist.wagons` 里是 **`Wagon`**；它对 `length`/`mass`/`bogies`/`coupler_*`/`P_rated`/
