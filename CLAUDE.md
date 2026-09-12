@@ -10,6 +10,8 @@ Python railway sandbox game inspired by Transport Fever 2 + AutoCAD. MVC archite
 当前重心不在编辑器，而在**补齐 demo 缺口并发布**：最大缺口是**计划式自动驾驶**
 （demo 要做、设计待研讨）。**进度总账与优先级看 `docs/roadmap.md`**（含
 「计划式自动驾驶」专项章节与「当前重心」）。
+⚡ **上下文吃紧 / 换新会话时，先读 `docs/progress_snapshot.md`**——进度快照与研讨
+台账（已拍板 Q1~Q15、代码状态、待研讨、外部参考、接手建议），新结论要回填该文。
 
 ## demo 范围拍板（2026-09-10，用户）
 
