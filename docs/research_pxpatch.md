@@ -155,3 +155,105 @@
    `stop-direction` 两个字段"，我们建 **POI（基础设施侧实体）**。二者不可混用
    （前者零新增实体、后者可被独立引用与复用）⇒ 已写进 `docs/poi.md` §8，
    防止后续被"OpenTTD 就是这么做的"带偏。
+
+---
+
+## 5. 二次调研：px-patch 如何退出"等待"命令（2026-09-10）
+
+> 起因：用户裁决"先看 pulsexlb 到底怎么解决'等待如何退出'，暂不自己拍板"。
+> 三问三答，全部有源码位置。**注意：本轮推翻了我们一个想当然的假设。**
+
+### Q1 连挂那一刻，"等待"命令怎么被越过 → **由 `Couple()` 末尾主动推进**
+
+源码事实（`train_cmd.cpp:6660-6679`）：交割**整份**调度状态后，**条件式强制越格**：
+
+```cpp
+v->primary_order = u->primary_order;
+v->primary_order_index = u->primary_order_index;
+v->cur_real_order_index = u->cur_real_order_index;
+/* ...Advance past it, otherwise the merged consist would re-enter the wait and never continue. */
+if (u->current_order.IsType(OT_WAIT_COUPLE)) v->IncrementRealOrderIndex();
+```
+
+末尾再 `IncrementImplicitOrderIndex(); ProcessOrders(v);`（`train_cmd.cpp:6739-6741`），
+随后才是物理合并 `TryTrainCouple()`。
+
+**跳过规则**（`SkipToNextRealOrderIndex()`，`vehicle_base.h:1033`）：
+
+```cpp
+do { cur_real_order_index++;
+     if (>= GetNumOrders()) { = 0; wrapped = true; }
+} while (IsType(OT_IMPLICIT) || IsType(OT_DECOUPLE));
+```
+
+⇒ **只跳过 `OT_IMPLICIT` 与 `OT_DECOUPLE`，末尾回绕到 0**；**不跳过**
+`OT_WAIT_COUPLE` / `OT_WAITING` / `OT_DUMMY` / `OT_LABEL`。
+（另有一个 `UpdateRealOrderIndex()`，`vehicle_base.h:1110`：只跳 `OT_IMPLICIT`、
+不带回绕标记，是"发车前规整"，与前者不同。）
+
+**等待车自身**无需处置：它在 `Couple()` 开头就被 `->Primary()` 归一化，计划状态
+已整体拷给行驶车，随后被并入并销毁——**不存在"带着残留等待命令活着"的等待车**。
+
+### Q2 被解挂侧怎么处置 → **该场景在 px-patch 里不可达**
+
+- 解挂**只有一个触发点**（`train_cmd.cpp:7003`）：
+  `consist->current_order.GetDestination() == station && GetDecouple() == ODF_DECOUPLE`
+  —— 即"**进站 + 当前命令是带解挂标记的站台命令**"。
+- 而 `OT_WAIT_COUPLE` **既无 `dest` 也无解挂位**（`MakeWaitCouple()` 只设 `type`，
+  `order_cmd.cpp:256-258`），且等待车每帧被 `HoldWaitingTrainBody()` 钉住不前进
+  （`train_cmd.cpp:8937-8948`）⇒ **"等的人没来、车被强拆"这条路径在 px-patch 里走不到**。
+  （已搜标识符：`OT_WAIT_COUPLE` / `OT_DECOUPLE` / `GetDecouple()` / `CanDecouple` /
+  `GetDecoupleVehicle` / `SplitOrders` / `DecoupleTrain` / `decouple_part` / `JustDecoupled`；
+  `GetDecouple()` 全文只有 5 处引用，无第二处解挂入口。）
+- **旁证（作者的预见，但没定语义）**：`SplitOrders()` 之后有两行防御性清理
+  （`train_cmd.cpp:7043-7044`）：
+  `if (consist->current_order.IsType(OT_WAIT_COUPLE)) FreeTrainTrackReservation(consist);`
+  —— 只**释放进路预约**，**不推进指针、不清除等待命令**。
+- 新 OrderList 的起点：`ODOF_KEEP_ORDERS` 分支逐字段抄游标；**走"新建表/接管计划"
+  分支则一律从 index 0 起**（`train_cmd.cpp:6045-6048` 显式置 0）。
+  **没有任何"把等待标记为已满足"的处理。**
+- ⇒ **"等待的退出"在 px-patch 里只有"连挂"一个出口**（另一处弱相关：时刻表等待
+  超时会 `MakeDummy()` 把那条命令变成真正的 no-op，然后被自动跳过，见 Q3）。
+
+### Q3 "空命令"与跳转目标的表达 → **他们根本没有"空命令"这一原语**
+
+- **`OT_DUMMY` 不是玩家占位符，而是"目标被删后的残骸标记"**：`MakeDummy()` 只在
+  站点/车库被批量删除时（`order_cmd.cpp:4360-4370`、`4410-4418`）与**等待超时**时
+  （`vehicle.cpp:3977`）被调用；且它是**真 no-op**——`UpdateOrderDest` 里
+  `case OT_DUMMY: case OT_LABEL:` 直接 `IncrementRealOrderIndex()` 走人
+  （`order_cmd.cpp:5419-5425`）。**不能当跳转落点**（玩家无法主动插入，且会被删除站点改写）。
+- `OT_LABEL`（`OLST_TEXT` / `OLST_DEPARTURES_VIA` / …，`order_type.h:147-152`）是
+  **出发板/展示**用，也不是跳转目标；`OT_IMPLICIT` 是游戏生成、对玩家隐藏、被索引
+  推进自动跳过；`OT_SLOT_GROUP` 属 Trace Restrict，非占位。
+- **跳转目标是"订单表下标"**：`GetConditionSkipToOrder() { return this->flags; }`
+  （`order_base.h:562`）——`OT_CONDITIONAL` 直接把下标塞进 `flags`；
+  `OT_EXECUTE_SCHEDULE` 的目标是**另一张表的 ID**（`SetDestination(ol->index)`），
+  回归位置另存 `primary_order`/`primary_order_index`（`vehicle_base.h:383-384`），
+  末尾 `ReturnFromExecuteSchedule()` 归位（`order_cmd.cpp:5166`）。
+  ⚠ `order_list_serialisation_reference.md` 里的 `jump-to: <label>` **只是 JSON
+  导入导出的字符串化呈现**，落地存储仍是下标。**没有标签式跳转。**
+- **⚠ 推翻我们此前的推测**：`AdoptDecoupleSchedule()` 拼的三条
+  （`train_cmd.cpp:6031-6041`）**全部是有实义的命令**——① `MakeGoToStation`（真前往）
+  ② `MakeExecuteSchedule`（去执行另一张表）③ `MakeConditional(execute_index)` +
+  `SetConditionVariable(Unconditionally)`（**无条件回跳到 index=1**）。
+  ⇒ **他们没有任何"空命令/哨兵条目"原语**；回跳落点就是一条普通的条件跳转命令。
+
+### 对我们的三条可操作结论（调研 agent 给出，本稿认可）
+
+1. **"等待的退出"必须由外部事件显式推进指针，且推进后要校验落点**。px-patch 的连挂
+   出口形态可直接照搬：**交割指针 → 若停在等待命令上则强制步进 → 再跑一次计划处理**。
+   映射到我们：**解挂回收控制权时，也要判断"当前指针是否停在等待命令上"**——
+   我们的"先通知、后销毁"顺序正是这个调用的落点。
+2. **推进原语必须显式定义"跳过哪些命令类型"**（他们只跳 `OT_IMPLICIT`/`OT_DECOUPLE`
+   并回绕）。我们目前只有 goto ⇒ **建议现在就定**：哪些类型参与"指针自然步进"，
+   哪些**只由事件推进**（等待类必属后者）。
+3. **不要引入"空命令/哨兵"原语**。用户示例里的"3 空命令"应重新定义为**一条真有语义的
+   命令**（如"接管计划已恢复"/"无条件跳至下一条"），否则将来无法区分"刻意的空操作"
+   与"失配的残骸"（他们的 `OT_DUMMY` 就是后者）。
+
+### 仍需用户拍板的两点
+
+1. **被跳过的失效命令在 GUI 里长什么样**：他们用 dummy（可见、可被玩家手动删除）；
+   我们已定"悬空引用 → 跳过该条、计划保留"（比他们宽容）⇒ 需要决定**跳过条目如何显示**。
+2. **跳转目标用"下标"还是"标签"**：px-patch 只有"下标"与"另一张表 ID"两种，
+   **没有标签式跳转**。若我们要"按名字跳"，那是**新增原语**，需明确它与"下标指针"模型的关系。
