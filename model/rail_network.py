@@ -290,9 +290,12 @@ class RailNetwork:
     def turn_allowed(self, node_id: int, from_edge_id: int, to_edge_id: int) -> bool:
         """经节点 node_id 从 from_edge 转到 to_edge 是否几何许可。
 
-        判据：到达节点的行进方向 d_in 与离开节点的行进方向 d_out 的夹角
-        <= 150°（d_in · d_out >= TURN_ALLOW_DOT_MIN）。这样直通（0°）许可、
-        掉头（180°）被排除。纯几何推断，无需道岔配置。
+        判据：**前进半平面**——到达节点的行进方向 d_in 与离开节点的行进方向
+        d_out 夹角**严格 < 90°**（`d_in · d_out > TURN_ALLOW_DOT_MIN`，常量取 0）。
+        这样直通（0°）与缓分股（~32°）许可，正交（90°）、发卡弯（~148°）、
+        掉头（180°）全部排除。纯几何推断，无需道岔配置。
+        （初版用 cos(150°) 阈值，交叉渡线的 4 联通点会误判 148° 发卡弯为许可；
+        改为前进半平面后彻底修复——本 docstring 此前漏改，2026-09-10 补正。）
 
         约束：to_edge 必须在 from_edge 经该节点的拓扑邻接集内，否则不许可。
         原路返回（from == to）视为掉头，不许可。
