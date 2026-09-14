@@ -87,13 +87,13 @@ Plan = { items: list[PlanItem], pointer: int }   # 指针在控制车（Q14）�
 **硬约束（我方定的正确性要求）**：**一次到达事件最多走一圈**——若整圈都无可执行命令
 （如全部失效），**停车等待并提示**，不得在同帧内无限回绕（Q15 的"回绕"必须配这条）。
 
-## 3. 阶段表（**已封口；P0 ✅ 已完成，下一步 P1**）
+## 3. 阶段表（**已封口；P0 ✅ / P1 ✅ / P2 ✅ 已完成，下一步 P3**）
 
 | 阶段 | 内容 | 产出 | demo 必须 |
 |---|---|---|---|
 | **P0** ✅ | **分段器与校验**（纯模型）：切分规则（度数≠2 **或** 过境转向不许可）、段内可通行校验、段 → edge 序列、节点 → 所属段查询 | `model/segments.py` + `tests/test_segments.py` | ✅（显示/校验/调试） |
-| **P1** | **计划数据类型**（纯模型，无消费点）：`PlanItem`/`Plan`/`Anchor`/`Command`（§2.1/§2.2）+ 只读纪律（Q3：不加到 `WagonConfig` 字段上） | `model/plan.py` + `tests/test_plan.py` | ✅ |
-| **P2** | **锚点解析器**（纯模型）：逐段寻路补全 + 硬约束校验，输出 `route` + `remaining_to_goal` | `model/plan_path.py` + 测试 | ✅ |
+| **P1** ✅ | **计划数据类型**（纯模型，无消费点）：`PlanItem`/`Plan`/`Anchor`/`Command`（§2.1/§2.2）+ 只读纪律（Q3：不加到 `WagonConfig` 字段上） | `model/plan.py` + `tests/test_plan.py` | ✅ |
+| **P2** ✅ | **锚点解析器**（纯模型）：逐段寻路补全 + 硬约束校验，输出 `route` + `remaining_to_goal` | `model/plan_path.py` + 测试 | ✅ |
 | **P3** | **计划机制接入列车**：控制车持有计划、每帧遴选（Q5/Q6）、投影成 `route`/`goal`、**到达事件步进指针**（Q14 单一步进者 + 幂等）+ 步进语义表 §2.3 | `model/plan_dispatch.py`（或并入 `dispatch.py`）+ 测试 | ✅ |
 | **P4** | **"拒绝删除被引用要素 + 切分自动改写引用"**（Q23-4）：准入判断放 `GameLoop` 侧（**保持 `Editor` 零耦合**）；切分钩子把引用映射到子边 | `game_loop.py` + `tests/test_delete_guard.py` 扩展 | ✅ |
 | **P5** | **最小交互**（Q22-4 + Q23-5 仅停放可编辑）：PLAY 选中列车 → 点要素追加锚点 / 道岔再点出口 / 回退 / 确认成条目；锚点与路径渲染 | `controller/*` + `view/renderer.py` + `docs/editor.md`/键位表 | ✅（否则 demo 演不出卖点） |
@@ -151,7 +151,36 @@ Plan = { items: list[PlanItem], pointer: int }   # 指针在控制车（Q14）�
   永久失效判据（含**死出口**）、整份计划校验聚合；自建图、不依赖真实存档。
 - 同样**无用户可见行为变化，不需要人工复测**。
 
-## 4. 关键技术设计（实现前应确认）
+**P2 ✅（2026-09-10）**
+
+- 产出：`model/plan_path.py` + `tests/test_plan_path.py`。**纯模型、无消费点**
+  （不被任何运行链路引用；P3 才把产出喂 `assign_route`）。
+- 定型内容：`PathStart(edge_id, t, direction)`（起点，与 `find_path_from_point` 同形）；
+  `ResolvedPath(edges, total_cost, start_offset, end_offset)`（+ `remaining_to_goal`
+  / `used_edge_ids()` / `touches_node()` / `passes_through()`）；
+  `PlanResolution(path, failure, is_no_path)`（**失败原因字符串**供 Q23-3 直接用）；
+  `resolve_plan_item(network, start, item, *, passable_fn, allow_reversal,
+  consist_length, couple_target)`。
+- 实现要点（§4.1 的五步全部落地）：**无锚点 ⇒ 直接委托 `find_path_from_point`**
+  （与右键寻路一字不差，测试有等价断言）；有锚点 ⇒ 逐锚点枚举**合法转向对** +
+  **DP**（状态 = 离开边，代价含"该锚点的到达边"）；**控制点** = 转向对里把离开边钉死；
+  **失败即失败**（死端锚点/急折锚点"无法通行"、任一段不可达、条目非法都返回明确原因）。
+  另：**拼接口不需要去重**——上一段以"到达边"结束、下一段以"离开边"开始，二者必为
+  不同的边（`_through_pairs` 已排除原路折回）⇒ `total_cost` 恰等于路径各边弧长之和
+  （测试有断言）。
+- ⚠ **实现期发现的坑（已写进 §4.1 第 6 条）**：`find_path` 的 `force_leave` 会把
+  "锚点/控制点正好落在起点节点上"判成"必须绕一圈"；`_leg()` 对"同边同向"特判为
+  "就这一条边"。
+- 验证（17/17 回归通过；真实存档只读、未被改动）：
+  - 合成图 8 组用例：无锚点等价、**锚点 = 硬约束**（700 m 短径 → 733.24 m 长径且
+    确实经过锚点）、控制点两个出口分别强制长/短路（**含"控制点落在起点节点上"
+    的特例**）、多锚点串联与记账、5 类失败、`WAIT_COUPLE` 不产生路径、
+    `goto_couple` 给出 `couple_target` 后与等价 `goto` 一致；
+  - **真实存档**：4 组起点/终点对比，无锚点解析与 `find_path_from_point` **完全等价**；
+    以道岔 5 为锚点则**强制改走另一侧**（10 → 24 段）⇒ 硬约束在真实拓扑上生效。
+- 同样**无用户可见行为变化，不需要人工复测**。
+
+## 4. 关键技术设计（**P2 已按此实现**；含实现期发现）
 
 ### 4.1 解析（P2）
 
@@ -166,6 +195,13 @@ Plan = { items: list[PlanItem], pointer: int }   # 指针在控制车（Q14）�
 4. **失败即失败**（Q22-3 硬约束）：任一段不可达 ⇒ 整个条目解析失败 ⇒ 按 §4.4 处理。
 5. **产出契约与现有链路一致**：`(route: list[DirectedEdge], remaining_to_goal: float)`，
    直接喂 `TrainEntity.assign_route`（⇒ **执行层零改动**）。
+6. ⚠ **实现期发现（必须记住的坑）**：`find_path` 里有一个 `force_leave` 分支
+   （"起点有向边 == 目标有向边"时，为免把"原地不动"当成到达，**强制先离开再绕回来**）。
+   而本模块的段终点语义是"**到达该有向边的 head 节点**"⇒ 当锚点／控制点**正好落在
+   起点节点上**（`arrive == start_directed`）时，列车已经在这条边上朝它走，
+   这一段**应当是"就这一条边"**；直接交给 `find_path` 会被判成"必须绕一大圈"
+   甚至不可达。`_leg()` 因此对"同边同向"做了特判
+   （`tests/test_plan_path.py` ③ 就是这个用例）。
 
 ### 4.2 保护（P4）
 

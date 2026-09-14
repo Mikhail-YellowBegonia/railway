@@ -75,7 +75,9 @@
 
 | **P1** | **计划层 P1：计划数据类型** —— 新增 `model/plan.py` + `tests/test_plan.py`；**纯数据类型、无消费点**（不被任何运行链路引用）。`PlanCommand`（goto / goto_couple / wait_couple，**无跳转**）+ `Goal=(edge_id,t,direction)` + `Anchor(node_id, exit_edge_id)`（**出口给定时即控制点**）+ `TrainRef(wagon_id, end)`（连挂目标按**车厢 id** 指认，比列车对象引用稳）+ `PlanItem` + `Plan(items, pointer)`；`validate(network=None)` 同时落地 **Q23-2 的"永久失效"判据**（节点/边不存在、出口不接在该节点上、死出口）；指针语义只做纯位移（**走完回绕第一项**），**步进策略属 P3**。**回归 16/16 通过**。详见 `plan_layer_roadmap.md` §3.1 |
 
-**下一步 = P2（锚点解析器 `model/plan_path.py`：逐段寻路补全 + 硬约束校验 → `(route, remaining_to_goal)`；纯模型、无 UI）。**
+| **P2** | **计划层 P2：锚点解析器** —— 新增 `model/plan_path.py` + `tests/test_plan_path.py`；**纯模型、无消费点**。`resolve_plan_item`：**无锚点 ⇒ 直接委托 `find_path_from_point`**（与右键寻路等价，有断言）；有锚点 ⇒ 逐锚点枚举**合法转向对** + **DP**（状态 = 离开边），**控制点 = 把离开边钉死**；**失败即失败**（返回可显示的原因，Q22-3/Q23-3）；产出 `ResolvedPath`（`remaining_to_goal`）直接对应 `assign_route` 契约。⚠ 实现期发现：`find_path` 的 `force_leave` 会把"锚点正好在起点节点上"判成绕远路，已对"同边同向"特判。**回归 17/17 通过**；真实存档上 4 组对比与现有寻路完全等价、以道岔 5 为锚点强制改走另一侧（10 → 24 段）
+
+**下一步 = P3（计划机制接入列车：控制车持计划、每帧遴选、投影成 route/goal、到达事件步进指针 + R10 强制步进；**P3 是第一个"有行为"的阶段** ⇒ 之后每步跑全套回归，触及连挂/解挂/折返带须请你人工复测）。**
 
 **读代码时要知道的三件事**：
 1. `Consist.wagons` 里是 **`Wagon`**；它对 `length`/`mass`/`bogies`/`coupler_*`/`P_rated`/
