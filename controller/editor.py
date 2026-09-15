@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum, auto
+from typing import Callable
 
 from model.geom_utils import (
     can_merge_arcs,
@@ -52,8 +53,16 @@ class BuildState(Enum):
 
 
 class Editor:
-    def __init__(self, network: RailNetwork) -> None:
+    def __init__(
+        self,
+        network: RailNetwork,
+        split_edge_handler: Callable[[int, float], int | None] | None = None,
+        can_split_edge: Callable[[int, float], bool] | None = None,
+    ) -> None:
         self.network = network
+        # P4：Editor 保持对列车/计划/信号零耦合；宿主可替换切边入口为安全协调器。
+        self._split_edge = split_edge_handler or network.split_edge_at
+        self._can_split_edge = can_split_edge or (lambda _edge_id, _t: True)
         self.mode: EditMode = EditMode.IDLE
         self.snap_system = SnapSystem()
 
@@ -286,9 +295,22 @@ class Editor:
         if not plan.valid:
             return  # 拒绝；保持 BUILD_ACTIVE
 
+        # P4：双端吸附可能要切两条边。必须先把本次涉及的切分全部预检通过，
+        # 再做任何拓扑写入，避免第一条已切、第二条被运行路径/信号保护拒绝。
+        split_requests: list[tuple[int, float]] = []
+        if self.build_m1_edge_id is not None and self.build_m1_edge_t is not None:
+            split_requests.append((self.build_m1_edge_id, self.build_m1_edge_t))
+        if plan.case in (4, 5) and plan.m2_split_edge_id is not None and plan.m2_split_t is not None:
+            split_requests.append((plan.m2_split_edge_id, plan.m2_split_t))
+        elif m2_edge_id is not None and m2_edge_t is not None:
+            split_requests.append((m2_edge_id, m2_edge_t))
+        if not all(self._can_split_edge(edge_id, split_t)
+                   for edge_id, split_t in split_requests):
+            return
+
         # 3. 截断：先 M1 端，再 M2 端（两端独立，顺序无关）
         if self.build_m1_edge_id is not None and self.build_m1_edge_t is not None:
-            new_mid = self.network.split_edge_at(
+            new_mid = self._split_edge(
                 self.build_m1_edge_id, self.build_m1_edge_t
             )
             if new_mid is None:
@@ -297,12 +319,12 @@ class Editor:
 
         # M2 端截断：Case 2T（case=5）和 Case 4(复合)用 plan 回算的 t；其余用 snap 的 t
         if plan.case in (4, 5) and plan.m2_split_edge_id is not None and plan.m2_split_t is not None:
-            new_mid = self.network.split_edge_at(plan.m2_split_edge_id, plan.m2_split_t)
+            new_mid = self._split_edge(plan.m2_split_edge_id, plan.m2_split_t)
             if new_mid is None:
                 return
             plan.node_b_id = new_mid
         elif m2_edge_id is not None and m2_edge_t is not None:
-            new_mid = self.network.split_edge_at(m2_edge_id, m2_edge_t)
+            new_mid = self._split_edge(m2_edge_id, m2_edge_t)
             if new_mid is None:
                 return
             plan.node_b_id = new_mid

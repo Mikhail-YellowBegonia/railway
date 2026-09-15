@@ -65,7 +65,11 @@ class GameLoop:
             self.network = load_geojson(geo_path)
             from model.signal import SignalTable
             self.signals = SignalTable()
-        self.editor = Editor(self.network)
+        self.editor = Editor(
+            self.network,
+            self._split_edge_with_guard,
+            self._can_split_edge_with_guard,
+        )
         self.running = True
 
         # roadmap #2 会话持久化：列车列表在下方（trains 声明处）初始化，因为
@@ -805,6 +809,92 @@ class GameLoop:
             locked |= {eid for eid, _d in t.state.occupancy.route}
         return locked
 
+    def _plan_items(self):
+        """枚举当前车厢持有的计划条目（P4 预留；P3b 接线后自然生效）。"""
+        for train in self.trains:
+            for wagon in train.state.consist.wagons:
+                plan = getattr(wagon, "plan", None)
+                if plan is not None:
+                    yield from plan.items
+
+    def _rewrite_plan_items_for_split(self, split) -> None:
+        """原子替换车厢计划中的不可变条目（P4；当前 P3a 尚无持有者）。"""
+        for train in self.trains:
+            for wagon in train.state.consist.wagons:
+                plan = getattr(wagon, "plan", None)
+                if plan is not None:
+                    plan.items[:] = [split.rewrite_plan_item(item) for item in plan.items]
+
+    def _runtime_routes_conflict_with_signal(self, directed) -> bool:
+        """单向信号背面是否会封死某列车尚待消费的手动/计划运行路线。"""
+        edge_id, direction = directed
+        return any(
+            (edge_id, -direction) in train.state.occupancy.route
+            for train in self.trains
+        )
+
+    def _split_edge_blocked_reason(self, edge_id: int) -> str | None:
+        edge = self.network.edges.get(edge_id)
+        if edge is None:
+            return "轨道不存在"
+        if edge_id in {eid for train in self.trains
+                       for eid, _direction in train.state.occupancy.occupied}:
+            return f"edge {edge_id} 正被列车车身占用"
+        if any(eid == edge_id for eid, _direction in self.signals.all_signals()):
+            return f"edge {edge_id} 已放置信号"
+        return None
+
+    def _can_split_edge_with_guard(self, edge_id: int, _t: float) -> bool:
+        """供 Editor 在整次 BUILD 写入前调用的 P4 只读预检。"""
+        reason = self._split_edge_blocked_reason(edge_id)
+        if reason is None:
+            return True
+        print(f"切分拒绝：{reason}")
+        return False
+
+    def _split_edge_with_guard(self, edge_id: int, t: float) -> int | None:
+        """P4 唯一切边入口：先保护引用，成功后同步改写全部运行路径。"""
+        if not self._can_split_edge_with_guard(edge_id, t):
+            return None
+        edge = self.network.edges[edge_id]
+
+        node_a_id, node_b_id = edge.node_a_id, edge.node_b_id
+        new_node_id = self.network.split_edge_at(edge_id, t)
+        if new_node_id is None:
+            return None
+        incident = self.network.nodes[new_node_id].incident_edge_ids
+        first_edge_id = next(
+            eid for eid in incident if self.network.edges[eid].node_a_id == node_a_id
+        )
+        second_edge_id = next(
+            eid for eid in incident if self.network.edges[eid].node_b_id == node_b_id
+        )
+        from model.topology_guard import EdgeSplit
+        split = EdgeSplit(
+            old_edge_id=edge_id,
+            t=t,
+            old_node_a_id=node_a_id,
+            old_node_b_id=node_b_id,
+            first_edge_id=first_edge_id,
+            second_edge_id=second_edge_id,
+        )
+        for train in self.trains:
+            train.state.occupancy.route = [
+                child
+                for directed in train.state.occupancy.route
+                for child in split.replace_directed(directed)
+            ]
+            if train.state.goal is not None and train.state.goal[0] == edge_id:
+                _old, old_t, direction = train.state.goal
+                train.state.goal = (
+                    (first_edge_id, old_t / t, direction)
+                    if old_t < t else
+                    (second_edge_id, (old_t - t) / (1.0 - t), direction)
+                )
+        self._rewrite_plan_items_for_split(split)
+        self.block_manager.tick_reservations(self.trains)
+        return new_node_id
+
     def _rail_delete_blocked_reason(self) -> str | None:
         """DELETE 点击轨道前的安全检查：命中对象是否被列车占用/预约。
 
@@ -824,9 +914,26 @@ class GameLoop:
             node = self.network.nodes.get(nid)
             if node is not None and (set(node.incident_edge_ids) & locked):
                 return f"节点 {nid} 关联的轨道正被列车占用或预约"
+            for item in self._plan_items():
+                if any(anchor.node_id == nid for anchor in item.anchors):
+                    return f"节点 {nid} 被计划锚点引用"
+                if item.fixed_route is not None and any(
+                    edge_id in node.incident_edge_ids
+                    for edge_id in item.fixed_route.used_edge_ids()
+                ):
+                    return f"节点 {nid} 关联的轨道被固定路径引用"
         eid = self.editor.hovered_edge_id
         if eid is not None and eid in locked:
             return f"轨道 edge {eid} 正被列车占用或预约"
+        if eid is not None:
+            if any(eid == signal_edge_id for signal_edge_id, _direction
+                   in self.signals.all_signals()):
+                return f"轨道 edge {eid} 已放置信号"
+            for item in self._plan_items():
+                if (item.goal is not None and item.goal[0] == eid) or any(
+                    anchor.exit_edge_id == eid for anchor in item.anchors
+                ) or (item.fixed_route is not None and eid in item.fixed_route.used_edge_ids()):
+                    return f"轨道 edge {eid} 被计划引用"
         return None
 
     def _hit_test_coupler(self, _world_pos: Vec3,
@@ -1203,6 +1310,8 @@ class GameLoop:
         当前实现是每帧无条件 rebuild（见 model/block.py），这里不用
         手动触发。
         """
+        from model.topology_guard import routes_conflict_with_signal
+
         node_id = self._snap_node_at(world_pos)
         if node_id is None:
             edge_hit = self._snap_edge_at(world_pos)
@@ -1210,9 +1319,17 @@ class GameLoop:
                 print("SIGNAL: 请靠近节点或轨道点击")
                 return
             edge_id, t = edge_hit
-            node_id = self.network.split_edge_at(edge_id, t)
+            # 中途点击的退化槛位固定选择新节点作为 node_a 的子边正向（见
+            # resolve_directed_edge_by_click）。旧边反向固定路线会被该信号从背面
+            # 永久封死，必须在切边前整次拒绝，不能留下"轨道已切、信号未放"。
+            prospective_signal = (edge_id, 1)
+            if (routes_conflict_with_signal(self._plan_items(), prospective_signal)
+                    or self._runtime_routes_conflict_with_signal(prospective_signal)):
+                print("SIGNAL 拒绝：该单向方向会封死已有固定或运行路径")
+                return
+            node_id = self._split_edge_with_guard(edge_id, t)
             if node_id is None:
-                print("SIGNAL: 该位置无法放置信号（截断失败）")
+                print("SIGNAL: 该位置无法放置信号（截断被拓扑保护拒绝）")
                 return
 
         best_edge_id = self.network.resolve_directed_edge_by_click(node_id, world_pos)
@@ -1227,7 +1344,10 @@ class GameLoop:
                   f"（颜色由占用状态自动决定，不支持手动切换）")
         elif self.signals.is_blocked_backside(directed):
             print(f"SIGNAL: 节点 {node_id} 方向 edge {best_edge_id} 是反向信号的背面，"
-                  f"不能在此放置（One-Way PBS，先点另一侧删除或换方向）")
+                f"不能在此放置（One-Way PBS，先点另一侧删除或换方向）")
+        elif (routes_conflict_with_signal(self._plan_items(), directed)
+              or self._runtime_routes_conflict_with_signal(directed)):
+            print("SIGNAL 拒绝：该单向方向会封死已有固定或运行路径")
         else:
             self.signals.place(directed)
             print(f"SIGNAL: 节点 {node_id} 方向 edge {best_edge_id} 新建信号")
