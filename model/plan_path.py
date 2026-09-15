@@ -42,7 +42,7 @@ from model.pathfinding import (
     head_node,
     tail_node,
 )
-from model.plan import Anchor, Goal, PlanCommand, PlanItem
+from model.plan import Anchor, FixedRoute, Goal, PlanCommand, PlanItem
 from model.rail_network import RailNetwork
 
 
@@ -92,6 +92,18 @@ class ResolvedPath:
             ):
                 return True
         return False
+
+    def freeze(self) -> FixedRoute:
+        """冻结编辑期解析结果，供 P3a 确认计划条目使用。
+
+        此方法是 P2 到 P3a 的唯一数据转换点。返回值不携带网络或寻路器引用；P3b
+        只读取它，不能回调 `resolve_plan_item()` 或 Dijkstra。
+        """
+        return FixedRoute(
+            edges=self.edges,
+            start_offset=self.start_offset,
+            end_offset=self.end_offset,
+        )
 
 
 @dataclass(frozen=True)

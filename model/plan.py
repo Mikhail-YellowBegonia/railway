@@ -1,4 +1,4 @@
-"""调度计划的数据类型（计划层 P1：**纯数据类型，无消费点**）。
+"""调度计划的数据类型（计划层 P1 / P3a：**纯模型，无运行消费点**）。
 
 规格：`docs/plan_layer_roadmap.md` §2（Q23-1 定稿）。本模块**只定义数据结构与
 自洽校验**，不产生任何行为、不被任何运行链路引用（P1 阶段的纪律；消费点从 P3 起
@@ -43,6 +43,9 @@ if TYPE_CHECKING:  # 只为类型标注，避免与将来的 wagon.py → plan.p
 #: 终点：`(edge_id, t, direction)`——与 `TrainEntity.goal` 同形，`direction ∈ {+1, -1}`。
 Goal = tuple[int, float, int]
 
+#: 有向边：`(edge_id, direction)`，direction ∈ {+1, -1}。
+DirectedEdge = tuple[int, int]
+
 #: 目标端头：`+1` = 前端车钩，`-1` = 后端车钩。
 END_FRONT = 1
 END_REAR = -1
@@ -62,6 +65,85 @@ COMMAND_LABELS: dict[PlanCommand, str] = {
     PlanCommand.GOTO_COUPLE: "前往连挂",
     PlanCommand.WAIT_COUPLE: "等待连挂",
 }
+
+
+@dataclass(frozen=True)
+class FixedRoute:
+    """确认后的固定行车路径（P3a）。
+
+    `edges` 是从构造起点到终点的完整有向边序列；`start_offset` / `end_offset`
+    沿用 `ResolvedPath` 的弧长语义。它是计划执行的权威路径：P3b 只能投影/消费它，
+    不能重新寻路。终点仍属于带逻辑的 `PlanItem`，以避免维护两份可漂移的数据。
+    """
+
+    edges: tuple[DirectedEdge, ...]
+    start_offset: float
+    end_offset: float
+
+    def used_edge_ids(self) -> tuple[int, ...]:
+        return tuple(edge_id for edge_id, _direction in self.edges)
+
+    def remaining_to_goal(self, network: RailNetwork) -> float:
+        total = sum(network.edges[edge_id].length for edge_id, _ in self.edges)
+        return max(0.0, total - self.start_offset - self.end_offset)
+
+    def conflicts_with_signal(self, signal: DirectedEdge) -> bool:
+        """该单向信号是否会从背面封死固定路线的一段。"""
+        edge_id, direction = signal
+        return (edge_id, -direction) in self.edges
+
+    def validate(
+        self, network: RailNetwork | None = None, *, goal: Goal | None = None,
+    ) -> list[str]:
+        """校验固定路径结构、拓扑连续性与可选终点的一致性。"""
+        problems: list[str] = []
+        if not self.edges:
+            return ["固定路径为空"]
+        if self.start_offset < 0.0 or self.end_offset < 0.0:
+            problems.append("固定路径偏移不得为负")
+
+        for i, (edge_id, direction) in enumerate(self.edges):
+            if direction not in (1, -1):
+                problems.append(f"固定路径第 {i} 条边 direction={direction} 非法（应为 ±1）")
+            if network is not None and edge_id not in network.edges:
+                problems.append(f"固定路径第 {i} 条边 {edge_id} 不存在（引用永久失效）")
+
+        if network is None or problems:
+            return problems
+
+        first_length = network.edges[self.edges[0][0]].length
+        last_length = network.edges[self.edges[-1][0]].length
+        total_length = sum(network.edges[edge_id].length for edge_id, _ in self.edges)
+        if self.start_offset > first_length:
+            problems.append("固定路径起点偏移超出首边长度")
+        if self.end_offset > last_length:
+            problems.append("固定路径终点偏移超出末边长度")
+        if self.start_offset + self.end_offset > total_length:
+            problems.append("固定路径起终点偏移超过总长度")
+
+        for i, (current, following) in enumerate(zip(self.edges, self.edges[1:])):
+            current_edge_id, current_direction = current
+            following_edge_id, following_direction = following
+            current_edge = network.edges[current_edge_id]
+            following_edge = network.edges[following_edge_id]
+            head = (current_edge.node_b_id if current_direction > 0
+                    else current_edge.node_a_id)
+            tail = (following_edge.node_a_id if following_direction > 0
+                    else following_edge.node_b_id)
+            if head != tail:
+                problems.append(f"固定路径第 {i}→{i + 1} 条边不连续")
+                continue
+            if current_edge_id == following_edge_id and current_direction == -following_direction:
+                if network.nodes[head].connection_count() != 1:
+                    problems.append(f"固定路径第 {i}→{i + 1} 条边在非死端折返")
+            elif not network.turn_allowed(head, current_edge_id, following_edge_id):
+                problems.append(f"固定路径第 {i}→{i + 1} 条边转向不许可")
+
+        if goal is not None:
+            goal_edge_id, _goal_t, goal_direction = goal
+            if self.edges[-1] != (goal_edge_id, goal_direction):
+                problems.append("固定路径末边与条目终点边/方向不一致")
+        return problems
 
 
 @dataclass(frozen=True)
@@ -105,24 +187,41 @@ class TrainRef:
 
 @dataclass(frozen=True)
 class PlanItem:
-    """计划里的一条条目：**命令（逻辑）+ 可选路径限定（锚点）**。"""
+    """计划里的一条条目：命令、编辑元数据与确认后的固定路线。"""
 
     command: PlanCommand
     goal: Goal | None = None
     train_ref: TrainRef | None = None
     anchors: tuple[Anchor, ...] = ()
+    fixed_route: FixedRoute | None = None
 
     # ── 构造捷径（让调用点自解释）───────────────────────────────────────
     @classmethod
-    def goto(cls, goal: Goal, anchors: tuple[Anchor, ...] = ()) -> PlanItem:
-        return cls(command=PlanCommand.GOTO, goal=goal, anchors=anchors)
+    def goto(
+        cls,
+        goal: Goal,
+        anchors: tuple[Anchor, ...] = (),
+        fixed_route: FixedRoute | None = None,
+    ) -> PlanItem:
+        return cls(
+            command=PlanCommand.GOTO,
+            goal=goal,
+            anchors=anchors,
+            fixed_route=fixed_route,
+        )
 
     @classmethod
     def goto_couple(
-        cls, train_ref: TrainRef, anchors: tuple[Anchor, ...] = ()
+        cls,
+        train_ref: TrainRef,
+        anchors: tuple[Anchor, ...] = (),
+        fixed_route: FixedRoute | None = None,
     ) -> PlanItem:
         return cls(
-            command=PlanCommand.GOTO_COUPLE, train_ref=train_ref, anchors=anchors
+            command=PlanCommand.GOTO_COUPLE,
+            train_ref=train_ref,
+            anchors=anchors,
+            fixed_route=fixed_route,
         )
 
     @classmethod
@@ -133,7 +232,12 @@ class PlanItem:
     def label(self) -> str:
         return COMMAND_LABELS.get(self.command, self.command.value)
 
-    def validate(self, network: RailNetwork | None = None) -> list[str]:
+    def validate(
+        self,
+        network: RailNetwork | None = None,
+        *,
+        require_fixed_route: bool = False,
+    ) -> list[str]:
         """条目自洽 + 引用存在性检查，返回问题描述列表（空 = 通过）。
 
         给出 `network` 时额外检查**引用是否仍然存在**（节点/边/控制点出口）——
@@ -158,6 +262,13 @@ class PlanItem:
                 problems.append(f"{label}：不应带终点或连挂目标")
             if self.anchors:
                 problems.append(f"{label}：不应带路径限定（等待条目不产生路径）")
+            if self.fixed_route is not None:
+                problems.append(f"{label}：不应带固定路径")
+
+        if require_fixed_route and self.command in (
+            PlanCommand.GOTO, PlanCommand.GOTO_COUPLE,
+        ) and self.fixed_route is None:
+            problems.append(f"{label}：尚未冻结固定路径")
 
         # ② 终点三元组自洽
         if self.goal is not None:
@@ -173,7 +284,15 @@ class PlanItem:
         if self.train_ref is not None:
             problems.extend(f"{label}：{p}" for p in self.train_ref.validate())
 
-        # ④ 路径限定（硬约束锚点）自洽 + 引用存在性
+        # ④ 固定路径。P3a 允许未确认的草稿继续通过普通 validate；P3b 会传
+        # require_fixed_route=True，确保执行链路没有回退到 Dijkstra 的机会。
+        if self.fixed_route is not None:
+            route_goal = self.goal if self.command is PlanCommand.GOTO else None
+            problems.extend(
+                f"{label}：{p}" for p in self.fixed_route.validate(network, goal=route_goal)
+            )
+
+        # ⑤ 路径限定（硬约束锚点）自洽 + 引用存在性
         for i, anchor in enumerate(self.anchors):
             if i > 0 and anchor.node_id == self.anchors[i - 1].node_id:
                 problems.append(
@@ -300,7 +419,12 @@ class Plan:
         return removed
 
     # ── 校验 ──────────────────────────────────────────────────────────
-    def validate(self, network: RailNetwork | None = None) -> list[str]:
+    def validate(
+        self,
+        network: RailNetwork | None = None,
+        *,
+        require_fixed_route: bool = False,
+    ) -> list[str]:
         """整份计划自查（指针范围 + 逐条 validate），返回问题描述列表。"""
         problems: list[str] = []
         if self.items:
@@ -311,5 +435,8 @@ class Plan:
         elif self.pointer != 0:
             problems.append(f"空计划的指针必须为 0，实际 {self.pointer}")
         for i, item in enumerate(self.items):
-            problems.extend(f"第 {i} 条：{p}" for p in item.validate(network))
+            problems.extend(
+                f"第 {i} 条：{p}"
+                for p in item.validate(network, require_fixed_route=require_fixed_route)
+            )
         return problems

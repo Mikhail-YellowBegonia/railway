@@ -98,14 +98,14 @@ Plan = { items: list[PlanItem], pointer: int }   # 指针在控制车（Q14）�
 **硬约束（我方定的正确性要求）**：**一次到达事件最多走一圈**——若整圈都无可执行命令
 （如全部失效），**停车等待并提示**，不得在同帧内无限回绕（Q15 的"回绕"必须配这条）。
 
-## 3. 阶段表（**已封口；P0 ✅ / P1 ✅ / P2 ✅ 已完成，下一步 P3**）
+## 3. 阶段表（**已封口；P0 / P1 / P2 / P3a ✅ 已完成，下一步 P4**）
 
 | 阶段 | 内容 | 产出 | demo 必须 |
 |---|---|---|---|
 | **P0** ✅ | **分段器与校验**（纯模型）：切分规则（度数≠2 **或** 过境转向不许可）、段内可通行校验、段 → edge 序列、节点 → 所属段查询 | `model/segments.py` + `tests/test_segments.py` | ✅（显示/校验/调试） |
 | **P1** ✅ | **计划数据类型**（纯模型，无消费点）：`PlanItem`/`Plan`/`Anchor`/`Command`（§2.1/§2.2）+ 只读纪律（Q3：不加到 `WagonConfig` 字段上） | `model/plan.py` + `tests/test_plan.py` | ✅ |
 | **P2** ✅ | **锚点解析器**（纯模型）：逐段寻路补全 + 硬约束校验，输出 `route` + `remaining_to_goal` | `model/plan_path.py` + `tests/test_plan_path.py` | ✅ |
-| **P3a** | **冻结路径模型 + 编辑期构造器**：条目保存 `FixedRoute`（完整 `DirectedEdge` 序列、目标与距离语义）；P2 只在创建/预览时调用，确认即冻结 | `model/plan.py` / `model/plan_path.py` + 测试 | ✅ |
+| **P3a** ✅ | **冻结路径模型 + 编辑期构造器**：条目保存 `FixedRoute`（完整 `DirectedEdge` 序列与距离偏移；终点仍由条目唯一持有）；P2 只在创建/预览时调用，确认即冻结 | `model/plan.py` / `model/plan_path.py` + 测试 | ✅ |
 | **P4** | **拓扑变更防火墙（P3b 的前置）**：删除严格拒绝；切分必须在提交前取得许可、提交后**原子改写**运行 `route`、`FixedRoute` 与信号引用；车身占用或已有信号的边不允许切分 | 拓扑变更协调器 + `game_loop.py` + 回归 | ✅ |
 | **P3b** | **计划机制接入列车**：控制车持有计划、每帧遴选（Q5/Q6）、从 `FixedRoute` 投影 `route`/`goal`、**到达事件步进指针**（Q14 单一步进者 + 幂等）+ 步进语义表 §2.3 | `model/plan_dispatch.py` + 测试 | ✅ |
 | **P5** | **最小交互**（Q22-4 + Q23-5 仅停放可编辑）：PLAY 选中列车 → 点要素追加锚点 / 道岔再点出口 / 回退 / 预览 → 确认时冻结成条目；锚点与固定路径渲染 | `controller/*` + `view/renderer.py` + `docs/editor.md`/键位表 | ✅（否则 demo 演不出卖点） |
@@ -346,6 +346,22 @@ P5 正式编辑交互落地后移除。
   - **真实存档**：4 组起点/终点对比，无锚点解析与 `find_path_from_point` **完全等价**；
     以道岔 5 为锚点则**强制改走另一侧**（10 → 24 段）⇒ 硬约束在真实拓扑上生效。
 - 同样**无用户可见行为变化，不需要人工复测**。
+
+**P3a ✅（2026-09-15）**
+
+- 产出：`model.plan.FixedRoute` + `ResolvedPath.freeze()` +
+  `tests/test_fixed_route.py`。它保存完整的有向边序列与起/终偏移；终点只继续由
+  `PlanItem.goal` 持有，避免 P4 切边时维护两份可能漂移的目标。
+- `PlanItem.fixed_route` 是可选的确认字段：编辑草稿仍可通过普通 `validate()`，
+  但 `validate(require_fixed_route=True)` 是 P3b 的强制入口，拒绝任何未冻结条目，
+  因而执行期没有回退到 P2/Dijkstra 的通道。
+- 路线自校验覆盖：边/方向存在性、偏移与总长度、相邻边连续性、`turn_allowed`、
+  折返只在死端、末边与 `goal` 的方向一致。
+- **信号兼容前置**：`FixedRoute.conflicts_with_signal()` 识别某单向 PBS 信号是否以
+  背面封死路线。P4 将在放置信号前聚合所有固定路线和运行 route，拒绝这种编辑；
+  不能等到调度器运行时才发现不可通行。
+- 验证：新增固定路径回归 + 全套 **18/18** 回归通过。纯模型、无 `Wagon`/
+  `GameLoop`/`dispatch` 消费点，**无用户可见行为变化，不需要人工复测**。
 
 ## 4. 关键技术设计（**P2 已按此实现**；含实现期发现）
 
