@@ -10,7 +10,7 @@ Python railway sandbox game inspired by Transport Fever 2 + AutoCAD. MVC archite
 当前重心不在编辑器，而在**补齐 demo 缺口并发布**：最大缺口是**计划式自动驾驶**
 ——**✅ 设计已研讨完毕、规划已封口（2026-09-10）**；**P0（分段器）/ P1（计划数据类型）/ P2（锚点解析器）已落地，
 下一步 = P3（计划机制接入列车——第一个"有行为"的阶段）**。
-**实施路线看 `docs/plan_layer_roadmap.md`（P0~P9，已封口）**；**总账看 `docs/roadmap.md`**
+**实施路线看 `docs/plan_layer_roadmap.md`（P0~P9，已封口；§3.1 = 各阶段实现要点与验收标准，§3.2 = 已完成记录）**；**总账看 `docs/roadmap.md`**
 （含「计划式自动驾驶」专项章节与「当前重心」）。
 ⚡ **上下文吃紧 / 换新会话时，先读 `docs/progress_snapshot.md`**——进度快照与研讨
 台账（已拍板 Q1~Q23、代码状态、封口状态、外部参考、接手建议），新结论要回填该文。
@@ -44,7 +44,7 @@ Python railway sandbox game inspired by Transport Fever 2 + AutoCAD. MVC archite
 - **demo 要做（最大缺口）**：**计划式自动驾驶**——创建计划并跟随计划。现状是
   "去哪里"仍由玩家逐次人工下达（右键设 goal / 车钩连挂指令 / `↑` 设巡航），
   没有"计划"这一层。**✅ 设计已研讨完毕、规划已封口（2026-09-10）**——见上一节
-  「计划层定案」；**实施路线 = `docs/plan_layer_roadmap.md`（P0~P9），下一步从 P0 开始**；
+  「计划层定案」；**实施路线 = `docs/plan_layer_roadmap.md`（P0~P9）——P0~P2 已完成，下一步 P3**；
   提案全文与代码核对见 `docs/path_level_plan.md`。**不得照抄任何一个同类游戏**
   （外部调研结论见 `docs/research_pxpatch.md`：可借鉴 3 条 / 陷阱 3 条）。
   ⚠ **POI 已降级为非前置**（Q22-1：锚点先用现成图要素），`docs/poi.md` 的
