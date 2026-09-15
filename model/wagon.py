@@ -23,8 +23,12 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import TYPE_CHECKING
 
 from model.wagon_data import WagonDataLog
+
+if TYPE_CHECKING:
+    from model.plan import Plan
 
 
 class GeometricRole(Enum):
@@ -122,9 +126,10 @@ class Wagon:
     """
     config: WagonConfig
     data_log: WagonDataLog = field(default_factory=WagonDataLog)
+    plan: "Plan | None" = None
     # [A·状态] 本车厢自己的数据包（未来承载调度命令/状态标记；近期无生产者）。
     # 2026-09-10 从 `Consist` 迁入、再从 `WagonConfig` 移到本类（T2-2 → 本次拆分）：
-    # 数据包**随车厢走**，解挂/连挂不需要任何归并/拆分记账（见 Q9）。
+    # 数据包和计划**随车厢走**，解挂/连挂不需要任何归并/拆分记账（见 Q9）。
 
     # ------------------------------------------------------------------
     # 只读委托：配置字段（读方不必知道 Wagon / WagonConfig 的分工）

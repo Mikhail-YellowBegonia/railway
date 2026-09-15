@@ -85,6 +85,8 @@ class GameLoop:
         # 见 model/dispatch.py。每帧对每列车 tick 一次。
         from model.dispatch import TrainDispatcher
         self.dispatcher = TrainDispatcher(self.network, self.signals, self.block_manager)
+        from model.plan_dispatch import PlanDispatcher
+        self.plan_dispatcher = PlanDispatcher(self.network)
 
         # 平移状态（受模式影响触发集）
         self._pan_button: int | None = None  # 当前正在按的平移按钮（None 表示未平移）
@@ -168,11 +170,13 @@ class GameLoop:
             # 已停放许久的列车不在 moving_before 里，不会被反复扫描。
             moving_before = {id(t) for t in self.trains if t.is_moving()}
             for t in self.trains:
+                self.plan_dispatcher.tick(t)
                 self.dispatcher.tick(t, dt, t.v_target, self.trains)
             just_stopped = [t for t in self.trains
                             if id(t) in moving_before and t.is_parked()]
             for t in just_stopped:
                 if t in self.trains:
+                    self.plan_dispatcher.on_arrival(t)
                     self._auto_couple_on_stop(t)
 
             # 相机跟随列车

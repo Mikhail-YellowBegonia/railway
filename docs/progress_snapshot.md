@@ -18,9 +18,9 @@
 ## 1. 当前状态（一句话）
 
 **规划已封口，正在按 `docs/plan_layer_roadmap.md` 的 P0~P9 实现**：
-**P0（分段器）/ P1（计划数据类型）/ P2（锚点解析器）/ P3a（冻结路径）/ P4（拓扑变更防火墙）已完成**
+**P0（分段器）/ P1（计划数据类型）/ P2（锚点解析器）/ P3a（冻结路径）/ P4（拓扑变更防火墙）/ P3b（计划接入列车）已完成**
 （`103f7a0` / `44c240c` / `ef78232` / `7441796` / 当前工作树），
-**下一步 = P3b（计划机制接入列车，首个"有行为"阶段）→ P5（最小交互）**。
+**下一步 = P5（最小交互）→ P7（连挂条目）**。
 
 ### 1.1 研究对象（一句话）
 
@@ -89,18 +89,20 @@
 
 | **P4** | **拓扑变更防火墙** —— 新增 `model/topology_guard.py`，以方向保序的 `EdgeSplit` 原子改写运行 `route`、目标、冻结路线与控制点出口；`GameLoop` 统一保护切边、删除/节点合并与单向 PBS 放置。车身占用或信号所在边不可切；双端 BUILD 先整体预检，避免半完成拓扑。新增 `tests/test_topology_guard.py`、`tests/test_topology_guard_game_loop.py`、`tests/test_topology_guard_editor.py`；**全套 21/21 回归通过**。仍无计划执行消费点。 |
 
-**P4 已完成，下一步 = P3b**：所有切边/删除都经拓扑防火墙原子改写或拒绝；放置信号前
-拒绝会从背面封死固定/运行路线的槛位。接下来将控制车计划接入列车，从固定路径投影
-`route`/`goal`，运行期零 Dijkstra，并保留信号等待、到达步进、R10 与 R11 断言。
-P3b 是首个"有行为"阶段，之后每步跑全套回归；触及连挂/解挂/折返带须请你人工复测。
+| **P3b** | **计划机制接入列车** —— `Wagon.plan` 保存车厢域计划；新增 `model/plan_dispatch.py`，从胜出控制车的 `FixedRoute` 一次性投影 route/goal，信号等待不覆写 route，运行期零 Dijkstra。到达事件幂等步进；永久失效最多环扫一次，起点不匹配安全等待；连挂命令等待 P7。新增 `tests/test_plan_dispatch.py`；既有连挂/解挂、信号调度回归通过。 |
+
+**P3b 已完成，下一步 = P5**：控制车计划已从固定路径投影到 `route`/`goal`，运行期零
+Dijkstra，并保留信号等待与到达步进。P5 完成后可开始受控人工试用；P7 触及连挂条目时
+须人工复测连挂/解挂/折返联合场景。
 ✅ **临时调试入口已拍板**：`Shift + 右键` 追加一条**冻结**的 `goto`；连续追加以上一条
 终点为构造起点，P5 正式编辑器完成后移除。
 
 **读代码时要知道的三件事**：
 1. `Consist.wagons` 里是 **`Wagon`**；它对 `length`/`mass`/`bogies`/`coupler_*`/`P_rated`/
    `have_control`/`priority`/`is_powered`/`bogie_spacing`/`wagon_id` 都是**委托**到 `config`。
-2. 现有链路**已经符合 Q7 管道**（`_issue_goal_order` → `assign_route` →
-   `TrainDispatcher`/`reserve_path` → `update`/physics → `s`）；**只缺最上游"调度计划"那一段**。
+2. 现有链路现在符合 Q7 管道：`PlanDispatcher`（或临时手动 `_issue_goal_order`）→
+   `assign_route` → `TrainDispatcher`/`reserve_path` → `update`/physics → `s`；计划执行只读取
+   已冻结的 `FixedRoute`。
 3. **POI 不需要"挖成本图"**：`find_path` 的 `goal_directed` 判据是 `cur == goal_directed`
    （必须精确走到那条有向边），"从固定方向到达"已由搜索保证；有向点 → `DirectedEdge`
    用现成的 `_directed_from(network, edge_id, node_id)`。仍需补：**POI 带 `t`**、

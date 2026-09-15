@@ -102,6 +102,9 @@ class TrainEntity:
         # 的剩余弧长。None = 无信号约束，授权到 goal。由调度层每帧重算后写入，
         # update() 只读不递减。
         self.authority_remaining: float | None = None
+        # P3b：计划激活令牌和提示均是编组运行期派生，由 PlanDispatcher 写入。
+        self.plan_execution = None
+        self.plan_status = ""
 
         # 编组作业信号豁免（docs/consist_ui.md §5.5，2026-09）：连挂驶向/解挂
         # 分离时，本车与"配对列车"之间的物理占用检查需要放开——见
