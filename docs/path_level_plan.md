@@ -8,6 +8,11 @@
 > 相关：`docs/wagon_centric_data.md`（计划层机制 Q13~Q17）、`docs/poi.md`（锚点/路段）、
 > `docs/research_pxpatch.md`（外部调研）、`docs/roadmap.md` #7/#9。
 
+> **2026-09-15 后续实施修正**：本稿记录的 Q21/Q22 裁决仍有效，但当时的"锚点解析后
+> 得到 route"不能再被解读为执行期持续以 Dijkstra 补全。权威实施口径已转入
+> `plan_layer_roadmap.md`：编辑期可解析，确认后冻结完整有向边序列，运行期零寻路；
+> 同时先建立严格的拓扑变更防火墙。这一补记避免本历史研讨稿与 demo 目标冲突。
+
 ---
 
 ## 0. 用户提案（原文摘要）
