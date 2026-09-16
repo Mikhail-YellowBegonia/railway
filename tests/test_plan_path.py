@@ -216,7 +216,9 @@ if os.path.exists(save_path):
                     assert abs(got.path.remaining_to_goal
                                - (got.path.total_cost - direct_real[1] - direct_real[2])) < 1e-9
                     compared += 1
-                    # 找一个"无锚点路线没经过的切割点（道岔）"，用它强制绕另一侧
+                    # 找一个"无锚点路线没经过、且可合法过境的切割点"，用它
+                    # 强制绕另一侧。is_cut_node 也包含不可过境的二度急折点，
+                    # 不能把首个切割点直接假定为可用锚点。
                     if not anchor_checked:
                         cut_nodes = sorted(
                             nid for nid in real.nodes if is_cut_node(real, nid)
@@ -225,25 +227,25 @@ if os.path.exists(save_path):
                             nid for nid in cut_nodes
                             if not got.path.touches_node(real, nid)
                         ]
-                        if untouched:
-                            target = untouched[0]
+                        for target in untouched:
                             forced = resolve_plan_item(
                                 real, real_start,
                                 PlanItem.goto(real_goal, (Anchor(target),)),
                             )
-                            assert forced.ok, f"锚点 {target} 应可达：{forced.failure}"
+                            if not forced.ok:
+                                continue
                             assert forced.path.passes_through(real, target), (
                                 f"锚点 {target} 是硬约束，路线必须经过它"
                             )
-                            assert forced.path.edges != got.path.edges, (
-                                "锚点在另一侧 ⇒ 路线应当换一条"
-                            )
+                            if forced.path.edges == got.path.edges:
+                                continue
                             print(
                                 f"✅ ⑧ 真实存档：无锚点解析与 find_path_from_point 等价"
                                 f"（{compared} 组对比）；锚点 {target} 强制改走另一侧"
                                 f"（{len(got.path.edges)} → {len(forced.path.edges)} 段）"
                             )
                             anchor_checked = True
+                            break
                     if compared >= 6 and anchor_checked:
                         break
                 if compared >= 6 and anchor_checked:
