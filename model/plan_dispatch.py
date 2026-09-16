@@ -193,13 +193,20 @@ class PlanDispatcher:
                 if not train.is_parked():
                     self._report_once(train, "计划等待当前运行指令结束")
                     return
-                if item.fixed_route is None or not self._at_route_start(train, item.fixed_route):
+                if item.fixed_route is None:
+                    self._report_once(train, "计划错误：前往连挂缺少固定路径")
+                    return
+                projection = self._project_route_start(train, item.fixed_route)
+                if projection is None:
                     self._report_once(train, "计划等待：车头不在固定路线起点，拒绝重新寻路")
                     return
                 from controller.coupling import head_hook_offset
-                route = list(item.fixed_route.edges[1:])
+                route, start_adjustment = projection
                 stop_before = head_hook_offset(train)
-                remaining = self._remaining_to_couple(item.fixed_route, goal, stop_before)
+                remaining = (
+                    self._remaining_to_couple(item.fixed_route, goal, stop_before)
+                    + start_adjustment
+                )
                 train._stop_before_m = stop_before
                 train.assign_route(route, remaining, goal)
                 train.couple_approach_partner = target_train
@@ -220,12 +227,14 @@ class PlanDispatcher:
             if not train.is_parked():
                 self._report_once(train, "计划等待当前运行指令结束")
                 return
-            if not self._at_route_start(train, item.fixed_route):
+            projection = self._project_route_start(train, item.fixed_route)
+            if projection is None:
                 self._report_once(train, "计划等待：车头不在固定路线起点，拒绝重新寻路")
                 return
-            route = list(item.fixed_route.edges[1:])
+            route, start_adjustment = projection
             train._stop_before_m = 0.0
-            train.assign_route(route, item.fixed_route.remaining_to_goal(self.network), item.goal)
+            remaining = item.fixed_route.remaining_to_goal(self.network) + start_adjustment
+            train.assign_route(route, max(0.0, remaining), item.goal)
             train.v_target = max(train.v_target, PLAN_CRUISE_SPEED)
             train.plan_execution = PlanExecution(
                 wagon_id=winner.wagon_id,
@@ -292,17 +301,44 @@ class PlanDispatcher:
         total = sum(self.network.edges[current].length for current, _ in route.edges)
         return max(0.0, total - route.start_offset - runtime_end_offset - stop_before)
 
-    def _at_route_start(self, train: TrainEntity, route: FixedRoute) -> bool:
+    def _project_route_start(
+        self, train: TrainEntity, route: FixedRoute,
+    ) -> tuple[list[tuple[int, int]], float] | None:
+        """把厘米级停车误差投影到冻结路径起点，不移动列车或修改路网。"""
         if not route.edges:
-            return False
+            return None
         edge_id, t = train.current_edge_and_t()
         direction = train.current_direction()
-        if (edge_id, direction) != route.edges[0]:
-            return False
         edge_length = self.network.edges[edge_id].length
-        expected_t = (route.start_offset / edge_length if direction > 0
-                      else 1.0 - route.start_offset / edge_length)
-        return abs(t - expected_t) * edge_length <= POSITION_EPSILON_M
+        actual_offset = t * edge_length if direction > 0 else (1.0 - t) * edge_length
+        current = (edge_id, direction)
+        first = route.edges[0]
+
+        if current == first:
+            adjustment = route.start_offset - actual_offset
+            if abs(adjustment) <= POSITION_EPSILON_M:
+                return list(route.edges[1:]), adjustment
+            return None
+
+        from model.pathfinding import head_node, tail_node
+        boundary_node = head_node(self.network, current)
+        if boundary_node != tail_node(self.network, first):
+            return None
+        remaining_to_boundary = edge_length - actual_offset
+        adjustment = remaining_to_boundary + route.start_offset
+        if adjustment > POSITION_EPSILON_M:
+            return None
+
+        if current[0] == first[0] and current[1] == -first[1]:
+            if self.network.nodes[boundary_node].connection_count() != 1:
+                return None
+            segment_length, _turnout, _edges = \
+                self.network.simple_segment_from_endpoint(boundary_node)
+            if segment_length < train.state.consist.total_length:
+                return None
+        elif not self.network.turn_allowed(boundary_node, current[0], first[0]):
+            return None
+        return list(route.edges), adjustment
 
     def _at_goal(self, train: TrainEntity, item: PlanItem) -> bool:
         if item.goal is None:

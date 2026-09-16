@@ -302,4 +302,133 @@ assert driver.plan.pointer == 1
 assert len(physical_merged.state.consist.wagons) == 2
 print("✅ ⑪ 冻结计划完成真实驶近、车钩对位、合并与事件推进")
 
+# ⑫ 节点边界有两种等价表示：入边末端与出边起点。制动停在节点前几厘米时，
+# 下一条固定路径可从合法出边继续；不切边、不改位置、不重新寻路。
+network4 = RailNetwork()
+q0 = network4.add_node(Vec3(0.0, 0.0, 0.0))
+q1 = network4.add_node(Vec3(10.0, 0.0, 0.0))
+q2 = network4.add_node(Vec3(20.0, 0.0, 0.0))
+incoming = network4.add_edge(q0, q1).edge_id
+outgoing = network4.add_edge(q1, q2).edge_id
+handoff_wagon = create_simple_car(
+    length=5.0, mass=30.0, P_rated=1000.0, have_control=True,
+)
+handoff_wagon.plan = Plan([
+    PlanItem.goto(
+        (outgoing, 1.0, 1),
+        fixed_route=FixedRoute(((outgoing, 1),), 0.0, 0.0),
+    ),
+])
+handoff = TrainEntity(
+    TrainState(OccupancyState([(incoming, 1)], 4.96, 5.0, []), 0.0, 0.0,
+               Consist([handoff_wagon])),
+    network4,
+    SimplePhysics(a_max=2.0, b_max=3.0),
+)
+handoff_plans = PlanDispatcher(network4)
+handoff_plans.tick(handoff, [handoff])
+assert handoff.state.occupancy.route == [(outgoing, 1)]
+assert abs(handoff.state.remaining_to_goal - 10.04) < 1e-9
+assert set(network4.edges) == {incoming, outgoing}
+
+# 逆向行驶使用同一契约，t 与有向弧长换算不得颠倒。
+reverse_wagon = create_simple_car(
+    length=5.0, mass=30.0, P_rated=1000.0, have_control=True,
+)
+reverse_wagon.plan = Plan([
+    PlanItem.goto(
+        (incoming, 0.0, -1),
+        fixed_route=FixedRoute(((incoming, -1),), 0.0, 0.0),
+    ),
+])
+reverse_handoff = TrainEntity(
+    TrainState(OccupancyState([(outgoing, -1)], 4.96, 5.0, []), 0.0, 0.0,
+               Consist([reverse_wagon])),
+    network4,
+    SimplePhysics(a_max=2.0, b_max=3.0),
+)
+handoff_plans.tick(reverse_handoff, [reverse_handoff])
+assert reverse_handoff.state.occupancy.route == [(incoming, -1)]
+assert abs(reverse_handoff.state.remaining_to_goal - 10.04) < 1e-9
+
+# 同一节点但非法急折仍必须拒绝，不能借“位置等价”绕过转向约束。
+sharp_network = RailNetwork()
+r0 = sharp_network.add_node(Vec3(0.0, 0.0, 0.0))
+r1 = sharp_network.add_node(Vec3(10.0, 0.0, 0.0))
+r2 = sharp_network.add_node(Vec3(10.0, 10.0, 0.0))
+sharp_in = sharp_network.add_edge(r0, r1).edge_id
+sharp_out = sharp_network.add_edge(r1, r2).edge_id
+assert not sharp_network.turn_allowed(r1.node_id, sharp_in, sharp_out)
+sharp_wagon = create_simple_car(
+    length=5.0, mass=30.0, P_rated=1000.0, have_control=True,
+)
+sharp_wagon.plan = Plan([
+    PlanItem.goto(
+        (sharp_out, 1.0, 1),
+        fixed_route=FixedRoute(((sharp_out, 1),), 0.0, 0.0),
+    ),
+])
+sharp_train = TrainEntity(
+    TrainState(OccupancyState([(sharp_in, 1)], 4.96, 5.0, []), 0.0, 0.0,
+               Consist([sharp_wagon])),
+    sharp_network,
+    SimplePhysics(a_max=2.0, b_max=3.0),
+)
+sharp_plans = PlanDispatcher(sharp_network)
+sharp_plans.tick(sharp_train, [sharp_train])
+assert sharp_train.state.occupancy.route == []
+assert "固定路线起点" in sharp_train.plan_status
+print("✅ ⑫ 节点边界停车误差可拓扑接续，非法转向仍被拒绝")
+
+# ⑬ 完整时序：上一条实际制动停在入边末端前，再由到达事件激活出边计划。
+network5 = RailNetwork()
+s0 = network5.add_node(Vec3(0.0, 0.0, 0.0))
+s1 = network5.add_node(Vec3(100.0, 0.0, 0.0))
+s2 = network5.add_node(Vec3(200.0, 0.0, 0.0))
+first_edge = network5.add_edge(s0, s1).edge_id
+second_edge = network5.add_edge(s1, s2).edge_id
+sequence_wagon = create_simple_car(
+    length=10.0, mass=30.0, P_rated=1000.0, have_control=True,
+)
+sequence_wagon.plan = Plan([
+    PlanItem.goto(
+        (first_edge, 1.0, 1),
+        fixed_route=FixedRoute(((first_edge, 1),), 20.0, 0.0),
+    ),
+    PlanItem.goto(
+        (second_edge, 1.0, 1),
+        fixed_route=FixedRoute(((second_edge, 1),), 0.0, 0.0),
+    ),
+])
+sequence_train = TrainEntity(
+    TrainState(OccupancyState([(first_edge, 1)], 10.0, 10.0, []), 0.0, 0.0,
+               Consist([sequence_wagon])),
+    network5,
+    SimplePhysics(a_max=2.0, b_max=3.0),
+)
+sequence_plans = PlanDispatcher(network5)
+sequence_blocks = BlockManager()
+sequence_signals = SignalTable()
+sequence_blocks.rebuild(network5, sequence_signals)
+sequence_dispatch = TrainDispatcher(
+    network5, sequence_signals, sequence_blocks,
+)
+sequence_plans.tick(sequence_train, [sequence_train])
+for _ in range(60 * 30):
+    sequence_dispatch.tick(
+        sequence_train, 1.0 / 60.0, sequence_train.v_target, [sequence_train],
+    )
+    if sequence_train.is_parked():
+        break
+assert sequence_train.is_parked()
+stopped_edge, stopped_t = sequence_train.current_edge_and_t()
+assert stopped_edge == first_edge and 0.0 < (1.0 - stopped_t) * 100.0 <= 0.1
+sequence_plans.on_arrival(sequence_train)
+assert sequence_wagon.plan.pointer == 1
+sequence_plans.tick(sequence_train, [sequence_train])
+assert sequence_train.plan_execution is not None
+assert sequence_train.state.occupancy.route == [(second_edge, 1)]
+assert sequence_train.state.remaining_to_goal > 100.0
+print("✅ ⑬ 实际制动停车后，下一条相邻出边计划可连续激活")
+
 print("\n全部通过")
