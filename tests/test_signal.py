@@ -75,7 +75,7 @@ assert colors_empty[edge_north_dir] is SignalState.GREEN
 print("✅ 无车占用时，所有信号 GREEN")
 
 # --- 4. 占用推导：block 内有车占用应变 RED，未占用的槛位不受影响 ---
-east_block = blocks.block_edges(directed_east)
+east_block = blocks.protection_envelope_edges(directed_east)
 assert EDGE_EAST in east_block, "east 槛位的 block 至少应包含 edge3 自身"
 
 train_on_east = _FakeTrain(occupied_edge_ids=[EDGE_EAST])
@@ -201,8 +201,8 @@ assert ring_signals.place(s_arc_b)
 
 ring_blocks = BlockManager()
 ring_blocks.rebuild(ring_network, ring_signals)
-block_a = ring_blocks.block_edges(s_arc_a)
-block_b = ring_blocks.block_edges(s_arc_b)
+block_a = ring_blocks.protection_envelope_edges(s_arc_a)
+block_b = ring_blocks.protection_envelope_edges(s_arc_b)
 assert block_a == frozenset({0, 1, 2}), \
     f"弧 A 应恰好是 {{0,1,2}}，实际 {sorted(block_a)}（吞并了另一段或整个环，说明背面绕行未被拦住）"
 assert block_b == frozenset({3, 4, 5}), \

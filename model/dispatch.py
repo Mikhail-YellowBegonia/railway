@@ -13,8 +13,9 @@ Node/Edge、绝不改 occupancy 的拓扑结构，列车状态仍只是标量偏
 - **授权边界** = 列车已预约的最后一个闭塞区间的末端（下一个信号节点）。
   边界沿列车自身 route 计算（不是 block 的全 DFS 边集），所以道岔分支
   不影响"车该停在哪"。
-- **最多预约 2 个受保护区间**（当前段 + 前方一段，OpenTTD one-block-ahead），
-  避免把整条线路预约死，也避免列车在绿灯前频繁停车。
+- **最多预约当前路径片段 + 前方一个路径片段**。预算只沿本车固定 route
+  统计信号入口，不统计全局信号保护包络；后者允许重叠、分叉，不是可计数的
+  互斥区间。这样既避免把整条线路预约死，也不会把双向区间重复计数。
 - **红灯停车余量**：授权边界落在红灯区间前端时，制动目标再往回缩
   SIGNAL_STOP_MARGIN，让车头停在信号机之前而不是精确压线——否则制动曲线
   的离散时间步过冲会让车头越过信号节点、把红灯区间的边吞进 occupancy
@@ -33,11 +34,10 @@ from model.signal import SignalTable
 from model.train_controller import BrakingController
 from model.train_entity import TrainEntity
 
-# 车头前方最多预约的受保护闭塞区间数（"当前段 + 前方一段"）。注意预算只
-# 数"车头前方"的 block——车身横跨多个 block 时（长列车），车尾尚未完全驶离
-# 的 block 仍被 tick_reservations 持有，但那是"车头后方/正下方"，不该占用
-# 前方预约预算（否则长列车会在绿灯前被永久卡死）。
-MAX_AHEAD_BLOCKS = 2
+# 车头当前 edge 之后最多提前预约的路径片段数。当前 edge 所在片段不计入：
+# 列车进入当前片段后，应该能立即申请下一个片段。这也避免了从全局保护包络
+# 反查"当前属于几个 block"——双向信号的包络天然重叠，不能作为预算单位。
+MAX_RESERVED_SPANS_AHEAD = 1
 
 # 红灯前停车的安全余量（米）：车头停在信号机之前而非精确压线。
 SIGNAL_STOP_MARGIN = 0.5
@@ -107,13 +107,20 @@ class TrainDispatcher:
 
         remaining_path = [train.head_directed_edge()] + list(train.state.occupancy.route)
 
-        # 1) 预约推进：若车头前方已预约的 block 数不足 MAX_AHEAD_BLOCKS 且更
-        #    前方还有区间，尝试预约下一个受保护区间（全有或全无）。失败
+        # 1) 预约推进：若固定路径上、车头当前 edge 之后已预约的路径片段不足
+        #    MAX_RESERVED_SPANS_AHEAD 且前方仍有未授权边，尝试预约下一个片段。
+        #    路径片段由本车 route 上的信号入口/下一安全边界定义；全局 DFS
+        #    保护包络允许重叠、分叉，不参与预算。失败
         #    （被预约 or 被物理占用）则边界保持，列车停车等待。
         held_edges = self.block_manager.held_edges(train)
-        frontier, blocks_ahead = self._walk_frontier(remaining_path, held_edges)
-        if len(blocks_ahead) < MAX_AHEAD_BLOCKS and frontier < len(remaining_path):
-            next_seg = self.block_manager.truncate_to_next_signal(
+        frontier, reserved_spans_ahead = self._walk_frontier(
+            remaining_path, held_edges,
+        )
+        if (
+            reserved_spans_ahead < MAX_RESERVED_SPANS_AHEAD
+            and frontier < len(remaining_path)
+        ):
+            next_seg = self.block_manager.truncate_to_next_route_span(
                 self.network, self.signals, remaining_path[frontier:],
             )
             # 物理占用视同红灯：只看列车实际要走的边（edge 交集），不展开到
@@ -122,7 +129,9 @@ class TrainDispatcher:
             if not (next_seg_eids & others_occupied):
                 self.block_manager.reserve_path(train, [eid for eid, _d in next_seg])
             held_edges = self.block_manager.held_edges(train)
-            frontier, blocks_ahead = self._walk_frontier(remaining_path, held_edges)
+            frontier, reserved_spans_ahead = self._walk_frontier(
+                remaining_path, held_edges,
+            )
 
         red_ahead = frontier < len(remaining_path)
         raw_authority = self._distance_head_to_frontier(remaining_path, frontier, train)
@@ -205,37 +214,38 @@ class TrainDispatcher:
 
     def _walk_frontier(
         self, remaining_path: list[DirectedEdge], held_edges: set[int],
-    ) -> tuple[int, set[DirectedEdge]]:
-        """沿 remaining_path 从车头向前走，返回 (授权边界边数, 车头前方已预约
-        的 block key 集合)。
+    ) -> tuple[int, int]:
+        """沿 remaining_path 返回 (授权边界边数, 前方已预约路径片段数)。
 
         授权边界 = 能连续通过的最长前缀的边数：前缀里每条边要么被我预约
-        （edge 交集语义），要么不属于任何 block（无保护路段）；遇到"属于某
-        block 但未被预约"的边即停（红灯边界）。
+        （edge 交集语义），要么不属于任何信号保护包络；遇到"受保护但未预约"
+        的边即停。
 
-        blocks_ahead 只统计"车头前方"扫描到的、含已预约边的 block——车身横跨
-        多个 block 时，车尾尚未驶离的 block 不在 remaining_path 里、不计入，
-        因此不会被它挤占"前方预约预算"（长列车绿灯前卡死 bug 的根因）。
+        预算不是全局 block key 的数量。`BlockManager` 的 DFS 结果是每个信号的
+        保护包络：双向信号的包络可以完全重叠，道岔处也可以分叉，因此它不是
+        路网的 partition，更不是 PBS 的预约单位。这里改为只数固定路径上、
+        车头当前 edge（index 0）之后已经通过预约前缀覆盖的信号入口；每个入口
+        对应一个实际 route span。当前 edge 所在片段不计入，允许滚动预约前方
+        一个片段，同时避免长列车车尾和重叠包络虚增预算。
         """
-        all_blocks = self.block_manager.all_blocks()  # block key -> edge set
-        block_by_edge: dict[int, list[DirectedEdge]] = {}
-        for key, edges in all_blocks.items():
-            for eid in edges:
-                block_by_edge.setdefault(eid, []).append(key)
+        protected_edges: set[int] = set()
+        for edges in self.block_manager.all_protection_envelopes().values():
+            protected_edges.update(edges)
 
         frontier = 0
-        blocks_ahead: set[DirectedEdge] = set()
-        for i, (eid, _d) in enumerate(remaining_path):
-            blocks_here = block_by_edge.get(eid, [])
-            if not blocks_here:
-                frontier = i + 1  # 无保护路段：天然可通行
+        reserved_spans_ahead = 0
+        for index, directed in enumerate(remaining_path):
+            edge_id, _direction = directed
+            if edge_id not in protected_edges:
+                frontier = index + 1  # 无保护路段：天然可通行
                 continue
-            if eid in held_edges:
-                blocks_ahead.update(blocks_here)
-                frontier = i + 1
+            if edge_id in held_edges:
+                if index > 0 and self.signals.has_signal(directed):
+                    reserved_spans_ahead += 1
+                frontier = index + 1
             else:
-                break  # 属于某 block 但未被预约：红灯边界
-        return frontier, blocks_ahead
+                break  # 受信号保护但未被预约：授权边界
+        return frontier, reserved_spans_ahead
 
     def _distance_head_to_frontier(
         self, remaining_path: list[DirectedEdge], frontier: int, train: TrainEntity,

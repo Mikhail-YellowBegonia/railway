@@ -8,7 +8,7 @@
    为止的无保护路段（不需要预约） + 该信号实际保护的完整 block（从
    信号出发向前延伸到下一个信号/死端）。**不是**"走到第一个挂信号的
    节点就停"——那是本次实现踩过的一个真实 bug：截出来的段和
-   `BlockManager._compute_block` 算出的 block 边界错位一格，导致
+   `BlockManager._compute_protection_envelope` 的边界错位一格，导致
    `reserve_path` 永远查不到交集、预约形同虚设（用真实 GameLoop 端到端
    验证时发现，见 model/block.py 顶部记录）。
 3. One-Way PBS 的反方向硬性禁止无论远场近场都必须遵守——这是拓扑级
@@ -52,10 +52,12 @@ assert signals.place(signal_at_node3)
 
 blocks = BlockManager()
 blocks.rebuild(network, signals)
-assert blocks.block_edges(signal_at_node1) == frozenset({EDGE_2}), \
-    f"信号1的 block 应恰好是 [edge2]，实际 {sorted(blocks.block_edges(signal_at_node1))}"
-assert blocks.block_edges(signal_at_node3) == frozenset({EDGE_3, EDGE_5}), \
-    f"信号2的 block 应是 [edge3, edge5]（一路吞到死端），实际 {sorted(blocks.block_edges(signal_at_node3))}"
+assert blocks.protection_envelope_edges(signal_at_node1) == frozenset({EDGE_2}), \
+    ("信号1的保护包络应恰好是 [edge2]，实际 "
+     f"{sorted(blocks.protection_envelope_edges(signal_at_node1))}")
+assert blocks.protection_envelope_edges(signal_at_node3) == frozenset({EDGE_3, EDGE_5}), \
+    ("信号2的保护包络应是 [edge3, edge5]（一路延伸到死端），实际 "
+     f"{sorted(blocks.protection_envelope_edges(signal_at_node3))}")
 
 # --- 1. 占用信号2保护的 edge3 不应阻断远场寻路 ---
 occupier = make_parked_train(EDGE_3, 1)
@@ -77,7 +79,7 @@ print("✅ 远场寻路无视闭塞占用/预约，正确算出穿过被占用�
 # --- 2. 近场截断：应恰好是 [edge0（无保护，原样经过）, edge2（信号1
 #    保护的完整 block）]，不含 edge3/edge5（那是信号2 保护的下一个区间，
 #    这次范围只预约前方一个区间，不做 Long Reserve 式的多区间预留）。
-near_field_edges = blocks.truncate_to_next_signal(network, signals, far_path.edges)
+near_field_edges = blocks.truncate_to_next_route_span(network, signals, far_path.edges)
 near_field_edge_ids = [eid for eid, _d in near_field_edges]
 assert near_field_edge_ids == [EDGE_0, EDGE_2], \
     (f"近场段应恰好是 [edge0, edge2]（无保护段 + 信号1 的完整 block），"
@@ -120,7 +122,7 @@ far_result_2 = find_path_from_point(
     allow_reversal=True, consist_length=5.0,
 )
 assert far_result_2 is not None
-near_field_2 = blocks_2.truncate_to_next_signal(
+near_field_2 = blocks_2.truncate_to_next_route_span(
     network, signals_2, far_result_2[0].edges,
 )
 near_field_2_ids = [eid for eid, _d in near_field_2]
@@ -143,7 +145,7 @@ plain_result = find_path_from_point(
 )
 assert plain_result is not None
 plain_path, _, _ = plain_result
-plain_truncated = no_blocks.truncate_to_next_signal(
+plain_truncated = no_blocks.truncate_to_next_route_span(
     no_signal_network, no_signals, plain_path.edges,
 )
 assert plain_truncated == list(plain_path.edges), \
@@ -165,7 +167,7 @@ single_result = find_path_from_point(
     allow_reversal=True, consist_length=5.0,
 )
 assert single_result is not None
-single_near = single_blocks.truncate_to_next_signal(
+single_near = single_blocks.truncate_to_next_route_span(
     single_signal_network, single_signals, single_result[0].edges,
 )
 single_near_ids = [eid for eid, _d in single_near]

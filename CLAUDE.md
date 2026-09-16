@@ -587,8 +587,8 @@ OpenTTD Path Signal 调研笔记和分步实施状态。核心要点：
 - **One-Way PBS 语义**(`model/signal.py::SignalTable`)：信号槛位是
   `DirectedEdge`，只有"正面"，反方向永久禁止通行，不允许背靠背放置两个
   相对信号。
-- **Block 边界判据是"节点"，与"能不能通行"无关**（2026-09 bug 修复后
-  确立）：`BlockManager._compute_block` 的 DFS 走到某节点时，若该节点
+- **保护包络边界判据是"节点"，与"能不能通行"无关**（2026-09 bug 修复后
+  确立）：`BlockManager._compute_protection_envelope` 的 DFS 走到某节点时，若该节点
   挂着任意方向的信号就停（`_node_has_any_signal`，按 tail_node 判断信号
   是否物理位于该节点，不是任意相邻边任意方向），与信号是不是"背面"、
   能不能通行完全脱钩。这是为了同时满足：环线场景不能被绕背面吞并整个
@@ -610,6 +610,11 @@ OpenTTD Path Signal 调研笔记和分步实施状态。核心要点：
   `dict[TrainEntity, set[int]]`（train → 预约的具体 edge_id），`reserve_path`
   只查本车路径 edge 是否被他人预约、不再展开到整块；`compute_colors` 走
   `_has_free_path` 判通路；调度层物理占用检查也只查本车实际要走的边。
+- **保护包络不是区间分割**（2026-09 死锁复盘后确立）：上述 DFS 结果只是
+  一个信号后方所有可能分支的 edge 包络，允许不同入口重叠，也允许道岔分叉。
+  PBS 的预约单位是固定 route 上由信号边界截出的路径片段（route span），不能
+  用保护包络 key 数量计算预约预算。灯色表示该信号后至少存在一条自由通路；
+  特定列车能否通过只由其固定路径片段预约决定，两者暂允许在 UI 上不一致。
 - 渲染用等边三角形，Layout 模式（见 `view/renderer.py` 顶部），屏幕像素
   基准，不随缩放变化。
 - **信号与网络编辑的耦合缺口**：`SignalTable` 存的 `DirectedEdge` 引用
@@ -629,22 +634,20 @@ OpenTTD Path Signal 调研笔记和分步实施状态。核心要点：
   「Step 5」完整记录）：`find_path_from_point`（唯一跑 Dijkstra 的地方）
   只用 `SignalTable.passable_topology_only`（拓扑 + One-Way PBS 反方向
   硬性禁止，不看占用/预约）算出完整远场路径；`BlockManager.reserve_path`/
-  `make_passable_fn` 不再接寻路，改为对 `truncate_to_next_signal` 截出的
-  近场段（前方一个闭塞区间）单独调用。`truncate_to_next_signal` 的截断
-  边界 = 信号实际保护的 block（不是"走到信号跟前"就停——这两者错位过
-  一格，是个真实 bug，教训是这类边界必须用真实 `GameLoop` 端到端验证，
-  纯单元测试测不出预约集合和 block 集合对不上）。
+  `make_passable_fn` 不再接寻路，改为对 `truncate_to_next_route_span` 截出的
+  路径片段单独调用。该片段 = 无保护前缀 + 从第一个正面信号沿固定 route
+  到下一信号节点/死端的 edge（不是“走到信号跟前”就停——这两者曾错位过
+  一格，是个真实 bug，教训是此类边界必须用真实 `GameLoop` 端到端验证）。
 - **信号接入运动控制**（Step 6，2026-09 起，见 `docs/train_control.md`
   「Step 6」完整记录）：核心是**运动授权（Movement Authority）**——列车
   只能驶到已预约闭塞区间末端。`model/dispatch.py::TrainDispatcher` 每帧对
   每列车做"预约推进 + 授权边界计算 + 状态转移"，
   写入 `TrainEntity.authority_remaining`；`update()` 制动目标改为
   `min(remaining_to_goal, authority_remaining)`，红灯前连续制动曲线停车、
-  绿灯续约恢复。预约预算"最多 2 个受保护区间"（当前段 + 前方一段），但只数
-  **车头前方**已预约的 block（`_walk_frontier` 返回的 `blocks_ahead`）——不能
-  用"总共持有几个 block"，否则长列车（车身横跨多个 block、车尾未驶离的
-  block 仍被 tick_reservations 持有）会在绿灯前被永久卡死（2026-09 人工测试
-  发现）。`TrainEntity.hard_stop()` 从占位实现为兜底急停（授权边界落到车头
+  绿灯续约恢复。滚动窗口为“当前路径片段 + 前方一个路径片段”；`_walk_frontier`
+  只沿固定 route 统计车头当前 edge 之后已预约的信号入口，不再统计全局保护
+  包络 key。否则长列车车尾或重叠保护包络都会虚增预算，造成永久等待。
+  `TrainEntity.hard_stop()` 从占位实现为兜底急停（授权边界落到车头
   之后时触发，带可见警告）。新增状态 `is_holding()`（信号前等待，保留
   route/goal），`is_parked()` 重定义为"无控制器且无指令"——这两者必须区分，
   否则等待中的列车会被当作可解挂/可折返。`TrainDispatcher.tick` 接收

@@ -1,11 +1,16 @@
-"""固定闭塞区间划分 + 占用推导信号颜色 + 进路预约（Step 3/4/6）。
+"""信号保护包络 + 占用推导信号颜色 + 路径预约（Step 3/4/6）。
 
-Block / 预约设计（Step 4 起，Step 6 改为 PBS / edge 交集语义，见
+保护包络 / 预约设计（Step 4 起，Step 6 改为 PBS / edge 交集语义，见
 docs/train_control.md 调研记录与「Step 6」）：
+
+- **保护包络不是区间分割**：每个信号沿所有允许分支 DFS 到下一个信号，
+  得到该信号可能保护的 edge 包络。不同入口的包络可以重叠，一个包络也可以
+  在道岔处分叉；它不是路网 partition，不能用包络 key 数量表示列车预约了
+  几段路径。列车授权必须沿自己的固定 route 截取 route span。
 
 - 预约表 `_reservations: dict[TrainEntity, set[int]]`——每辆车预约的**具体
   edge_id 集合**（PBS 语义），不是"block key → train"的整块互斥。预约在
-  调度层每帧对"前方一个闭塞区间"的具体边写入（`reserve_path`）。
+  调度层每帧对下一个 route span 的具体边写入（`reserve_path`）。
 
 - **冲突判定 = edge 交集，不是整块互斥**（2026-09 用户澄清）：老版简单
   闭塞是"block 内任何位置有车就整块红灯"（完全互斥，更安全但会在会让线
@@ -59,10 +64,10 @@ class SignalState(Enum):
 
 
 class BlockManager:
-    """固定闭塞区间管理：block 划分、占用/预约推导信号颜色、passable_fn。"""
+    """信号保护包络、路径 edge 预约及信号颜色管理。"""
 
     def __init__(self) -> None:
-        self._blocks: dict[DirectedEdge, frozenset[int]] = {}
+        self._protection_envelopes: dict[DirectedEdge, frozenset[int]] = {}
         # 预约表（PBS / edge 交集语义）：train -> 该车预约的具体 edge_id 集合。
         # 与 Step 4 的"block key -> train"不同——预约不再整块互斥，而是按
         # 列车实际要走的边粒度登记，两列车的预约 edge 集合交集为空即可共享
@@ -70,9 +75,9 @@ class BlockManager:
         self._reservations: dict["TrainEntity", set[int]] = {}
 
     def rebuild(self, network: RailNetwork, signals: SignalTable) -> None:
-        """重新计算所有信号的 block 边集合，清理引用已删除 edge 的预约。"""
-        self._blocks = {
-            directed: self._compute_block(network, signals, directed)
+        """重算所有信号保护包络，清理引用已删除 edge 的预约。"""
+        self._protection_envelopes = {
+            directed: self._compute_protection_envelope(network, signals, directed)
             for directed in signals.all_signals()
         }
         # 轨道删除/合并后，预约里可能残留已不存在的 edge_id（跟信号悬空引用
@@ -83,10 +88,15 @@ class BlockManager:
             if not self._reservations[train]:
                 del self._reservations[train]
 
-    def _compute_block(
+    def _compute_protection_envelope(
         self, network: RailNetwork, signals: SignalTable, start: DirectedEdge,
     ) -> frozenset[int]:
-        """DFS 展开 block：走到某个节点时，若该节点上挂着任意方向的信号
+        """DFS 展开信号保护包络：到任意信号节点时停止继续扩张。
+
+        结果是从 start 出发可能采用的所有路径的 edge 并集，允许和其他信号
+        的包络重叠，也允许在道岔处分叉；它不是互斥闭塞区间。
+
+        走到某个节点时，若该节点上挂着任意方向的信号
         （不论朝向、不论是不是本次出发信号自己的背面），就停止从这个
         节点继续扩张——但到达该节点所经过的那条边仍然计入 block。
 
@@ -128,7 +138,7 @@ class BlockManager:
            允许背面通行的 PBS，这段代码也不需要改——通行规则的变化只
            影响 passable_fn/寻路层。
         """
-        block_edges: set[int] = set()
+        envelope_edges: set[int] = set()
         visited: set[DirectedEdge] = set()
         stack = [start]
         while stack:
@@ -136,7 +146,7 @@ class BlockManager:
             if directed in visited:
                 continue
             visited.add(directed)
-            block_edges.add(directed[0])
+            envelope_edges.add(directed[0])
             node_id = head_node(network, directed)
             if self._node_has_any_signal(network, signals, node_id):
                 continue  # 到达信号所在节点，边已计入，但不再向外扩张
@@ -145,7 +155,7 @@ class BlockManager:
                     continue
                 nxt = _directed_from(network, to_edge_id, node_id)
                 stack.append(nxt)
-        return frozenset(block_edges)
+        return frozenset(envelope_edges)
 
     @staticmethod
     def _node_has_any_signal(
@@ -171,50 +181,61 @@ class BlockManager:
                 return True
         return False
 
-    def block_edges(self, directed: DirectedEdge) -> frozenset[int]:
-        return self._blocks.get(directed, frozenset())
+    def protection_envelope_edges(self, directed: DirectedEdge) -> frozenset[int]:
+        """返回一个信号的全分支保护包络。"""
+        return self._protection_envelopes.get(directed, frozenset())
 
     def held_edges(self, train: "TrainEntity") -> set[int]:
         """train 当前预约的具体 edge_id 集合（PBS / edge 交集语义）。"""
         return set(self._reservations.get(train, ()))
 
-    def all_blocks(self) -> dict[DirectedEdge, frozenset[int]]:
-        """返回当前所有信号的 block 划分（key -> 边集合），供调度层判断某条
-        边是否属于任意 block（= 受保护），从而区分无保护路段。"""
-        return dict(self._blocks)
+    def all_protection_envelopes(self) -> dict[DirectedEdge, frozenset[int]]:
+        """返回各信号的保护包络（信号槛位 -> 可能到达的 edge 集合）。
 
-    def truncate_to_next_signal(
+        这些集合允许重叠和分叉，不是路网 partition，也不是 PBS 预约单位。
+        预约单位是列车固定路径上截取出的 route span；本查询只用于判断 edge
+        是否位于某个信号保护范围内，以及信号显示/调试。
+        """
+        return dict(self._protection_envelopes)
+
+    def truncate_to_next_route_span(
         self, network: RailNetwork, signals: SignalTable, route: list[DirectedEdge],
     ) -> list[DirectedEdge]:
-        """把远场寻路给出的完整路径截断到"前方第一个闭塞区间为止"
+        """把固定路径截到“无保护前缀 + 下一个受保护路径片段”为止。
+
+        这是路径局部的 route span，不是 `_compute_protection_envelope` 的全局
+        DFS 包络：
+        遇到道岔时只包含本车 route 选择的分支；双向信号产生多少重叠包络，
+        也不会改变本车路径片段的身份。
+
+        原称“前方第一个闭塞区间”，容易让调用方把保护包络误当作互斥区间。
         （Step 5：近场调度只预约前方一个区间，对应 OpenTTD 原版逻辑，
         不做 JGRPP 的 Long Reserve 多区间预留）。
 
-        近场段 = 走到第一个信号为止的无保护路段（原样经过，不需要
-        预约——不属于任何 block）+ 该信号实际保护的完整 block（这才是
-        真正需要预约的部分，从信号出发一直到下一个信号/死端）。
+        近场段 = 走到第一个信号为止的无保护路段 + 从该信号出发、沿本车
+        固定路径走到下一个信号节点/死端的 edge。前者虽无信号保护，也一并
+        登记在本车 edge 预约中；后者才是受保护的 route span。
 
         **实现踩过的坑（已修正）**：最初实现在"到达第一个挂信号的节点"
-        就直接截断，把信号本身**保护的那段路**（block_edges 算出来的、
-        从信号出发向前延伸的边集合）整个漏掉了——这跟 `_compute_block`
-        的方向定义正好错位一格：block 是"从信号出发往前"，不是"走到
+        就直接截断，把信号本身**保护的那段路**整个漏掉了——这跟保护包络
+        的方向定义正好错位一格：保护范围是"从信号出发往前"，不是"走到
         信号跟前"。结果是 `reserve_path` 拿着"信号前面那一截"去检查
         冲突，永远查不到交集，预约形同虚设（用真实 GameLoop 端到端
         验证时发现：预约表在寻路成功后仍然是空的）。
 
-        正确算法：沿 route 走，标记"是否已经进入一个 block"（进入条件是
+        正确算法：沿 route 走，标记"是否已经进入受保护片段"（进入条件是
         当前 directed 本身就是某个信号——即 `signals.has_signal(directed)`
         为真，说明这条边正是某个 block 的第一条边）；一旦进入，继续走
         直到到达下一个挂信号的节点（`_node_has_any_signal`，标志这个
         block 已经走完，遇到了下一个 block 的边界）才截断。若一路都没
         进入任何 block（route 中没有信号），或进入后一路开到底都没遇到
-        第二个边界（block 延伸到死端），返回整条 route 不截断。
+        第二个边界（片段延伸到死端），返回整条 route 不截断。
         """
-        entered_block = False
+        entered_span = False
         for i, directed in enumerate(route):
-            if not entered_block and signals.has_signal(directed):
-                entered_block = True
-            if entered_block:
+            if not entered_span and signals.has_signal(directed):
+                entered_span = True
+            if entered_span:
                 arrival_node = head_node(network, directed)
                 if self._node_has_any_signal(network, signals, arrival_node):
                     return route[: i + 1]
@@ -274,15 +295,14 @@ class BlockManager:
                 del self._reservations[train]
 
     def is_reserved_by_other(self, directed: DirectedEdge, train: "TrainEntity") -> bool:
-        """directed 对应的 block 是否有任何 edge 被除 train 之外的列车预约。
+        """directed 的保护包络内是否有 edge 被其他列车预约。
 
         供测试/调试查询用；寻路层走 make_passable_fn（按 edge_id 级别判定），
-        这里是"block 边集合里是否含他人的预约 edge"的查询，语义上等价于
-        "该 block 对 train 而言是否被他人部分占用"。
+        这个包络查询不代表本车固定路径冲突；调度必须使用 reserve_path。
         """
-        block = self._blocks.get(directed, frozenset())
+        envelope = self._protection_envelopes.get(directed, frozenset())
         owners = self._edge_owners()
-        for eid in block:
+        for eid in envelope:
             for owner in owners.get(eid, ()):
                 if owner is not train:
                     return True
@@ -332,7 +352,7 @@ class BlockManager:
         blocked = occupied_edge_ids | reserved_edge_ids
 
         colors: dict[DirectedEdge, SignalState] = {}
-        for directed in self._blocks:
+        for directed in self._protection_envelopes:
             colors[directed] = (
                 SignalState.GREEN
                 if self._has_free_path(network, signals, directed, blocked)

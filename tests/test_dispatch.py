@@ -69,8 +69,8 @@ assert signals.place(s1)
 assert signals.place(s2)
 blocks = BlockManager()
 blocks.rebuild(net, signals)
-assert blocks.block_edges(s1) == frozenset({e1.edge_id})
-assert blocks.block_edges(s2) == frozenset({e2.edge_id})
+assert blocks.protection_envelope_edges(s1) == frozenset({e1.edge_id})
+assert blocks.protection_envelope_edges(s2) == frozenset({e2.edge_id})
 
 # 占用者：停放在 e2 上（物理占用 block2，无预约）
 occupier = make_train(net, [(e2.edge_id, 1)])
@@ -235,7 +235,7 @@ s_in5 = _directed_from(net5, w_in5.edge_id, W5.node_id)
 signals5.place(s_in5)
 blocks5 = BlockManager()
 blocks5.rebuild(net5, signals5)
-assert {A5.edge_id, B1_5.edge_id, B2_5.edge_id} <= blocks5.block_edges(s_in5), \
+assert {A5.edge_id, B1_5.edge_id, B2_5.edge_id} <= blocks5.protection_envelope_edges(s_in5), \
     "A道/B道 应因道岔无信号而被并入同一粗 block"
 
 # 避让列车停在 B道（占用 B道，无预约）
@@ -326,5 +326,63 @@ for _ in range(60 * 60):
         break
 assert reached6, "绿灯后 A 应续行到终点（holding 语义：保留指令可恢复）"
 print("✅ 对向起步绿灯续行：B 让开后 A 从 holding 恢复并到达")
+
+# =========================================================================
+# 场景 7：重叠保护包络不是两个路径片段（2026-09 PBS 语义修复）
+# =========================================================================
+# 两个合法的同向入口在 M 汇流，共享 M--B：
+#
+#   P--p--A--a--\
+#                 M--shared--B--next--C--final--D
+#          X--x--/
+#
+# SA/SX 分别位于 a/x 的入口并朝向 M，B/C 各有继续向东的信号。SA 与 SX 的
+# DFS 保护包络都包含 shared，因此它们允许重叠；但对走 P-A-M-B 的列车而言，
+# 固定路径上的第一个授权片段只有 [a, shared] 一个。旧 `_walk_frontier`
+# 从 shared 反查出 SA、SX 两个 block key，误以为预算已满，永远不预约 next。
+net7 = RailNetwork()
+P7 = net7.add_node(Vec3(-20, 0, 0)); A7 = net7.add_node(Vec3(0, 0, 0))
+X7 = net7.add_node(Vec3(0, 20, 0)); M7 = net7.add_node(Vec3(20, 0, 0))
+B7 = net7.add_node(Vec3(40, 0, 0)); C7 = net7.add_node(Vec3(60, 0, 0))
+D7 = net7.add_node(Vec3(80, 0, 0))
+p7 = net7.add_edge(P7, A7); a7 = net7.add_edge(A7, M7)
+x7 = net7.add_edge(X7, M7); shared7 = net7.add_edge(M7, B7)
+next7 = net7.add_edge(B7, C7); final7 = net7.add_edge(C7, D7)
+sig7 = SignalTable()
+sA7 = _directed_from(net7, a7.edge_id, A7.node_id)
+sX7 = _directed_from(net7, x7.edge_id, X7.node_id)
+sB7 = _directed_from(net7, next7.edge_id, B7.node_id)
+sC7 = _directed_from(net7, final7.edge_id, C7.node_id)
+for signal7 in (sA7, sX7, sB7, sC7):
+    assert sig7.place(signal7)
+blk7 = BlockManager(); blk7.rebuild(net7, sig7)
+assert shared7.edge_id in blk7.protection_envelope_edges(sA7)
+assert shared7.edge_id in blk7.protection_envelope_edges(sX7), \
+    "两个入口的保护包络应在汇流后的 shared edge 重叠"
+
+t7 = make_train(net7, [(p7.edge_id, 1)])
+t7.assign_route(
+    [(a7.edge_id, 1), (shared7.edge_id, 1), (next7.edge_id, 1),
+     (final7.edge_id, 1)],
+    100.0,
+    (final7.edge_id, 1.0, 1),
+)
+disp7 = TrainDispatcher(net7, sig7, blk7)
+trains7 = [t7]
+held_during_overlap7 = False
+reached7 = False
+for _ in range(60 * 180):
+    disp7.tick(t7, DT, V_TARGET, trains7)
+    blk7.rebuild(net7, sig7)
+    blk7.tick_reservations(trains7)
+    if t7.is_holding():
+        held_during_overlap7 = True
+        break
+    if t7.is_parked():
+        reached7 = True
+        break
+assert reached7 and not held_during_overlap7, \
+    "重叠保护包络不得虚增路径片段预算，空闲线路应连续通行"
+print("✅ 重叠保护包络：按固定路径片段滚动预约，全程连续通行")
 
 print("\n全部通过")

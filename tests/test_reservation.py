@@ -54,8 +54,8 @@ assert signals.place(d_west)
 
 blocks = BlockManager()
 blocks.rebuild(network, signals)
-block_east = blocks.block_edges(d_east)
-block_west = blocks.block_edges(d_west)
+block_east = blocks.protection_envelope_edges(d_east)
+block_west = blocks.protection_envelope_edges(d_west)
 assert block_east == frozenset({edge_a.edge_id, edge_b.edge_id})
 assert block_west == frozenset({edge_a.edge_id, edge_b.edge_id})
 print("✅ 单线双向：两端各自的 block 边集合完全相同（中间无信号不截断），"
