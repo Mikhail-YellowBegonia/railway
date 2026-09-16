@@ -42,9 +42,17 @@ class PlanDispatcher:
         winner = self._winner(train)
         execution = getattr(train, "plan_execution", None)
 
-        if winner is None or winner.plan is None:
+        if winner is None:
             if execution is not None:
                 self._clear_execution(train)
+            return
+        if winner.plan is None:
+            self._clear_execution(train)
+            if any(wagon.plan is not None for wagon in train.state.consist.control_cars()):
+                self._report_once(
+                    train,
+                    f"计划错误：胜出控制车 {winner.wagon_id[:8]} 没有计划，列车不执行",
+                )
             return
 
         plan = winner.plan
@@ -96,11 +104,8 @@ class PlanDispatcher:
 
     @staticmethod
     def _winner(train: TrainEntity) -> Wagon | None:
-        """只在持有计划的控制车中稳定遴选，避免无计划控制车劫持人工指令。"""
-        candidates = [
-            wagon for wagon in train.state.consist.control_cars()
-            if wagon.plan is not None
-        ]
+        """在全部控制车中稳定遴选；胜出者无计划时不得降级执行次优者。"""
+        candidates = train.state.consist.control_cars()
         return min(candidates, key=lambda wagon: (-wagon.priority, wagon.wagon_id), default=None)
 
     def _activate(self, train: TrainEntity, winner: Wagon, plan: Plan) -> None:

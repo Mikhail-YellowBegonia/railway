@@ -694,6 +694,93 @@ def draw_pathfinding_debug(
         surface.blit(label, (int(mid[0]) + 4, int(mid[1]) - 8))
 
 
+def draw_plan_editor_overlay(
+    surface: pygame.Surface,
+    camera: Camera,
+    network: RailNetwork,
+    font: pygame.font.Font,
+    plan_editor,
+) -> None:
+    """显示 P5 草稿锚点、候选路径和失败原因。"""
+    draft = plan_editor.draft
+    resolution = draft.resolution
+    color = (255, 70, 70) if draft.failure else (80, 230, 255)
+    owner = plan_editor.owner
+    if owner is not None and owner.plan is not None:
+        for item in owner.plan.items:
+            fixed_route = item.fixed_route
+            if fixed_route is None:
+                continue
+            confirmed_color = (
+                (255, 70, 70) if item.validate(network, require_fixed_route=True)
+                else (80, 210, 120)
+            )
+            for edge_id, _direction in fixed_route.edges:
+                edge = network.edges.get(edge_id)
+                if edge is None:
+                    continue
+                points = _edge_screen_points(
+                    edge, network, camera, surface.get_width(), surface.get_height(),
+                )
+                if len(points) >= 2:
+                    pygame.draw.lines(surface, confirmed_color, False, points, 3)
+    if resolution is not None and resolution.path is not None:
+        for edge_id, _direction in resolution.path.edges:
+            edge = network.edges.get(edge_id)
+            if edge is None:
+                continue
+            points = _edge_screen_points(
+                edge, network, camera, surface.get_width(), surface.get_height(),
+            )
+            if len(points) >= 2:
+                pygame.draw.lines(surface, color, False, points, 5)
+    for order, anchor in enumerate(draft.anchors, start=1):
+        node = network.nodes.get(anchor.node_id)
+        if node is None:
+            continue
+        x, y = camera.world_to_screen(
+            node.position.x, node.position.y, surface.get_width(), surface.get_height(),
+        )
+        pygame.draw.circle(surface, (255, 220, 60), (int(x), int(y)), 10, 2)
+        label = font.render(str(order), True, (255, 255, 255))
+        surface.blit(label, (int(x) + 7, int(y) - 14))
+    message = draft.failure or "左键节点=锚点 · 道岔后点出边=控制点 · 左键轨道=终点"
+    text = font.render(message[:90], True, color)
+    surface.blit(text, (18, surface.get_height() - 30))
+
+
+def draw_plan_hud(
+    surface: pygame.Surface,
+    font: pygame.font.Font,
+    train,
+    editing: bool,
+) -> None:
+    """显示胜出控制车的当前条目、指针与错误状态。"""
+    controls = train.state.consist.control_cars()
+    winner = min(controls, key=lambda wagon: (-wagon.priority, wagon.wagon_id), default=None)
+    if winner is None:
+        line = "计划: 无控制车"
+    elif winner.plan is None:
+        line = f"计划: 控制车 {winner.wagon_id[:8]} 无计划"
+    elif winner.plan.is_empty:
+        line = "计划: 空计划"
+    else:
+        item = winner.plan.current()
+        line = f"计划: {winner.plan.pointer + 1}/{len(winner.plan)} {item.label}"
+    if editing:
+        line += " 【编辑中】"
+    validation = ""
+    if winner is not None and winner.plan is not None and not winner.plan.is_empty:
+        problems = winner.plan.current().validate(train.network, require_fixed_route=True)
+        if problems:
+            validation = "计划错误: " + problems[0]
+    status = validation or getattr(train, "plan_status", "")
+    lines = [line] + ([status] if status else [])
+    for index, value in enumerate(lines):
+        text = font.render(value[:70], True, (255, 220, 100) if status else (220, 230, 240))
+        surface.blit(text, (18, 104 + index * 20))
+
+
 # Debug 列车可视化配色
 COLOR_TRAIN = (255, 140, 0)          # 列车方块（橙）
 COLOR_TRAIN_OCCUPIED = (220, 20, 60) # 实时占位（红）
@@ -992,4 +1079,3 @@ def draw_consist_panel(
     for i, line in enumerate(lines):
         color = (180, 220, 255) if i == 0 else (200, 200, 200)
         surface.blit(font.render(line, True, color), (bx + pad, by + pad + i * line_h))
-

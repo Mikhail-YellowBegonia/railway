@@ -87,6 +87,10 @@ class GameLoop:
         self.dispatcher = TrainDispatcher(self.network, self.signals, self.block_manager)
         from model.plan_dispatch import PlanDispatcher
         self.plan_dispatcher = PlanDispatcher(self.network)
+        from controller.plan_editor import PlanEditor
+        self.plan_editor = PlanEditor(
+            self.network, self.signals.passable_topology_only,
+        )
 
         # 平移状态（受模式影响触发集）
         self._pan_button: int | None = None  # 当前正在按的平移按钮（None 表示未平移）
@@ -170,7 +174,8 @@ class GameLoop:
             # 已停放许久的列车不在 moving_before 里，不会被反复扫描。
             moving_before = {id(t) for t in self.trains if t.is_moving()}
             for t in self.trains:
-                self.plan_dispatcher.tick(t)
+                if not (self.plan_editor.active and self.plan_editor.train is t):
+                    self.plan_dispatcher.tick(t)
                 self.dispatcher.tick(t, dt, t.v_target, self.trains)
             just_stopped = [t for t in self.trains
                             if id(t) in moving_before and t.is_parked()]
@@ -216,6 +221,12 @@ class GameLoop:
             self.renderer.draw_overlay(
                 self.network, self.editor, mouse_world, self.signals, signal_colors,
             )
+            if self.plan_editor.active:
+                from view.renderer import draw_plan_editor_overlay
+                draw_plan_editor_overlay(
+                    self.renderer.surface, self.camera, self.network,
+                    self.renderer._font, self.plan_editor,
+                )
             # PLAY 模式可视化：路径预览按需从 occupancy+route 现拼，不缓存
             if (self.editor.mode == EditMode.PLAY and self.active_train is not None
                     and self.active_train.state.occupancy.route):
@@ -311,6 +322,11 @@ class GameLoop:
                     self.active_train.kinematics.total_length,
                     self.train_v_target,
                     braking=_in_braking,
+                )
+                from view.renderer import draw_plan_hud
+                draw_plan_hud(
+                    self.renderer.surface, self.renderer._font,
+                    self.active_train, self.plan_editor.active,
                 )
             # 右下角控制台回显
             from view.renderer import (draw_console_log, draw_train_tooltip,
@@ -414,6 +430,10 @@ class GameLoop:
 
     def _handle_keydown(self, event: pygame.event.Event) -> None:
         if event.key == pygame.K_ESCAPE:
+            if self.plan_editor.active:
+                self.plan_editor.cancel()
+                print("计划编辑已取消并退出")
+                return
             if self.editor.mode == EditMode.PLAY:
                 if self.active_train is not None or self.train_placement_node_id is not None:
                     # 先取消焦点/放置流程
@@ -426,6 +446,20 @@ class GameLoop:
                     self.editor.set_mode(EditMode.IDLE)
             else:
                 self.editor.handle_cancel()
+        elif event.key == pygame.K_p and self.editor.mode == EditMode.PLAY:
+            if self.plan_editor.active:
+                self.plan_editor.cancel()
+                print("计划编辑关闭：已确认条目开始生效")
+            elif self.active_train is None:
+                print("计划编辑拒绝：请先选中列车")
+            else:
+                _ok, message = self.plan_editor.enter(self.active_train)
+                print(message)
+        elif event.key == pygame.K_BACKSPACE and self.plan_editor.active:
+            print(self.plan_editor.backspace())
+        elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER) and self.plan_editor.active:
+            _ok, message = self.plan_editor.confirm()
+            print(message)
         elif event.key == pygame.K_p or event.key == pygame.K_f:
             # P（正式）/ F（兼容旧习惯）切换 PLAY 模式
             if self.editor.mode == EditMode.PLAY:
@@ -560,6 +594,9 @@ class GameLoop:
         # PLAY 模式：左键=选择/放置，右键=下达寻路指令；两者都不触发平移
         if self.editor.mode == EditMode.PLAY:
             if event.button == 1:
+                if self.plan_editor.active:
+                    self._plan_editor_click(self._mouse_world_pos())
+                    return
                 self._play_left_click(self._mouse_world_pos())
                 return
             if event.button == 3:
@@ -650,6 +687,16 @@ class GameLoop:
         return Vec3(wx, wy, 0.0)
 
     # ===== PLAY 模式（P 键叠加态）=====
+
+    def _plan_editor_click(self, world_pos: Vec3) -> None:
+        snap = self.editor._snap(world_pos)
+        if snap.snapped_node_id is not None:
+            print(self.plan_editor.click_node(snap.snapped_node_id))
+            return
+        if snap.snapped_edge_id is not None and snap.snapped_edge_t is not None:
+            print(self.plan_editor.click_edge(snap.snapped_edge_id, snap.snapped_edge_t))
+            return
+        print("计划编辑错误：请点击节点或轨道")
 
     def _decouple_at_hovered(self, train: "TrainEntity", coupler_idx: int) -> None:
         """解挂确认（docs/consist_ui.md §4）：悬停内部车钩 + K/空格/回车。

@@ -1,0 +1,75 @@
+"""P5：最小计划编辑器的门禁、冻结和错误反馈。"""
+
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from controller.plan_editor import PlanEditor
+from model.occupancy import OccupancyState
+from model.rail_network import RailNetwork
+from model.train_entity import TrainEntity, TrainState
+from model.train_physics import SimplePhysics
+from model.vec3 import Vec3
+from model.wagon import Consist, create_simple_car
+
+
+network = RailNetwork()
+a = network.add_node(Vec3(0.0, 0.0, 0.0))
+b = network.add_node(Vec3(10.0, 0.0, 0.0))
+c = network.add_node(Vec3(20.0, 0.0, 0.0))
+x = network.add_node(Vec3(0.0, 20.0, 0.0))
+y = network.add_node(Vec3(10.0, 20.0, 0.0))
+e0 = network.add_edge(a, b).edge_id
+e1 = network.add_edge(b, c).edge_id
+isolated = network.add_edge(x, y).edge_id
+wagon = create_simple_car(length=5.0, mass=30.0, P_rated=1000.0, have_control=True)
+train = TrainEntity(
+    TrainState(OccupancyState([(e0, 1)], 0.0, 0.0, []), 0.0, 0.0, Consist([wagon])),
+    network,
+    SimplePhysics(),
+)
+editor = PlanEditor(network)
+
+# ① 只有停放且有控制车的列车能进入。
+train.assign_route([(e1, 1)], 20.0, (e1, 1.0, 1))
+ok, message = editor.enter(train)
+assert not ok and "完全停放" in message
+train.emergency_stop()
+ok, message = editor.enter(train)
+assert ok and editor.owner is wagon
+print("✅ ① 计划编辑门禁明确拒绝行驶中列车")
+
+# ② 不可达必须保留失败原因，Enter 不得静默创建条目。
+message = editor.click_edge(isolated, 0.5)
+assert "计划解析失败" in message and editor.draft.failure
+ok, message = editor.confirm()
+assert not ok and "计划确认失败" in message and wagon.plan is None
+print("✅ ② 不可达草稿标红所需原因完整，确认被拒绝")
+
+# ③ 设置可达终点后冻结；第二条以上一条终点为构造起点。
+assert "计划终点" in editor.click_edge(e1, 1.0)
+ok, message = editor.confirm()
+assert ok and wagon.plan is not None and len(wagon.plan) == 1
+first = wagon.plan.items[0]
+assert first.fixed_route is not None and first.fixed_route.edges == ((e0, 1), (e1, 1))
+assert "计划终点" in editor.click_edge(e0, 0.0)
+ok, message = editor.confirm()
+assert ok and len(wagon.plan) == 2
+second = wagon.plan.items[1]
+assert second.fixed_route is not None
+assert second.fixed_route.edges[0] == (e1, 1)
+assert second.fixed_route.edges[-1] == (e0, -1)
+print("✅ ③ 连续确认两条冻结路线，后条从前条终点构造")
+
+# ④ 回退顺序先终点、后锚点；取消清空草稿但保留已确认计划。
+assert "锚点" in editor.click_node(b.node_id)
+assert "终点" in editor.click_edge(e1, 0.5)
+assert "终点" in editor.backspace()
+assert editor.draft.goal is None and len(editor.draft.anchors) == 1
+assert "锚点" in editor.backspace()
+editor.cancel()
+assert not editor.active and len(wagon.plan) == 2
+print("✅ ④ Backspace 分层回退，Esc 语义只丢草稿")
+
+print("\n全部通过")

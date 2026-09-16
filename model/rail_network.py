@@ -391,6 +391,10 @@ class RailNetwork:
         - 直线：均匀线性分割，新两段 geometry=[]
         - 圆弧：保持原圆心/半径/方向，按切线交点反算每段新 B 点
         - 无效输入返回 None（边不存在 / t 越界 / 几何不可解）
+
+        ⚠ 危险低层 API：本方法会销毁现有 Edge 对象及其 id。游戏层不得直接调用，
+        必须经过 ``GameLoop._split_edge_with_guard`` 的 P4 拓扑协调器，以同步改写
+        运行路径、固定路线和其它 edge 引用。待通用图变化适配完成前勿新增直调点。
         """
         if t <= 1e-6 or t >= 1.0 - 1e-6:
             return None

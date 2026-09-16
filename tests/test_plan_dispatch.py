@@ -112,9 +112,15 @@ low.plan = Plan([forward])
 high.plan = Plan([forward])
 train.state.consist = Consist([low, high])
 assert plans._winner(train) is high
+high.plan = None
+train.plan_execution = None
+plans.tick(train)
+assert train.plan_execution is None
+assert "没有计划" in train.plan_status
+high.plan = Plan([forward])
 low.config.priority = high.config.priority
 expected = min((low, high), key=lambda item: item.wagon_id)
 assert plans._winner(train) is expected
-print("✅ ⑥ 控制车按 priority 降序、wagon_id 升序稳定遴选")
+print("✅ ⑥ 控制车稳定遴选；胜出者无计划时报错且不降级")
 
 print("\n全部通过")
