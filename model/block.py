@@ -73,6 +73,10 @@ class BlockManager:
         # 列车实际要走的边粒度登记，两列车的预约 edge 集合交集为空即可共享
         # 同一个（粗粒度）block。
         self._reservations: dict["TrainEntity", set[int]] = {}
+        # 已被车身实际进入过的预约 edge。未进入时，route 中的未来引用负责保留
+        # 预约；进入后，一旦车身清出就释放，即使同一 edge_id 在更远的未来路线
+        # 中再次出现。否则环线/多锚点路线会把“过去这次”预约错误延寿到下一次。
+        self._entered_reservations: dict["TrainEntity", set[int]] = {}
 
     def rebuild(self, network: RailNetwork, signals: SignalTable) -> None:
         """重算所有信号保护包络，清理引用已删除 edge 的预约。"""
@@ -85,8 +89,12 @@ class BlockManager:
         live_edges = set(network.edges)
         for train in list(self._reservations):
             self._reservations[train] &= live_edges
+            entered = self._entered_reservations.get(train)
+            if entered is not None:
+                entered &= self._reservations[train]
             if not self._reservations[train]:
                 del self._reservations[train]
+                self._entered_reservations.pop(train, None)
 
     def _compute_protection_envelope(
         self, network: RailNetwork, signals: SignalTable, start: DirectedEdge,
@@ -273,26 +281,39 @@ class BlockManager:
                 if owner is not train:
                     return False
         self._reservations.setdefault(train, set()).update(path_edge_set)
+        occupied = {eid for eid, _direction in train.state.occupancy.occupied}
+        entered_now = path_edge_set & occupied
+        if entered_now:
+            self._entered_reservations.setdefault(train, set()).update(entered_now)
         return True
 
     def tick_reservations(self, trains) -> None:
         """按当前 trains 列表释放已经不需要的预约 edge。
 
-        释放条件：holder 不在 trains 里（已被移除/替换，见本文件顶部
-        关于 decouple/couple 的说明），或者某条 edge 与 holder 的
-        (occupied ∪ route) 已经没有交集（车身已完全驶离，且这段路也不在
-        待走的路由里了）——按 edge 逐条释放，而不是整块释放。
+        释放条件：holder 不在 trains 里；或预约 edge 已被车身进入且现在已经
+        清出；或尚未进入但也不再位于未来 route。不能只用
+        ``edge ∈ occupied ∪ route``：同一 edge 在路线远处再次出现时，会把
+        已经完成的那次预约错误保留到未来 occurrence。
         """
         live = set(trains)
         for train in list(self._reservations):
             if train not in live:
                 del self._reservations[train]
+                self._entered_reservations.pop(train, None)
                 continue
             occ = train.state.occupancy
-            needed = {e for e, _ in occ.occupied} | {e for e, _ in occ.route}
-            self._reservations[train] &= needed
+            occupied = {e for e, _ in occ.occupied}
+            future = {e for e, _ in occ.route}
+            entered = self._entered_reservations.setdefault(train, set())
+            entered.update(self._reservations[train] & occupied)
+            self._reservations[train] = {
+                edge_id for edge_id in self._reservations[train]
+                if edge_id in occupied or (edge_id not in entered and edge_id in future)
+            }
+            entered &= self._reservations[train]
             if not self._reservations[train]:
                 del self._reservations[train]
+                self._entered_reservations.pop(train, None)
 
     def is_reserved_by_other(self, directed: DirectedEdge, train: "TrainEntity") -> bool:
         """directed 的保护包络内是否有 edge 被其他列车预约。

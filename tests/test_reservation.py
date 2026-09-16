@@ -153,4 +153,20 @@ assert passable_fn_for_5(edge_a, 1) is True, \
     "train_5 查询自己已预约的 edge，passable_fn 应返回 True（不阻断自己）"
 print("✅ make_passable_fn 正确阻断非持有者、放行持有者")
 
+# --- 8. 重复 edge occurrence：驶离第一次后必须释放，不能因远处再次出现而延寿 ---
+# 先释放上一独立场景的 train_5 预约。
+train_5.state.occupancy.occupied = [(ELSEWHERE_EID, 1)]
+train_5.state.occupancy.route = []
+blocks.tick_reservations([train_5])
+train_7 = make_train(edge_a.edge_id, 1)
+train_7.state.occupancy.route = [(edge_b.edge_id, 1), (edge_a.edge_id, 1)]
+assert blocks.reserve_path(train_7, [edge_a.edge_id]) is True
+# 第一次经过 edge_a 后车身已清出；未来路线稍后会再次经过同一个 edge_id。
+train_7.state.occupancy.occupied = [(edge_b.edge_id, 1)]
+blocks.tick_reservations([train_7])
+train_8 = make_train(edge_a.edge_id, -1)
+assert blocks.reserve_path(train_8, [edge_a.edge_id]) is True, \
+    "过去 occurrence 的预约应在车身清出后释放，不得被未来同 edge 引用延寿"
+print("✅ 重复 edge occurrence：第一次驶离即释放，未来再次经过时重新预约")
+
 print("\n全部通过")
