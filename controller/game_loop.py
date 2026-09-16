@@ -175,7 +175,7 @@ class GameLoop:
             moving_before = {id(t) for t in self.trains if t.is_moving()}
             for t in self.trains:
                 if not (self.plan_editor.active and self.plan_editor.train is t):
-                    self.plan_dispatcher.tick(t)
+                    self.plan_dispatcher.tick(t, self.trains)
                 self.dispatcher.tick(t, dt, t.v_target, self.trains)
             just_stopped = [t for t in self.trains
                             if id(t) in moving_before and t.is_parked()]
@@ -457,6 +457,19 @@ class GameLoop:
                 print(message)
         elif event.key == pygame.K_BACKSPACE and self.plan_editor.active:
             print(self.plan_editor.backspace())
+        elif event.key == pygame.K_w and self.plan_editor.active:
+            _ok, message = self.plan_editor.append_wait_couple()
+            print(message)
+        elif event.key == pygame.K_k and self.plan_editor.active:
+            if self._hovered_coupler is None:
+                print("计划编辑错误：请悬停其它列车的车尾后按 K")
+            else:
+                target, kind, end = self._hovered_coupler
+                if kind != "end":
+                    print("计划编辑错误：内部车钩不能作为前往连挂目标")
+                else:
+                    _ok, message = self.plan_editor.append_goto_couple(target, str(end))
+                    print(message)
         elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER) and self.plan_editor.active:
             _ok, message = self.plan_editor.confirm()
             print(message)
@@ -812,10 +825,15 @@ class GameLoop:
         if merged_head not in self.trains or merged_rear not in self.trains:
             return  # 已被其它连挂消耗
         label = f"#{self.trains.index(merged_head)+1}+#{self.trains.index(merged_rear)+1}"
+        participant_wagon_groups = tuple(
+            {wagon.wagon_id for wagon in train.state.consist.wagons}
+            for train in (merged_head, merged_rear)
+        )
         new_train = merged_head.couple_with(merged_rear)
         self.trains.remove(merged_head)
         self.trains.remove(merged_rear)
         self.trains.append(new_train)
+        self.plan_dispatcher.on_coupled(new_train, participant_wagon_groups)
         self.active_train = new_train
         self.train_path = None
         self.inspect_train = None

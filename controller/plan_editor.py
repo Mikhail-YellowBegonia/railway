@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
-from model.plan import Anchor, Plan, PlanItem
+from model.plan import END_REAR, Anchor, Plan, PlanItem, TrainRef
 from model.plan_path import PathStart, PlanResolution, resolve_plan_item
 from model.rail_network import RailNetwork
 from model.train_entity import TrainEntity
@@ -125,11 +125,68 @@ class PlanEditor:
         self.draft = PlanDraft()
         return True, f"计划已冻结并追加为第 {count} 条"
 
+    def append_wait_couple(self) -> tuple[bool, str]:
+        if self.owner is None:
+            return False, "计划编辑错误：编辑态未开启"
+        if self.owner.plan is None:
+            self.owner.plan = Plan()
+        self.owner.plan.append(PlanItem.wait_couple())
+        self.draft = PlanDraft()
+        return True, f"计划已追加等待连挂为第 {len(self.owner.plan)} 条"
+
+    def append_goto_couple(
+        self, target_train: TrainEntity, target_end: str,
+    ) -> tuple[bool, str]:
+        if self.owner is None or self.train is None:
+            return False, "计划编辑错误：编辑态未开启"
+        if target_train is self.train:
+            return False, "计划编辑错误：连挂目标不能是本编组"
+        if target_end != "tail":
+            return False, "计划编辑错误：当前版本只支持驶向目标车尾"
+        if not target_train.is_parked():
+            return False, "计划编辑错误：连挂目标列车必须停稳"
+
+        from controller.coupling import end_coupler_pos
+        _position, edge_id, t = end_coupler_pos(target_train, "tail")
+        target_wagon = target_train.state.consist.wagons[-1]
+        item = PlanItem.goto_couple(
+            TrainRef(target_wagon.wagon_id, END_REAR),
+            anchors=self.draft.anchors,
+        )
+        result = resolve_plan_item(
+            self.network,
+            self._construction_start(),
+            item,
+            passable_fn=self.passable_fn,
+            allow_reversal=True,
+            consist_length=self.train.state.consist.total_length,
+            couple_target=(edge_id, t, target_train.current_direction()),
+        )
+        if result.path is None:
+            self.draft = PlanDraft(self.draft.anchors, resolution=result)
+            return False, f"计划解析失败：{result.failure}"
+        frozen = PlanItem.goto_couple(
+            item.train_ref,
+            anchors=item.anchors,
+            fixed_route=result.path.freeze(),
+        )
+        if self.owner.plan is None:
+            self.owner.plan = Plan()
+        self.owner.plan.append(frozen)
+        self.draft = PlanDraft()
+        return True, f"计划已冻结前往连挂并追加为第 {len(self.owner.plan)} 条"
+
     def _construction_start(self) -> PathStart:
         assert self.train is not None
         if self.owner is not None and self.owner.plan is not None and self.owner.plan.items:
             previous = self.owner.plan.items[-1]
             if previous.goal is not None:
                 return PathStart(*previous.goal)
+            if previous.fixed_route is not None:
+                edge_id, direction = previous.fixed_route.edges[-1]
+                edge_length = self.network.edges[edge_id].length
+                t = (1.0 - previous.fixed_route.end_offset / edge_length
+                     if direction > 0 else previous.fixed_route.end_offset / edge_length)
+                return PathStart(edge_id, t, direction)
         edge_id, t = self.train.current_edge_and_t()
         return PathStart(edge_id, t, self.train.current_direction())

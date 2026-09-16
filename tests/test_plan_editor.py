@@ -12,6 +12,7 @@ from model.train_entity import TrainEntity, TrainState
 from model.train_physics import SimplePhysics
 from model.vec3 import Vec3
 from model.wagon import Consist, create_simple_car
+from model.plan import END_REAR, PlanCommand
 
 
 network = RailNetwork()
@@ -71,5 +72,30 @@ assert "锚点" in editor.backspace()
 editor.cancel()
 assert not editor.active and len(wagon.plan) == 2
 print("✅ ④ Backspace 分层回退，Esc 语义只丢草稿")
+
+# ⑤ P7 最小入口：K 冻结驶向目标后钩，W 直接追加零速等待。
+wagon.plan = None
+ok, _message = editor.enter(train)
+assert ok
+target_wagon = create_simple_car(length=5.0, mass=30.0, P_rated=None)
+target = TrainEntity(
+    TrainState(OccupancyState([(e1, 1)], 0.0, 5.0, []), 0.0, 0.0,
+               Consist([target_wagon])),
+    network,
+    SimplePhysics(),
+)
+ok, message = editor.append_goto_couple(target, "head")
+assert not ok and "只支持驶向目标车尾" in message
+ok, message = editor.append_goto_couple(target, "tail")
+assert ok and wagon.plan is not None and len(wagon.plan) == 1
+couple_item = wagon.plan.items[0]
+assert couple_item.command is PlanCommand.GOTO_COUPLE
+assert couple_item.train_ref.wagon_id == target_wagon.wagon_id
+assert couple_item.train_ref.end == END_REAR
+assert couple_item.fixed_route is not None
+ok, message = editor.append_wait_couple()
+assert ok and len(wagon.plan) == 2
+assert wagon.plan.items[1].command is PlanCommand.WAIT_COUPLE
+print("✅ ⑤ 编辑态 K/W 创建冻结连挂与原地等待条目")
 
 print("\n全部通过")
