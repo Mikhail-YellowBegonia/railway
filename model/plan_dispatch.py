@@ -198,7 +198,7 @@ class PlanDispatcher:
                     return
                 projection = self._project_route_start(train, item.fixed_route)
                 if projection is None:
-                    self._report_once(train, "计划等待：车头不在固定路线起点，拒绝重新寻路")
+                    self._report_once(train, self._route_start_error(train, item.fixed_route))
                     return
                 from controller.coupling import head_hook_offset
                 route, start_adjustment = projection
@@ -229,7 +229,7 @@ class PlanDispatcher:
                 return
             projection = self._project_route_start(train, item.fixed_route)
             if projection is None:
-                self._report_once(train, "计划等待：车头不在固定路线起点，拒绝重新寻路")
+                self._report_once(train, self._route_start_error(train, item.fixed_route))
                 return
             route, start_adjustment = projection
             train._stop_before_m = 0.0
@@ -307,8 +307,7 @@ class PlanDispatcher:
         """把厘米级停车误差投影到冻结路径起点，不移动列车或修改路网。"""
         if not route.edges:
             return None
-        edge_id, t = train.current_edge_and_t()
-        direction = train.current_direction()
+        edge_id, t, direction = train.current_directed_edge_and_t()
         edge_length = self.network.edges[edge_id].length
         actual_offset = t * edge_length if direction > 0 else (1.0 - t) * edge_length
         current = (edge_id, direction)
@@ -316,9 +315,10 @@ class PlanDispatcher:
 
         if current == first:
             adjustment = route.start_offset - actual_offset
-            if abs(adjustment) <= POSITION_EPSILON_M:
-                return list(route.edges[1:]), adjustment
-            return None
+            remaining = route.remaining_to_goal(self.network) + adjustment
+            if remaining < -POSITION_EPSILON_M:
+                return None
+            return list(route.edges[1:]), adjustment
 
         from model.pathfinding import head_node, tail_node
         boundary_node = head_node(self.network, current)
@@ -340,14 +340,26 @@ class PlanDispatcher:
             return None
         return list(route.edges), adjustment
 
+    def _route_start_error(self, train: TrainEntity, route: FixedRoute) -> str:
+        edge_id, t, direction = train.current_directed_edge_and_t()
+        actual_length = self.network.edges[edge_id].length
+        actual_offset = t * actual_length if direction > 0 else (1.0 - t) * actual_length
+        expected_edge, expected_direction = route.edges[0]
+        return (
+            "计划等待：车头不在固定路线起点，拒绝重新寻路"
+            f"（实际 edge {edge_id} dir {direction:+d} offset {actual_offset:.2f}m；"
+            f"期望 edge {expected_edge} dir {expected_direction:+d} "
+            f"offset {route.start_offset:.2f}m）"
+        )
+
     def _at_goal(self, train: TrainEntity, item: PlanItem) -> bool:
         if item.goal is None:
             return False
-        edge_id, t = train.current_edge_and_t()
+        edge_id, t, direction = train.current_directed_edge_and_t()
         goal_edge_id, goal_t, goal_direction = item.goal
         return (
             edge_id == goal_edge_id
-            and train.current_direction() == goal_direction
+            and direction == goal_direction
             and abs(t - goal_t) * self.network.edges[edge_id].length <= POSITION_EPSILON_M
         )
 

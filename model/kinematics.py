@@ -123,6 +123,17 @@ class PathKinematics:
         t_edge = t_local if direction > 0 else (1.0 - t_local)
         return edge_id, t_edge
 
+    def directed_edge_at(self, s: float) -> tuple[int, float, int]:
+        """原子返回弧长处的 ``(edge_id, t, direction)``。"""
+        s = max(0.0, min(s, self._total_length))
+        idx = self._locate_segment(s)
+        directed, s_start, seg_length = self._segments[idx]
+        edge_id, direction = directed
+        t_local = (s - s_start) / seg_length if seg_length > 0 else 0.0
+        t_local = max(0.0, min(t_local, 1.0))
+        t_edge = t_local if direction > 0 else (1.0 - t_local)
+        return edge_id, t_edge, direction
+
     def sub_path(self, s_tail: float, s_head: float) -> tuple[Path, float]:
         """提取 [s_tail, s_head] 范围的子路径。
 

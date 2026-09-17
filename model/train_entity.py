@@ -450,13 +450,18 @@ class TrainEntity:
 
         用于从当前位置发起新一次寻路（find_path_from_point 的输入）。
         """
-        return self.kinematics._path_kin.edge_at(self.state.abs_s)
+        edge_id, t, _direction = self.current_directed_edge_and_t()
+        return edge_id, t
+
+    def current_directed_edge_and_t(self) -> tuple[int, float, int]:
+        """原子返回车头所在边、边内参数和该段方向。"""
+        return self.kinematics._path_kin.directed_edge_at(self.state.abs_s)
 
     def current_direction(self) -> int:
-        """返回列车当前行驶方向（+1 或 -1）：occupied 最后一条边的方向。"""
+        """返回车头当前所在运动学段的方向（+1 或 -1）。"""
         if not self.state.occupancy.occupied:
             return 1
-        return self.state.occupancy.occupied[-1][1]
+        return self.current_directed_edge_and_t()[2]
 
     def head_directed_edge(self) -> DirectedEdge:
         """车头当前所在的有向边（occupied 最后一条）。"""

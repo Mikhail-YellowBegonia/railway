@@ -431,4 +431,55 @@ assert sequence_train.state.occupancy.route == [(second_edge, 1)]
 assert sequence_train.state.remaining_to_goal > 100.0
 print("✅ ⑬ 实际制动停车后，下一条相邻出边计划可连续激活")
 
+# ⑭ 循环接缝：第一条固定路线的 edge 序列仍有效时，回到其首边的另一 t
+# 可直接从实际位置消费，不能要求回到建表时的历史 start_offset。
+network6 = RailNetwork()
+u0 = network6.add_node(Vec3(0.0, 0.0, 0.0))
+u1 = network6.add_node(Vec3(100.0, 0.0, 0.0))
+u2 = network6.add_node(Vec3(200.0, 0.0, 0.0))
+loop_start_edge = network6.add_edge(u0, u1).edge_id
+loop_goal_edge = network6.add_edge(u1, u2).edge_id
+loop_wagon = create_simple_car(
+    length=10.0, mass=30.0, P_rated=1000.0, have_control=True,
+)
+loop_wagon.plan = Plan([
+    PlanItem.goto(
+        (loop_goal_edge, 1.0, 1),
+        fixed_route=FixedRoute(
+            ((loop_start_edge, 1), (loop_goal_edge, 1)), 20.0, 0.0,
+        ),
+    ),
+])
+loop_train = TrainEntity(
+    TrainState(OccupancyState([(loop_start_edge, 1)], 30.0, 10.0, []), 0.0, 0.0,
+               Consist([loop_wagon])),
+    network6,
+    SimplePhysics(a_max=2.0, b_max=3.0),
+)
+loop_plans = PlanDispatcher(network6)
+loop_plans.tick(loop_train, [loop_train])
+assert loop_train.state.occupancy.route == [(loop_goal_edge, 1)]
+assert abs(loop_train.state.remaining_to_goal - 160.0) < 1e-9
+
+# 若实际位置已越过单边目标，仍须拒绝，不能沿固定方向倒着补路。
+past_goal_wagon = create_simple_car(
+    length=10.0, mass=30.0, P_rated=1000.0, have_control=True,
+)
+past_goal_wagon.plan = Plan([
+    PlanItem.goto(
+        (loop_start_edge, 0.5, 1),
+        fixed_route=FixedRoute(((loop_start_edge, 1),), 20.0, 50.0),
+    ),
+])
+past_goal = TrainEntity(
+    TrainState(OccupancyState([(loop_start_edge, 1)], 60.0, 10.0, []), 0.0, 0.0,
+               Consist([past_goal_wagon])),
+    network6,
+    SimplePhysics(a_max=2.0, b_max=3.0),
+)
+loop_plans.tick(past_goal, [past_goal])
+assert past_goal.state.occupancy.route == [] and past_goal.plan_execution is None
+assert "固定路线起点" in past_goal.plan_status
+print("✅ ⑭ 循环回到首边不同 t 可续行，越过目标仍拒绝")
+
 print("\n全部通过")
