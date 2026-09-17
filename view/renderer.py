@@ -1097,8 +1097,20 @@ def draw_consist_panel(
             f"{selected}[{i+1}] {role:<5} {w.length:.0f}m {w.mass:.0f}t "
             f"{control} P={w.priority:+d}{active}"
         )
+    if winner is not None and winner.plan is not None:
+        plan = winner.plan
+        mode = "loop" if plan.repeat else "one-shot"
+        lines.append(f"--- Plan ({mode}) ---")
+        for i, item in enumerate(plan.items):
+            current = ">" if plan.current() is item else " "
+            lines.append(f"{current}{i + 1}. {item.label}")
+        if plan.is_complete:
+            lines.append("  completed")
+    elif winner is not None:
+        lines.append("--- Plan: none ---")
     lines.append("1-9 select  [/] priority  C control")
-    lines.append("Only while parked; plan editing locks config")
+    lines.append("Plan edit: Del remove current, Ctrl+Del clear")
+    lines.append("Only while parked; plan editing locks control config")
 
     line_h = font.get_linesize()
     pad = 8

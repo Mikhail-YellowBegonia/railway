@@ -501,6 +501,12 @@ class GameLoop:
                 print(message)
         elif event.key == pygame.K_BACKSPACE and self.plan_editor.active:
             print(self.plan_editor.backspace())
+        elif event.key == pygame.K_DELETE and self.plan_editor.active:
+            if event.mod & pygame.KMOD_CTRL:
+                _ok, message = self.plan_editor.clear_plan()
+            else:
+                _ok, message = self.plan_editor.remove_current()
+            print(message)
         elif event.key == pygame.K_w and self.plan_editor.active:
             _ok, message = self.plan_editor.append_wait_couple()
             print(message)

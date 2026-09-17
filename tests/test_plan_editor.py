@@ -12,7 +12,7 @@ from model.train_entity import TrainEntity, TrainState
 from model.train_physics import SimplePhysics
 from model.vec3 import Vec3
 from model.wagon import Consist, create_simple_car
-from model.plan import END_REAR, PlanCommand
+from model.plan import END_REAR, Plan, PlanCommand, PlanItem
 
 
 network = RailNetwork()
@@ -132,5 +132,13 @@ wagon.plan.advance()
 wagon.plan.advance()
 assert wagon.plan.is_complete and wagon.plan.current() is None
 print("✅ ⑥ 编辑态 K/W 创建并确认一次性连挂事件链，执行完毕不回绕")
+
+# ⑦ 最小管理能力：编辑态可删除当前条目或清空计划；不在数据层隐式重算路线。
+wagon.plan = Plan([PlanItem.wait_couple(), PlanItem.wait_couple()], repeat=False)
+ok, message = editor.remove_current()
+assert ok and "已删除第 1 条" in message and len(wagon.plan) == 1
+ok, message = editor.clear_plan()
+assert ok and wagon.plan is None
+print("✅ ⑦ 编辑态 Delete / Ctrl+Delete 所需的删除当前条目和清空计划能力")
 
 print("\n全部通过")

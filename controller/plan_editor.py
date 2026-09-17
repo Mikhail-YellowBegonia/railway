@@ -146,6 +146,24 @@ class PlanEditor:
             return "已撤销最后一个锚点"
         return "计划草稿已为空"
 
+    def remove_current(self) -> tuple[bool, str]:
+        """删除当前条目；仅编辑态调用，退出时由既有确认流程重建闭环。"""
+        if self.owner is None or self.owner.plan is None or not self.owner.plan.items:
+            return False, "计划编辑错误：没有可删除的计划条目"
+        plan = self.owner.plan
+        index = plan.pointer if plan.pointer < len(plan.items) else len(plan.items) - 1
+        removed = plan.remove_at(index)
+        self.draft = PlanDraft()
+        return True, f"已删除第 {index + 1} 条计划：{removed.label}"
+
+    def clear_plan(self) -> tuple[bool, str]:
+        """清空胜出控制车的计划；只清计划，不改变车厢控制权或运行状态。"""
+        if self.owner is None:
+            return False, "计划编辑错误：编辑态未开启"
+        self.owner.plan = None
+        self.draft = PlanDraft()
+        return True, "已清空当前控制车的计划"
+
     def confirm(self) -> tuple[bool, str]:
         result = self.draft.resolution
         if self.owner is None or self.draft.goal is None or result is None or result.path is None:
