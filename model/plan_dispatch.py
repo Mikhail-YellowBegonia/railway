@@ -58,6 +58,13 @@ class PlanDispatcher:
             return
 
         plan = winner.plan
+        cycle_problems = plan.validate_cycle(self.network)
+        if cycle_problems:
+            if not train.is_parked():
+                train.emergency_stop()
+            self._clear_execution(train)
+            self._report_once(train, f"计划不可执行：{'；'.join(cycle_problems)}")
+            return
         item = plan.current()
         if item is None:
             if not train.is_parked():

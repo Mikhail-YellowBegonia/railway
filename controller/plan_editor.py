@@ -43,6 +43,8 @@ class PlanEditor:
         self.active = True
         self.train = train
         self.owner = owner
+        if owner.plan is not None:
+            owner.plan.requires_closed_cycle = True
         self.draft = PlanDraft()
         return True, f"计划编辑开启：控制车 {owner.wagon_id[:8]}"
 
@@ -59,6 +61,7 @@ class PlanEditor:
         plan = self.owner.plan
         if plan is None or not plan.items:
             return True, "计划编辑关闭：空计划"
+        plan.requires_closed_cycle = True
         # 重新确认闭环前先使旧接缝失效；失败时不得继续保留可能已过期的路线。
         plan.loop_route = None
         plan.has_wrapped = False
@@ -79,7 +82,7 @@ class PlanEditor:
         if result.path is None:
             return False, f"计划闭环失败：{result.failure}"
         plan.loop_route = result.path.freeze()
-        problems = plan.loop_route.validate(self.network, goal=first.goal)
+        problems = plan.validate_cycle(self.network)
         if problems:
             plan.loop_route = None
             return False, f"计划闭环失败：{'；'.join(problems)}"
@@ -152,7 +155,7 @@ class PlanEditor:
             fixed_route=result.path.freeze(),
         )
         if self.owner.plan is None:
-            self.owner.plan = Plan()
+            self.owner.plan = Plan(requires_closed_cycle=True)
         self.owner.plan.append(item)
         count = len(self.owner.plan)
         self.draft = PlanDraft()
@@ -162,7 +165,7 @@ class PlanEditor:
         if self.owner is None:
             return False, "计划编辑错误：编辑态未开启"
         if self.owner.plan is None:
-            self.owner.plan = Plan()
+            self.owner.plan = Plan(requires_closed_cycle=True)
         self.owner.plan.append(PlanItem.wait_couple())
         self.draft = PlanDraft()
         return True, f"计划已追加等待连挂为第 {len(self.owner.plan)} 条"
@@ -204,7 +207,7 @@ class PlanEditor:
             fixed_route=result.path.freeze(),
         )
         if self.owner.plan is None:
-            self.owner.plan = Plan()
+            self.owner.plan = Plan(requires_closed_cycle=True)
         self.owner.plan.append(frozen)
         self.draft = PlanDraft()
         return True, f"计划已冻结前往连挂并追加为第 {len(self.owner.plan)} 条"

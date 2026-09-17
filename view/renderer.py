@@ -777,7 +777,11 @@ def draw_plan_hud(
         line += " 【编辑中】"
     validation = ""
     if winner is not None and winner.plan is not None and not winner.plan.is_empty:
-        problems = winner.plan.current().validate(train.network, require_fixed_route=True)
+        problems = winner.plan.validate_cycle(train.network)
+        if not problems:
+            problems = winner.plan.current().validate(
+                train.network, require_fixed_route=True,
+            )
         if problems:
             validation = "计划错误: " + problems[0]
     status = validation or getattr(train, "plan_status", "")

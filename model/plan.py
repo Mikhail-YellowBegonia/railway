@@ -348,6 +348,7 @@ class Plan:
     # 首次走完整份计划后，必须改用“末目标 → 第一目标”的循环接缝。
     loop_route: FixedRoute | None = None
     has_wrapped: bool = False
+    requires_closed_cycle: bool = False
 
     # ── 指针 ──────────────────────────────────────────────────────────
     def __len__(self) -> int:
@@ -464,3 +465,37 @@ class Plan:
         elif require_fixed_route and self.has_wrapped and self.items:
             problems.append("循环接缝：计划已经回绕但尚未冻结末目标到第一目标的路径")
         return problems
+
+    def validate_cycle(self, network: RailNetwork | None = None) -> list[str]:
+        """校验纯 goto 计划的 n→1 固定路线；它是计划完整性条件。"""
+        if not self.requires_closed_cycle:
+            return []
+        if not self.items or any(item.command is not PlanCommand.GOTO for item in self.items):
+            return []
+        first = self.items[0]
+        last = self.items[-1]
+        if first.goal is None or last.goal is None:
+            return ["普通前往计划的首条或末条缺少终点，无法闭环"]
+        if self.loop_route is None:
+            return ["普通前往计划缺少末条→第一条的固定闭环路径"]
+        problems = self.loop_route.validate(network, goal=first.goal)
+        if network is not None and not problems:
+            start_edge_id, start_t, start_direction = last.goal
+            start_edge = network.edges.get(start_edge_id)
+            if start_edge is None:
+                problems.append("末条终点边不存在，无法校验闭环起点")
+                return [f"循环接缝：{problem}" for problem in problems]
+            expected_directed = (start_edge_id, start_direction)
+            if self.loop_route.edges[0] != expected_directed:
+                problems.append(
+                    "闭环路径首边与末条终点边/方向不一致"
+                )
+            else:
+                edge_length = start_edge.length
+                expected_offset = (
+                    start_t * edge_length if start_direction > 0
+                    else (1.0 - start_t) * edge_length
+                )
+                if abs(self.loop_route.start_offset - expected_offset) > 1e-6:
+                    problems.append("闭环路径起点偏移与末条终点不一致")
+        return [f"循环接缝：{problem}" for problem in problems]

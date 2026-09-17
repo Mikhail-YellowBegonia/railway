@@ -39,7 +39,13 @@ backward = PlanItem.goto(
     (e0, 0.0, -1),
     fixed_route=FixedRoute(((e1, 1), (e1, -1), (e0, -1)), 10.0, 0.0),
 )
-wagon.plan = Plan([forward, backward])
+wagon.plan = Plan(
+    [forward, backward],
+    loop_route=FixedRoute(
+        ((e0, -1), (e0, 1), (e1, 1)), 10.0, 0.0,
+    ),
+    requires_closed_cycle=True,
+)
 train = TrainEntity(
     TrainState(OccupancyState([(e0, 1)], 0.0, 0.0, []), 0.0, 0.0, Consist([wagon])),
     network,
@@ -83,6 +89,15 @@ assert train.is_parked() and train.state.goal == (e0, 0.0, -1)
 plans.on_arrival(train)
 assert wagon.plan.pointer == 0
 print("✅ ③ 死端折返后消费原冻结路径并回绕，不重新寻路")
+
+# 回绕后的第三段必须消费显式 n→1 接缝：先在 e0 死端折返，再返回第一目标。
+plans.tick(train)
+assert train.plan_execution is not None
+assert train.state.occupancy.route == [(e0, 1), (e1, 1)]
+assert train.state.goal == forward.goal
+train.emergency_stop()
+train.plan_execution = None
+print("✅ ③b 无环线路回绕后下发显式 n→1 死端折返路线")
 
 # ③ 不能从当前车头消费固定路线时安全等待，既不改 route 也不掉头补路。
 wrong_start = PlanItem.goto(
@@ -578,5 +593,31 @@ assert speed_train.plan_execution is not None
 assert speed_train.state.occupancy.route == [(loop_goal_edge, 1)]
 assert speed_train.v_target == PLAN_CRUISE_SPEED
 print("✅ ⑰ 计划持续持有巡航速度，目标前意外 parked 可从冻结后缀恢复")
+
+# ⑱ 玩家循环计划没有 n→1 路线时必须在首轮前拒绝执行，不能等回绕后
+# 再误用 bootstrap 路线。
+unclosed_wagon = create_simple_car(
+    length=10.0, mass=30.0, P_rated=1000.0, have_control=True,
+)
+unclosed_wagon.plan = Plan(
+    [PlanItem.goto(
+        (loop_goal_edge, 1.0, 1),
+        fixed_route=FixedRoute(
+            ((loop_start_edge, 1), (loop_goal_edge, 1)), 20.0, 0.0,
+        ),
+    )],
+    requires_closed_cycle=True,
+)
+unclosed_train = TrainEntity(
+    TrainState(OccupancyState([(loop_start_edge, 1)], 20.0, 10.0, []), 0.0, 0.0,
+               Consist([unclosed_wagon])),
+    network6,
+    SimplePhysics(a_max=2.0, b_max=3.0),
+)
+loop_plans.tick(unclosed_train, [unclosed_train])
+assert unclosed_train.plan_execution is None
+assert unclosed_train.state.occupancy.route == []
+assert "缺少末条→第一条" in unclosed_train.plan_status
+print("✅ ⑱ 玩家循环计划缺少 n→1 路线时首轮前明确拒绝执行")
 
 print("\n全部通过")

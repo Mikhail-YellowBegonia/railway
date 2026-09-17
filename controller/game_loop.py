@@ -431,8 +431,10 @@ class GameLoop:
     def _handle_keydown(self, event: pygame.event.Event) -> None:
         if event.key == pygame.K_ESCAPE:
             if self.plan_editor.active:
-                self.plan_editor.cancel()
-                print("计划编辑已取消并退出")
+                ok, message = self.plan_editor.finalize_cycle()
+                print(message)
+                if ok:
+                    self.plan_editor.cancel()
                 return
             if self.editor.mode == EditMode.PLAY:
                 if self.active_train is not None or self.train_placement_node_id is not None:

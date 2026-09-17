@@ -52,6 +52,8 @@ print("✅ ② 不可达草稿标红所需原因完整，确认被拒绝")
 assert "计划终点" in editor.click_edge(e1, 1.0)
 ok, message = editor.confirm()
 assert ok and wagon.plan is not None and len(wagon.plan) == 1
+assert wagon.plan.requires_closed_cycle
+assert "缺少末条→第一条" in wagon.plan.validate_cycle(network)[0]
 first = wagon.plan.items[0]
 assert first.fixed_route is not None and first.fixed_route.edges == ((e0, 1), (e1, 1))
 assert "计划终点" in editor.click_edge(e0, 0.0)
@@ -78,7 +80,28 @@ editor.cancel()
 assert not editor.active and len(wagon.plan) == 2
 print("✅ ④ Backspace 分层回退，Esc 语义只丢草稿")
 
-# ⑤ P7 最小入口：K 冻结驶向目标后钩，W 直接追加零速等待。
+# ⑤ 退出门禁：各条目本身可达但 n→1 不可达时，闭环确认必须失败。
+one_way_wagon = create_simple_car(
+    length=5.0, mass=30.0, P_rated=1000.0, have_control=True,
+)
+one_way_train = TrainEntity(
+    TrainState(OccupancyState([(e0, 1)], 0.0, 0.0, []), 0.0, 0.0,
+               Consist([one_way_wagon])),
+    network,
+    SimplePhysics(),
+)
+one_way_editor = PlanEditor(network, passable_fn=lambda _edge, direction: direction > 0)
+assert one_way_editor.enter(one_way_train)[0]
+assert "计划终点" in one_way_editor.click_edge(e0, 0.5)
+assert one_way_editor.confirm()[0]
+assert "计划终点" in one_way_editor.click_edge(e1, 1.0)
+assert one_way_editor.confirm()[0]
+ok, message = one_way_editor.finalize_cycle()
+assert not ok and "计划闭环失败" in message
+assert one_way_editor.active and one_way_wagon.plan.loop_route is None
+print("✅ ⑤ n→1 不可达时拒绝退出，计划不会以开放链开始执行")
+
+# ⑥ P7 最小入口：K 冻结驶向目标后钩，W 直接追加零速等待。
 wagon.plan = None
 ok, _message = editor.enter(train)
 assert ok
@@ -103,6 +126,6 @@ assert ok and len(wagon.plan) == 2
 assert wagon.plan.items[1].command is PlanCommand.WAIT_COUPLE
 ok, message = editor.finalize_cycle()
 assert not ok and "只支持纯前往" in message
-print("✅ ⑤ 编辑态 K/W 创建冻结连挂与原地等待条目")
+print("✅ ⑥ 编辑态 K/W 创建冻结连挂与原地等待条目")
 
 print("\n全部通过")

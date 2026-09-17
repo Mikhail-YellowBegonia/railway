@@ -32,6 +32,7 @@ from model.plan import (
     END_FRONT,
     END_REAR,
     Anchor,
+    FixedRoute,
     Plan,
     PlanCommand,
     PlanItem,
@@ -211,5 +212,19 @@ dirty.pointer = 5
 assert any("指针" in p for p in dirty.validate()), dirty.validate()
 assert Plan().validate() == []
 print("✅ ⑧ 整份计划校验聚合并带条目序号；脏指针被标记")
+
+# ── ⑨ 玩家循环计划必须显式包含 n→1 路径 ─────────────────────────────
+open_cycle = Plan(
+    [PlanItem.goto((EDGE_TM, 0.0, 1), fixed_route=FixedRoute(((EDGE_TM, 1),), 0.0, 0.0))],
+    requires_closed_cycle=True,
+)
+assert any("缺少末条→第一条" in p for p in open_cycle.validate_cycle(net))
+wrong_seam = Plan(
+    [PlanItem.goto((EDGE_TM, 0.5, -1), fixed_route=FixedRoute(((EDGE_TM, -1),), 0.0, 0.0))],
+    loop_route=FixedRoute(((EDGE_MA, -1), (EDGE_TM, -1)), 0.0, 0.0),
+    requires_closed_cycle=True,
+)
+assert any("首边与末条终点" in p for p in wrong_seam.validate_cycle(net))
+print("✅ ⑨ 声明为循环的计划缺少 n→1 路径时明确判为不完整")
 
 print("\n全部通过")
