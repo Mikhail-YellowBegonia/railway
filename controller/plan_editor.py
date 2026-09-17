@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
-from model.plan import END_REAR, Anchor, Plan, PlanItem, TrainRef
+from model.plan import END_REAR, Anchor, Plan, PlanCommand, PlanItem, TrainRef
 from model.plan_path import PathStart, PlanResolution, resolve_plan_item
 from model.rail_network import RailNetwork
 from model.train_entity import TrainEntity
@@ -51,6 +51,39 @@ class PlanEditor:
         self.train = None
         self.owner = None
         self.draft = PlanDraft()
+
+    def finalize_cycle(self) -> tuple[bool, str]:
+        """编辑期冻结末目标到第一目标的循环接缝；运行期仍不得寻路。"""
+        if self.owner is None or self.train is None:
+            return False, "计划闭环失败：编辑态未开启"
+        plan = self.owner.plan
+        if plan is None or not plan.items:
+            return True, "计划编辑关闭：空计划"
+        # 重新确认闭环前先使旧接缝失效；失败时不得继续保留可能已过期的路线。
+        plan.loop_route = None
+        plan.has_wrapped = False
+        if any(item.command is not PlanCommand.GOTO for item in plan.items):
+            return False, "计划闭环失败：当前阶段只支持纯前往（goto）计划；连挂计划暂不闭环"
+        first = plan.items[0]
+        last = plan.items[-1]
+        if first.goal is None or last.goal is None:
+            return False, "计划闭环失败：首条或末条缺少固定终点"
+        result = resolve_plan_item(
+            self.network,
+            PathStart(*last.goal),
+            PlanItem.goto(first.goal, anchors=first.anchors),
+            passable_fn=self.passable_fn,
+            allow_reversal=True,
+            consist_length=self.train.state.consist.total_length,
+        )
+        if result.path is None:
+            return False, f"计划闭环失败：{result.failure}"
+        plan.loop_route = result.path.freeze()
+        problems = plan.loop_route.validate(self.network, goal=first.goal)
+        if problems:
+            plan.loop_route = None
+            return False, f"计划闭环失败：{'；'.join(problems)}"
+        return True, "计划闭环已冻结：末目标将沿固定路线返回第一目标"
 
     def click_node(self, node_id: int) -> str:
         if not self.active or node_id not in self.network.nodes:

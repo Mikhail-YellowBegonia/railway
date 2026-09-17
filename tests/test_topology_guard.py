@@ -5,8 +5,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from model.plan import Anchor, FixedRoute, PlanItem
-from model.topology_guard import EdgeSplit, routes_conflict_with_signal
+from model.plan import Anchor, FixedRoute, Plan, PlanItem
+from model.topology_guard import EdgeSplit, plans_conflict_with_signal, routes_conflict_with_signal
 
 
 split = EdgeSplit(
@@ -45,5 +45,12 @@ one_way = PlanItem.goto(
 assert not routes_conflict_with_signal([one_way], (12, 1))
 assert routes_conflict_with_signal([one_way], (12, -1))
 print("✅ ③ 单向 PBS 背面冲突判定正确")
+
+# ④ 计划级循环接缝也必须参与切边改写和信号准入。
+plan = Plan([one_way], loop_route=FixedRoute(((10, -1),), 0.0, 0.0))
+plan.loop_route = split.rewrite_fixed_route(plan.loop_route)
+assert plan.loop_route.edges == ((12, -1), (11, -1))
+assert plans_conflict_with_signal([plan], (12, 1))
+print("✅ ④ 循环接缝参与拓扑改写与 PBS 背面冲突判定")
 
 print("\n全部通过")

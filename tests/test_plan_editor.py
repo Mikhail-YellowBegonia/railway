@@ -61,7 +61,12 @@ second = wagon.plan.items[1]
 assert second.fixed_route is not None
 assert second.fixed_route.edges[0] == (e1, 1)
 assert second.fixed_route.edges[-1] == (e0, -1)
-print("✅ ③ 连续确认两条冻结路线，后条从前条终点构造")
+ok, message = editor.finalize_cycle()
+assert ok, message
+assert wagon.plan.loop_route is not None
+assert wagon.plan.loop_route.edges[0] == (e0, -1)
+assert wagon.plan.loop_route.edges[-1] == (e1, 1)
+print("✅ ③ 连续确认两条冻结路线，并冻结末目标返回首目标的循环接缝")
 
 # ④ 回退顺序先终点、后锚点；取消清空草稿但保留已确认计划。
 assert "锚点" in editor.click_node(b.node_id)
@@ -96,6 +101,8 @@ assert couple_item.fixed_route is not None
 ok, message = editor.append_wait_couple()
 assert ok and len(wagon.plan) == 2
 assert wagon.plan.items[1].command is PlanCommand.WAIT_COUPLE
+ok, message = editor.finalize_cycle()
+assert not ok and "只支持纯前往" in message
 print("✅ ⑤ 编辑态 K/W 创建冻结连挂与原地等待条目")
 
 print("\n全部通过")

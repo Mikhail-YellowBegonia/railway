@@ -93,7 +93,13 @@ class PlanDispatcher:
                 return
             # P4 可机械改写 FixedRoute；已有运行 route 已在同一事务中被改写。
             # 这里只同步令牌，不能从当前车头重新下单或重新寻路。
-            execution.route_signature = self._route_signature(item)
+            active_route = (
+                item.fixed_route if item.command is PlanCommand.GOTO_COUPLE
+                else self._active_route(plan, item)
+            )
+            execution.route_signature = self._route_signature(
+                active_route, execution.projected_goal,
+            )
             return
 
         self._clear_execution(train)
@@ -221,7 +227,7 @@ class PlanDispatcher:
                     plan_id=id(plan),
                     item_id=id(item),
                     pointer=plan.pointer,
-                    route_signature=self._route_signature(item),
+                    route_signature=self._route_signature(item.fixed_route, goal),
                     projected_goal=goal,
                 )
                 train.plan_status = ""
@@ -232,9 +238,22 @@ class PlanDispatcher:
             if not train.is_parked():
                 self._report_once(train, "计划等待当前运行指令结束")
                 return
-            projection = self._project_route_start(train, item.fixed_route)
+            active_route = self._active_route(plan, item)
+            if active_route is None:
+                self._report_once(
+                    train,
+                    "计划错误：计划已回绕，但末目标到第一目标的循环接缝尚未冻结",
+                )
+                return
+            route_problems = active_route.validate(self.network, goal=item.goal)
+            if route_problems:
+                self._report_once(
+                    train, f"计划错误：循环接缝失效：{'；'.join(route_problems)}",
+                )
+                return
+            projection = self._project_route_start(train, active_route)
             if projection is None:
-                self._report_once(train, self._route_start_error(train, item.fixed_route))
+                self._report_once(train, self._route_start_error(train, active_route))
                 return
             route, remaining = projection
             train._stop_before_m = 0.0
@@ -245,7 +264,7 @@ class PlanDispatcher:
                 plan_id=id(plan),
                 item_id=id(item),
                 pointer=plan.pointer,
-                route_signature=self._route_signature(item),
+                route_signature=self._route_signature(active_route, item.goal),
                 projected_goal=item.goal,
             )
             train.plan_status = ""
@@ -383,9 +402,14 @@ class PlanDispatcher:
         )
 
     @staticmethod
-    def _route_signature(item: PlanItem) -> tuple:
-        route = item.fixed_route
-        return (route.edges, route.start_offset, route.end_offset, item.goal) if route else ()
+    def _active_route(plan: Plan, item: PlanItem) -> FixedRoute | None:
+        if plan.pointer == 0 and plan.has_wrapped:
+            return plan.loop_route
+        return item.fixed_route
+
+    @staticmethod
+    def _route_signature(route: FixedRoute | None, goal: Goal | None) -> tuple:
+        return (route.edges, route.start_offset, route.end_offset, goal) if route else ()
 
     @staticmethod
     def _same_activation(execution: PlanExecution, winner: Wagon, plan: Plan, item: PlanItem | None) -> bool:

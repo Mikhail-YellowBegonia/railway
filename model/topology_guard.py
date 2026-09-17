@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Iterable
 
-from model.plan import FixedRoute, PlanItem
+from model.plan import FixedRoute, Plan, PlanItem
 
 
 DirectedEdge = tuple[int, int]
@@ -86,3 +86,13 @@ def fixed_routes(items: Iterable[PlanItem]) -> tuple[FixedRoute, ...]:
 
 def routes_conflict_with_signal(items: Iterable[PlanItem], signal: DirectedEdge) -> bool:
     return any(route.conflicts_with_signal(signal) for route in fixed_routes(items))
+
+
+def plans_conflict_with_signal(plans: Iterable[Plan], signal: DirectedEdge) -> bool:
+    """计划条目及计划级循环接缝是否会被该信号从背面封死。"""
+    for plan in plans:
+        if routes_conflict_with_signal(plan.items, signal):
+            return True
+        if plan.loop_route is not None and plan.loop_route.conflicts_with_signal(signal):
+            return True
+    return False

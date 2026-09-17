@@ -509,4 +509,43 @@ assert internal_train.state.occupancy.route == [(internal_edge, 1)]
 assert abs(internal_train.state.remaining_to_goal - 160.0) < 1e-9
 print("✅ ⑮ 可从冻结路径内部有向 edge 重定位并消费后缀")
 
+# ⑯ 两目标环线的回绕必须消费独立闭环路径，不能重用建表位置到第一目标的路线。
+ring_wagon = create_simple_car(
+    length=10.0, mass=30.0, P_rated=1000.0, have_control=True,
+)
+bootstrap = FixedRoute(((loop_start_edge, -1),), 0.0, 50.0)
+return_to_start = FixedRoute(
+    ((internal_edge, -1), (loop_goal_edge, -1), (loop_start_edge, -1)), 0.0, 50.0,
+)
+ring_wagon.plan = Plan(
+    [
+        PlanItem.goto((loop_start_edge, 0.5, -1), fixed_route=bootstrap),
+        PlanItem.goto(
+            (internal_edge, 1.0, 1),
+            fixed_route=FixedRoute(
+                ((loop_start_edge, -1), (loop_start_edge, 1),
+                 (loop_goal_edge, 1), (internal_edge, 1)),
+                50.0,
+                0.0,
+            ),
+        ),
+    ],
+    pointer=0,
+    loop_route=return_to_start,
+    has_wrapped=True,
+)
+ring_train = TrainEntity(
+    TrainState(OccupancyState([(internal_edge, -1)], 0.0, 10.0, []), 0.0, 0.0,
+               Consist([ring_wagon])),
+    network6,
+    SimplePhysics(a_max=2.0, b_max=3.0),
+)
+loop_plans.tick(ring_train, [ring_train])
+assert ring_train.plan_execution is not None
+assert ring_train.state.occupancy.route == [
+    (loop_goal_edge, -1), (loop_start_edge, -1),
+]
+assert ring_train.state.goal == (loop_start_edge, 0.5, -1)
+print("✅ ⑯ 回绕第一条时使用末目标→第一目标的独立冻结接缝")
+
 print("\n全部通过")

@@ -707,12 +707,18 @@ def draw_plan_editor_overlay(
     color = (255, 70, 70) if draft.failure else (80, 230, 255)
     owner = plan_editor.owner
     if owner is not None and owner.plan is not None:
-        for item in owner.plan.items:
-            fixed_route = item.fixed_route
+        routes = [(item.fixed_route, item) for item in owner.plan.items]
+        routes.append((owner.plan.loop_route, None))
+        for fixed_route, item in routes:
             if fixed_route is None:
                 continue
             confirmed_color = (
-                (255, 70, 70) if item.validate(network, require_fixed_route=True)
+                (255, 70, 70) if (
+                    item.validate(network, require_fixed_route=True)
+                    if item is not None else fixed_route.validate(
+                        network, goal=owner.plan.items[0].goal if owner.plan.items else None,
+                    )
+                )
                 else (80, 210, 120)
             )
             for edge_id, _direction in fixed_route.edges:

@@ -448,8 +448,10 @@ class GameLoop:
                 self.editor.handle_cancel()
         elif event.key == pygame.K_p and self.editor.mode == EditMode.PLAY:
             if self.plan_editor.active:
-                self.plan_editor.cancel()
-                print("计划编辑关闭：已确认条目开始生效")
+                ok, message = self.plan_editor.finalize_cycle()
+                print(message)
+                if ok:
+                    self.plan_editor.cancel()
             elif self.active_train is None:
                 print("计划编辑拒绝：请先选中列车")
             else:
@@ -886,6 +888,14 @@ class GameLoop:
                 if plan is not None:
                     yield from plan.items
 
+    def _plans(self):
+        """枚举车厢持有的计划，包含计划级循环接缝。"""
+        for train in self.trains:
+            for wagon in train.state.consist.wagons:
+                plan = getattr(wagon, "plan", None)
+                if plan is not None:
+                    yield plan
+
     def _rewrite_plan_items_for_split(self, split) -> None:
         """原子替换车厢计划中的不可变条目（P4；当前 P3a 尚无持有者）。"""
         for train in self.trains:
@@ -893,6 +903,8 @@ class GameLoop:
                 plan = getattr(wagon, "plan", None)
                 if plan is not None:
                     plan.items[:] = [split.rewrite_plan_item(item) for item in plan.items]
+                    if plan.loop_route is not None:
+                        plan.loop_route = split.rewrite_fixed_route(plan.loop_route)
 
     def _runtime_routes_conflict_with_signal(self, directed) -> bool:
         """单向信号背面是否会封死某列车尚待消费的手动/计划运行路线。"""
@@ -991,6 +1003,12 @@ class GameLoop:
                     for edge_id in item.fixed_route.used_edge_ids()
                 ):
                     return f"节点 {nid} 关联的轨道被固定路径引用"
+            for plan in self._plans():
+                if plan.loop_route is not None and any(
+                    edge_id in node.incident_edge_ids
+                    for edge_id in plan.loop_route.used_edge_ids()
+                ):
+                    return f"节点 {nid} 关联的轨道被计划循环接缝引用"
         eid = self.editor.hovered_edge_id
         if eid is not None and eid in locked:
             return f"轨道 edge {eid} 正被列车占用或预约"
@@ -1003,6 +1021,11 @@ class GameLoop:
                     anchor.exit_edge_id == eid for anchor in item.anchors
                 ) or (item.fixed_route is not None and eid in item.fixed_route.used_edge_ids()):
                     return f"轨道 edge {eid} 被计划引用"
+            if any(
+                plan.loop_route is not None and eid in plan.loop_route.used_edge_ids()
+                for plan in self._plans()
+            ):
+                return f"轨道 edge {eid} 被计划循环接缝引用"
         return None
 
     def _hit_test_coupler(self, _world_pos: Vec3,
@@ -1379,7 +1402,7 @@ class GameLoop:
         当前实现是每帧无条件 rebuild（见 model/block.py），这里不用
         手动触发。
         """
-        from model.topology_guard import routes_conflict_with_signal
+        from model.topology_guard import plans_conflict_with_signal
 
         node_id = self._snap_node_at(world_pos)
         if node_id is None:
@@ -1392,7 +1415,7 @@ class GameLoop:
             # resolve_directed_edge_by_click）。旧边反向固定路线会被该信号从背面
             # 永久封死，必须在切边前整次拒绝，不能留下"轨道已切、信号未放"。
             prospective_signal = (edge_id, 1)
-            if (routes_conflict_with_signal(self._plan_items(), prospective_signal)
+            if (plans_conflict_with_signal(self._plans(), prospective_signal)
                     or self._runtime_routes_conflict_with_signal(prospective_signal)):
                 print("SIGNAL 拒绝：该单向方向会封死已有固定或运行路径")
                 return
@@ -1414,7 +1437,7 @@ class GameLoop:
         elif self.signals.is_blocked_backside(directed):
             print(f"SIGNAL: 节点 {node_id} 方向 edge {best_edge_id} 是反向信号的背面，"
                 f"不能在此放置（One-Way PBS，先点另一侧删除或换方向）")
-        elif (routes_conflict_with_signal(self._plan_items(), directed)
+        elif (plans_conflict_with_signal(self._plans(), directed)
               or self._runtime_routes_conflict_with_signal(directed)):
             print("SIGNAL 拒绝：该单向方向会封死已有固定或运行路径")
         else:

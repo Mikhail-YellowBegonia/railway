@@ -344,6 +344,10 @@ class Plan:
 
     items: list[PlanItem] = field(default_factory=list)
     pointer: int = 0
+    # 第一条条目的 fixed_route 是“建表位置 → 第一目标”的首次启动路线；
+    # 首次走完整份计划后，必须改用“末目标 → 第一目标”的循环接缝。
+    loop_route: FixedRoute | None = None
+    has_wrapped: bool = False
 
     # ── 指针 ──────────────────────────────────────────────────────────
     def __len__(self) -> int:
@@ -365,10 +369,12 @@ class Plan:
             if index != 0:
                 raise IndexError(f"空计划只能把指针放在 0，收到 {index}")
             self.pointer = 0
+            self.has_wrapped = False
             return
         if not (0 <= index < len(self.items)):
             raise IndexError(f"指针越界：{index}（共 {len(self.items)} 条）")
         self.pointer = index
+        self.has_wrapped = False
 
     def advance(self) -> int:
         """指针前进一条，**走完回绕到第一项**（Q15），返回新指针。
@@ -379,8 +385,12 @@ class Plan:
         """
         if not self.items:
             self.pointer = 0
+            self.has_wrapped = False
             return self.pointer
-        self.pointer = (self._clamped_pointer() + 1) % len(self.items)
+        old_pointer = self._clamped_pointer()
+        self.pointer = (old_pointer + 1) % len(self.items)
+        if self.pointer == 0 and old_pointer == len(self.items) - 1:
+            self.has_wrapped = True
         return self.pointer
 
     def _clamped_pointer(self) -> int:
@@ -393,6 +403,8 @@ class Plan:
     # ── 编辑（Q23-5：仅停放列车可编辑；这里只提供纯数据操作）──────────
     def append(self, item: PlanItem) -> None:
         self.items.append(item)
+        self.loop_route = None
+        self.has_wrapped = False
         self._clamped_pointer()
 
     def insert(self, index: int, item: PlanItem) -> None:
@@ -402,6 +414,8 @@ class Plan:
         if self.items and index < self.pointer:
             self.pointer += 1
         self.items.insert(index, item)
+        self.loop_route = None
+        self.has_wrapped = False
         self._clamped_pointer()
 
     def remove_at(self, index: int) -> PlanItem:
@@ -412,6 +426,8 @@ class Plan:
         if index < self.pointer:
             self.pointer -= 1
         removed = self.items.pop(index)
+        self.loop_route = None
+        self.has_wrapped = False
         if not self.items:
             self.pointer = 0
         else:
@@ -439,4 +455,12 @@ class Plan:
                 f"第 {i} 条：{p}"
                 for p in item.validate(network, require_fixed_route=require_fixed_route)
             )
+        if self.loop_route is not None:
+            first_goal = self.items[0].goal if self.items else None
+            problems.extend(
+                f"循环接缝：{p}"
+                for p in self.loop_route.validate(network, goal=first_goal)
+            )
+        elif require_fixed_route and self.has_wrapped and self.items:
+            problems.append("循环接缝：计划已经回绕但尚未冻结末目标到第一目标的路径")
         return problems
