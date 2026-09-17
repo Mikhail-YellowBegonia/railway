@@ -377,7 +377,7 @@ sharp_train = TrainEntity(
 sharp_plans = PlanDispatcher(sharp_network)
 sharp_plans.tick(sharp_train, [sharp_train])
 assert sharp_train.state.occupancy.route == []
-assert "固定路线起点" in sharp_train.plan_status
+assert "固定路线可消费位置" in sharp_train.plan_status
 print("✅ ⑫ 节点边界停车误差可拓扑接续，非法转向仍被拒绝")
 
 # ⑬ 完整时序：上一条实际制动停在入边末端前，再由到达事件激活出边计划。
@@ -479,7 +479,34 @@ past_goal = TrainEntity(
 )
 loop_plans.tick(past_goal, [past_goal])
 assert past_goal.state.occupancy.route == [] and past_goal.plan_execution is None
-assert "固定路线起点" in past_goal.plan_status
+assert "固定路线可消费位置" in past_goal.plan_status
 print("✅ ⑭ 循环回到首边不同 t 可续行，越过目标仍拒绝")
+
+# ⑮ 实机同类：计划回绕时车头已在冻结路线内部 edge，不要求返回首 edge。
+v0 = network6.add_node(Vec3(300.0, 0.0, 0.0))
+internal_edge = network6.add_edge(u2, v0).edge_id
+internal_wagon = create_simple_car(
+    length=10.0, mass=30.0, P_rated=1000.0, have_control=True,
+)
+internal_wagon.plan = Plan([
+    PlanItem.goto(
+        (internal_edge, 1.0, 1),
+        fixed_route=FixedRoute(
+            ((loop_start_edge, 1), (loop_goal_edge, 1), (internal_edge, 1)),
+            0.0,
+            0.0,
+        ),
+    ),
+])
+internal_train = TrainEntity(
+    TrainState(OccupancyState([(loop_goal_edge, 1)], 30.0, 10.0, []), 0.0, 0.0,
+               Consist([internal_wagon])),
+    network6,
+    SimplePhysics(a_max=2.0, b_max=3.0),
+)
+loop_plans.tick(internal_train, [internal_train])
+assert internal_train.state.occupancy.route == [(internal_edge, 1)]
+assert abs(internal_train.state.remaining_to_goal - 160.0) < 1e-9
+print("✅ ⑮ 可从冻结路径内部有向 edge 重定位并消费后缀")
 
 print("\n全部通过")

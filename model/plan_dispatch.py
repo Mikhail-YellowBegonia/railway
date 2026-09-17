@@ -196,17 +196,22 @@ class PlanDispatcher:
                 if item.fixed_route is None:
                     self._report_once(train, "计划错误：前往连挂缺少固定路径")
                     return
-                projection = self._project_route_start(train, item.fixed_route)
+                from controller.coupling import head_hook_offset
+                stop_before = head_hook_offset(train)
+                goal_edge_id, goal_t, goal_direction = goal
+                goal_edge_length = self.network.edges[goal_edge_id].length
+                runtime_end_offset = (
+                    goal_edge_length * ((1.0 - goal_t) if goal_direction > 0 else goal_t)
+                )
+                projection = self._project_route_start(
+                    train,
+                    item.fixed_route,
+                    end_offset=runtime_end_offset + stop_before,
+                )
                 if projection is None:
                     self._report_once(train, self._route_start_error(train, item.fixed_route))
                     return
-                from controller.coupling import head_hook_offset
-                route, start_adjustment = projection
-                stop_before = head_hook_offset(train)
-                remaining = (
-                    self._remaining_to_couple(item.fixed_route, goal, stop_before)
-                    + start_adjustment
-                )
+                route, remaining = projection
                 train._stop_before_m = stop_before
                 train.assign_route(route, remaining, goal)
                 train.couple_approach_partner = target_train
@@ -231,10 +236,9 @@ class PlanDispatcher:
             if projection is None:
                 self._report_once(train, self._route_start_error(train, item.fixed_route))
                 return
-            route, start_adjustment = projection
+            route, remaining = projection
             train._stop_before_m = 0.0
-            remaining = item.fixed_route.remaining_to_goal(self.network) + start_adjustment
-            train.assign_route(route, max(0.0, remaining), item.goal)
+            train.assign_route(route, remaining, item.goal)
             train.v_target = max(train.v_target, PLAN_CRUISE_SPEED)
             train.plan_execution = PlanExecution(
                 wagon_id=winner.wagon_id,
@@ -292,53 +296,68 @@ class PlanDispatcher:
             return "temporary", "目标后钩偏离冻结位置超过 5 米", None, None
         return "ready", "", target_train, (edge_id, t, direction)
 
-    def _remaining_to_couple(
-        self, route: FixedRoute, goal: Goal, stop_before: float,
-    ) -> float:
-        edge_id, t, direction = goal
-        edge_length = self.network.edges[edge_id].length
-        runtime_end_offset = edge_length * ((1.0 - t) if direction > 0 else t)
-        total = sum(self.network.edges[current].length for current, _ in route.edges)
-        return max(0.0, total - route.start_offset - runtime_end_offset - stop_before)
-
     def _project_route_start(
-        self, train: TrainEntity, route: FixedRoute,
+        self,
+        train: TrainEntity,
+        route: FixedRoute,
+        *,
+        end_offset: float | None = None,
     ) -> tuple[list[tuple[int, int]], float] | None:
-        """把厘米级停车误差投影到冻结路径起点，不移动列车或修改路网。"""
+        """把车头重定位到冻结路径中的合法后缀，不移动列车或修改路网。"""
         if not route.edges:
             return None
         edge_id, t, direction = train.current_directed_edge_and_t()
         edge_length = self.network.edges[edge_id].length
         actual_offset = t * edge_length if direction > 0 else (1.0 - t) * edge_length
         current = (edge_id, direction)
-        first = route.edges[0]
+        effective_end_offset = route.end_offset if end_offset is None else end_offset
+        edge_lengths = [self.network.edges[eid].length for eid, _ in route.edges]
+        candidates: list[tuple[float, int, bool]] = []
 
-        if current == first:
-            adjustment = route.start_offset - actual_offset
-            remaining = route.remaining_to_goal(self.network) + adjustment
-            if remaining < -POSITION_EPSILON_M:
-                return None
-            return list(route.edges[1:]), adjustment
+        # 当前车头已经位于冻结路径某次出现的有向 edge 上：该 edge 属 occupied，
+        # 下发其后的后缀。重复出现时最终选到目标剩余距离最短的合法 occurrence。
+        for index, directed in enumerate(route.edges):
+            if directed != current:
+                continue
+            remaining = (
+                edge_lengths[index] - actual_offset
+                + sum(edge_lengths[index + 1:])
+                - effective_end_offset
+            )
+            if remaining >= -POSITION_EPSILON_M:
+                candidates.append((max(0.0, remaining), index, True))
 
         from model.pathfinding import head_node, tail_node
         boundary_node = head_node(self.network, current)
-        if boundary_node != tail_node(self.network, first):
-            return None
         remaining_to_boundary = edge_length - actual_offset
-        adjustment = remaining_to_boundary + route.start_offset
-        if adjustment > POSITION_EPSILON_M:
-            return None
+        if remaining_to_boundary <= POSITION_EPSILON_M:
+            for index, following in enumerate(route.edges):
+                if boundary_node != tail_node(self.network, following):
+                    continue
+                if current[0] == following[0] and current[1] == -following[1]:
+                    if self.network.nodes[boundary_node].connection_count() != 1:
+                        continue
+                    segment_length, _turnout, _edges = \
+                        self.network.simple_segment_from_endpoint(boundary_node)
+                    if segment_length < train.state.consist.total_length:
+                        continue
+                elif not self.network.turn_allowed(
+                    boundary_node, current[0], following[0],
+                ):
+                    continue
+                remaining = (
+                    remaining_to_boundary
+                    + sum(edge_lengths[index:])
+                    - effective_end_offset
+                )
+                if remaining >= -POSITION_EPSILON_M:
+                    candidates.append((max(0.0, remaining), index, False))
 
-        if current[0] == first[0] and current[1] == -first[1]:
-            if self.network.nodes[boundary_node].connection_count() != 1:
-                return None
-            segment_length, _turnout, _edges = \
-                self.network.simple_segment_from_endpoint(boundary_node)
-            if segment_length < train.state.consist.total_length:
-                return None
-        elif not self.network.turn_allowed(boundary_node, current[0], first[0]):
+        if not candidates:
             return None
-        return list(route.edges), adjustment
+        remaining, index, current_is_on_route = min(candidates, key=lambda item: item[0])
+        suffix_start = index + 1 if current_is_on_route else index
+        return list(route.edges[suffix_start:]), remaining
 
     def _route_start_error(self, train: TrainEntity, route: FixedRoute) -> str:
         edge_id, t, direction = train.current_directed_edge_and_t()
@@ -346,10 +365,10 @@ class PlanDispatcher:
         actual_offset = t * actual_length if direction > 0 else (1.0 - t) * actual_length
         expected_edge, expected_direction = route.edges[0]
         return (
-            "计划等待：车头不在固定路线起点，拒绝重新寻路"
+            "计划等待：车头不在固定路线可消费位置，拒绝重新寻路"
             f"（实际 edge {edge_id} dir {direction:+d} offset {actual_offset:.2f}m；"
-            f"期望 edge {expected_edge} dir {expected_direction:+d} "
-            f"offset {route.start_offset:.2f}m）"
+            f"路线首项 edge {expected_edge} dir {expected_direction:+d} "
+            f"建表 offset {route.start_offset:.2f}m）"
         )
 
     def _at_goal(self, train: TrainEntity, item: PlanItem) -> bool:
