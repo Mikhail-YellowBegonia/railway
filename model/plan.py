@@ -338,8 +338,9 @@ class PlanItem:
 class Plan:
     """有序条目 + 指令指针（指针落在控制车上；Q14/Q15）。
 
-    空计划 = **列车停车等待**（Q15）。`advance()` 只做"指针前进 + 走完回绕到 0"
-    这一个纯位移动作；**步进策略不在这里**（roadmap §2.3 / P3）。
+    空计划 = **列车停车等待**（Q15）。普通 ``goto`` 计划循环；含连挂事件的 demo
+    计划可以是一次性链，走完后指针停在尾后（``current() is None``）。`advance()`
+    只做指针移动；**步进策略不在这里**（roadmap §2.3 / P3）。
     """
 
     items: list[PlanItem] = field(default_factory=list)
@@ -349,6 +350,7 @@ class Plan:
     loop_route: FixedRoute | None = None
     has_wrapped: bool = False
     requires_closed_cycle: bool = False
+    repeat: bool = True
 
     # ── 指针 ──────────────────────────────────────────────────────────
     def __len__(self) -> int:
@@ -362,7 +364,15 @@ class Plan:
         """当前条目；空计划返回 None（⇒ 停车等待）。"""
         if not self.items:
             return None
-        return self.items[self._clamped_pointer()]
+        pointer = self._clamped_pointer()
+        if not self.repeat and pointer == len(self.items):
+            return None
+        return self.items[pointer]
+
+    @property
+    def is_complete(self) -> bool:
+        """一次性计划是否已消费完全部条目。"""
+        return not self.repeat and bool(self.items) and self.pointer == len(self.items)
 
     def move_to(self, index: int) -> None:
         """把指针移到指定条目（越界抛 IndexError；空计划只允许 0）。"""
@@ -378,7 +388,7 @@ class Plan:
         self.has_wrapped = False
 
     def advance(self) -> int:
-        """指针前进一条，**走完回绕到第一项**（Q15），返回新指针。
+        """指针前进一条；循环计划回绕，一次性计划停在尾后，返回新指针。
 
         ⚠ 只移动指针：不判断命令类型、不触发任何动作、不做"整圈无可执行命令"
         的兜底——那些属于步进策略（roadmap §2.3，**P3 实现**；其中
@@ -389,16 +399,23 @@ class Plan:
             self.has_wrapped = False
             return self.pointer
         old_pointer = self._clamped_pointer()
-        self.pointer = (old_pointer + 1) % len(self.items)
-        if self.pointer == 0 and old_pointer == len(self.items) - 1:
-            self.has_wrapped = True
+        if old_pointer == len(self.items) - 1:
+            if self.repeat:
+                self.pointer = 0
+                self.has_wrapped = True
+            else:
+                self.pointer = len(self.items)
+                self.has_wrapped = False
+        else:
+            self.pointer = old_pointer + 1
         return self.pointer
 
     def _clamped_pointer(self) -> int:
         if not self.items:
             return 0
-        if not (0 <= self.pointer < len(self.items)):
-            self.pointer = min(max(self.pointer, 0), len(self.items) - 1)
+        maximum = len(self.items) if not self.repeat else len(self.items) - 1
+        if not (0 <= self.pointer <= maximum):
+            self.pointer = min(max(self.pointer, 0), maximum)
         return self.pointer
 
     # ── 编辑（Q23-5：仅停放列车可编辑；这里只提供纯数据操作）──────────
@@ -432,7 +449,8 @@ class Plan:
         if not self.items:
             self.pointer = 0
         else:
-            self.pointer = min(max(self.pointer, 0), len(self.items) - 1)
+            maximum = len(self.items) if not self.repeat else len(self.items) - 1
+            self.pointer = min(max(self.pointer, 0), maximum)
         return removed
 
     # ── 校验 ──────────────────────────────────────────────────────────
@@ -445,7 +463,8 @@ class Plan:
         """整份计划自查（指针范围 + 逐条 validate），返回问题描述列表。"""
         problems: list[str] = []
         if self.items:
-            if not (0 <= self.pointer < len(self.items)):
+            maximum = len(self.items) if not self.repeat else len(self.items) - 1
+            if not (0 <= self.pointer <= maximum):
                 problems.append(
                     f"指针 {self.pointer} 越界（共 {len(self.items)} 条）"
                 )

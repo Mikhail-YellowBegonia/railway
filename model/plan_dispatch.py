@@ -70,6 +70,8 @@ class PlanDispatcher:
             if not train.is_parked():
                 train.emergency_stop()
             self._clear_execution(train)
+            if plan.is_complete:
+                self._report_once(train, "计划已完成：一次性事件链已消费完毕，列车停车")
             return
 
         if execution is not None and self._same_activation(execution, winner, plan, item):
@@ -176,8 +178,7 @@ class PlanDispatcher:
     @staticmethod
     def _winner(train: TrainEntity) -> Wagon | None:
         """在全部控制车中稳定遴选；胜出者无计划时不得降级执行次优者。"""
-        candidates = train.state.consist.control_cars()
-        return min(candidates, key=lambda wagon: (-wagon.priority, wagon.wagon_id), default=None)
+        return train.state.consist.control_winner()
 
     def _activate(
         self,

@@ -762,8 +762,7 @@ def draw_plan_hud(
     editing: bool,
 ) -> None:
     """显示胜出控制车的当前条目、指针与错误状态。"""
-    controls = train.state.consist.control_cars()
-    winner = min(controls, key=lambda wagon: (-wagon.priority, wagon.wagon_id), default=None)
+    winner = train.state.consist.control_winner()
     if winner is None:
         line = "计划: 无控制车"
     elif winner.plan is None:
@@ -772,14 +771,18 @@ def draw_plan_hud(
         line = "计划: 空计划"
     else:
         item = winner.plan.current()
-        line = f"计划: {winner.plan.pointer + 1}/{len(winner.plan)} {item.label}"
+        if item is None:
+            line = "计划: 一次性事件链已完成"
+        else:
+            line = f"计划: {winner.plan.pointer + 1}/{len(winner.plan)} {item.label}"
     if editing:
         line += " 【编辑中】"
     validation = ""
     if winner is not None and winner.plan is not None and not winner.plan.is_empty:
         problems = winner.plan.validate_cycle(train.network)
-        if not problems:
-            problems = winner.plan.current().validate(
+        current = winner.plan.current()
+        if not problems and current is not None:
+            problems = current.validate(
                 train.network, require_fixed_route=True,
             )
         if problems:
@@ -802,6 +805,8 @@ COUPLER_RADIUS_PX = 5                 # 车钩圆圈屏幕半径（像素）
 # head/tail 靠 tooltip 文字区分）：方块比内部圆点大一号，作为连挂目标标记。
 COLOR_END_COUPLER = (120, 200, 230)   # 端头车钩方块（青）
 END_COUPLER_SIZE_PX = 9               # 端头方块半边长（像素）
+COLOR_CONTROL_CAR = (80, 210, 235)    # 控制车标记（青）
+COLOR_CONTROL_WINNER = (255, 220, 80) # 当前胜出控制车外环（黄）
 
 
 def draw_debug_train(
@@ -833,6 +838,7 @@ def draw_debug_train(
         bogie_pairs = kinematics.get_all_bogie_poses(s)
         wagon_poses = kinematics.get_all_wagon_poses(s)
         consist = kinematics.consist
+        control_winner = consist.control_winner()
 
         for i, ((front_pose, rear_pose), wagon_pose) in enumerate(zip(bogie_pairs, wagon_poses)):
             wagon_config = consist.wagons[i]
@@ -863,6 +869,18 @@ def draw_debug_train(
 
             # 绘制轮廓（线框）
             pygame.draw.polygon(surface, color, corners_screen, 2)
+
+            # 控制车：居中画驾驶台方框；当前遴选胜出者再加黄色外环。
+            # 使用几何标记而非文字，缩放时仍能与轨道、信号清楚区分。
+            if wagon_config.have_control:
+                cx, cy = camera.world_to_screen(pos.x, pos.y, w, h)
+                marker = pygame.Rect(int(cx) - 4, int(cy) - 4, 8, 8)
+                pygame.draw.rect(surface, COLOR_CONTROL_CAR, marker)
+                pygame.draw.rect(surface, (225, 255, 255), marker, 1)
+                if wagon_config is control_winner:
+                    pygame.draw.circle(
+                        surface, COLOR_CONTROL_WINNER, (int(cx), int(cy)), 8, 2,
+                    )
 
             # 转向架位置转屏幕坐标
             fx, fy = camera.world_to_screen(front_pose.position.x, front_pose.position.y, w, h)
@@ -1064,15 +1082,23 @@ def draw_consist_panel(
     font: pygame.font.Font,
     train_idx: int,
     train,  # TrainEntity
+    selected_wagon_index: int = 0,
 ) -> None:
-    """编组详情面板（WIP 占位）。选中列车后按 I 显示。"""
-    # ponytail: 占位实现，WagonConfig 数据填充留待正式数据接入后完成
+    """编组详情与最小控制车配置面板。"""
     consist = train.state.consist
+    winner = consist.control_winner()
     lines = [f"=== Train #{train_idx} Consist ==="]
     for i, w in enumerate(consist.wagons):
         role = "Loco" if w.is_powered else "Coach"
-        lines.append(f"  [{i+1}] {role}  {w.length:.0f}m  {w.mass:.0f}t")
-    lines.append("--- WIP: more fields TBD ---")
+        control = "CTRL" if w.have_control else "----"
+        active = " ACTIVE" if w is winner else ""
+        selected = ">" if i == selected_wagon_index else " "
+        lines.append(
+            f"{selected}[{i+1}] {role:<5} {w.length:.0f}m {w.mass:.0f}t "
+            f"{control} P={w.priority:+d}{active}"
+        )
+    lines.append("1-9 select  [/] priority  C control")
+    lines.append("Only while parked; plan editing locks config")
 
     line_h = font.get_linesize()
     pad = 8

@@ -118,6 +118,7 @@ class GameLoop:
         self.active_train: "TrainEntity | None" = None
         self.train_v_target: float = 0.0           # 焦点列车的巡航速度（m/s）
         self.inspect_train: "TrainEntity | None" = None  # 编组面板目标（I 键切换）
+        self.inspect_wagon_index: int = 0
         # 车钩悬停状态（docs/consist_ui.md F 阶段完整 UI）：
         # None = 未悬停；否则 (列车, kind, key)——
         #   kind='internal', key=int(i)  → 第 i 个节间车钩（decouple_at(i) 的解挂点）
@@ -397,7 +398,7 @@ class GameLoop:
                 idx = self.trains.index(self.inspect_train) + 1
                 draw_consist_panel(
                     self.renderer.surface, self.renderer._font,
-                    idx, self.inspect_train,
+                    idx, self.inspect_train, self.inspect_wagon_index,
                 )
             pygame.display.flip()
             self.clock.tick(60)
@@ -428,7 +429,46 @@ class GameLoop:
             self._handle_mouse_motion(event)
             return
 
+    def _handle_inspect_control_key(self, event: pygame.event.Event) -> bool:
+        """处理 I 面板里的控制车配置；行驶中不允许改变执行权。"""
+        train = self.inspect_train
+        if train is None or self.editor.mode != EditMode.PLAY:
+            return False
+        selection_keys = (
+            pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4, pygame.K_5,
+            pygame.K_6, pygame.K_7, pygame.K_8, pygame.K_9,
+        )
+        if event.key in selection_keys:
+            requested = selection_keys.index(event.key)
+            if requested < len(train.state.consist.wagons):
+                self.inspect_wagon_index = requested
+                print(f"编组面板：已选择第 {requested + 1} 节车厢")
+            else:
+                print(f"编组面板：本编组没有第 {requested + 1} 节车厢")
+            return True
+        if event.key not in (pygame.K_LEFTBRACKET, pygame.K_RIGHTBRACKET, pygame.K_c):
+            return False
+        if self.plan_editor.active or not train.is_parked():
+            print("编组配置拒绝：请先退出计划编辑并让列车完全停放")
+            return True
+        wagons = train.state.consist.wagons
+        self.inspect_wagon_index = min(max(self.inspect_wagon_index, 0), len(wagons) - 1)
+        wagon = wagons[self.inspect_wagon_index]
+        if event.key == pygame.K_LEFTBRACKET:
+            wagon.set_control_config(priority=wagon.priority - 1)
+            print(f"编组配置：第 {self.inspect_wagon_index + 1} 节优先级 = {wagon.priority}")
+        elif event.key == pygame.K_RIGHTBRACKET:
+            wagon.set_control_config(priority=wagon.priority + 1)
+            print(f"编组配置：第 {self.inspect_wagon_index + 1} 节优先级 = {wagon.priority}")
+        else:
+            wagon.set_control_config(have_control=not wagon.have_control)
+            status = "控制车" if wagon.have_control else "非控制车"
+            print(f"编组配置：第 {self.inspect_wagon_index + 1} 节设为{status}")
+        return True
+
     def _handle_keydown(self, event: pygame.event.Event) -> None:
+        if self._handle_inspect_control_key(event):
+            return
         if event.key == pygame.K_ESCAPE:
             if self.plan_editor.active:
                 ok, message = self.plan_editor.finalize_cycle()
@@ -536,8 +576,11 @@ class GameLoop:
             if self.editor.mode == EditMode.PLAY:
                 # PLAY 模式：I 键切换焦点列车编组面板
                 if self.active_train is not None:
-                    self.inspect_train = None if self.inspect_train is self.active_train \
-                                               else self.active_train
+                    if self.inspect_train is self.active_train:
+                        self.inspect_train = None
+                    else:
+                        self.inspect_train = self.active_train
+                        self.inspect_wagon_index = 0
             else:
                 # 其他模式：I 键切换空间索引可视化（debug 用）
                 self.debug_show_tiles = not self.debug_show_tiles
@@ -1098,11 +1141,17 @@ class GameLoop:
             if not node or not node.incident_edge_ids:
                 print(f"PLAY: 节点 {node_id} 无关联边，无法放置")
                 return
-            # 默认编组：3 节相同车厢、全部有动力（便于测试，2026-09 用户要求）。
-            # 同长同质量同功率，解挂/连挂后任一段都能独立行驶，测试对称性好。
-            wagon1 = create_simple_wagon(length=20.0, mass=50.0, P_rated=3000.0)
-            wagon2 = create_simple_wagon(length=20.0, mass=50.0, P_rated=3000.0)
-            wagon3 = create_simple_wagon(length=20.0, mass=50.0, P_rated=3000.0)
+            # 默认编组：三节都有动力，但只首节是控制车。这样解挂后的无控制段
+            # 会按 Q6 停放，执行权也不会依赖不可见的 UUID 平手裁决。
+            wagon1 = create_simple_wagon(
+                length=20.0, mass=50.0, P_rated=3000.0, have_control=True,
+            )
+            wagon2 = create_simple_wagon(
+                length=20.0, mass=50.0, P_rated=3000.0, have_control=False,
+            )
+            wagon3 = create_simple_wagon(
+                length=20.0, mass=50.0, P_rated=3000.0, have_control=False,
+            )
             self.train_placement_consist = Consist(wagons=[wagon1, wagon2, wagon3])
             self.train_placement_node_id = node_id
             print(f"PLAY: 节点 {node_id} 已选，左键点相邻节点指定朝向")

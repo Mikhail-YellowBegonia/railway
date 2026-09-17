@@ -133,6 +133,9 @@ plan.append(PlanItem.goto((EDGE_TB, 1.0, 1)))   # 2
 assert plan.pointer == 0 and plan.current() is plan.items[0]
 assert (plan.advance(), plan.advance()) == (1, 2)
 assert plan.advance() == 0, "走完必须回绕到第一项（Q15）"
+one_shot = Plan([PlanItem.wait_couple()], repeat=False)
+assert one_shot.advance() == 1 and one_shot.current() is None
+assert one_shot.is_complete and one_shot.validate() == []
 plan.move_to(2)
 assert plan.pointer == 2 and plan.current() is plan.items[2]
 for bad in (3, -1):
@@ -179,7 +182,7 @@ except IndexError:
     pass
 else:
     raise AssertionError("空计划 remove_at(0) 应抛 IndexError")
-print("✅ ⑥ Plan：空计划语义 / 指针回绕 / move_to 越界 / 插入删除保持当前条目")
+print("✅ ⑥ Plan：空计划语义 / 循环与一次性指针 / move_to 越界 / 插入删除保持当前条目")
 
 # ── ⑦ 引用存在性 = 永久失效判据 ─────────────────────────────────────────
 ghost_node = PlanItem.goto((EDGE_TM, 0.0, 1), (Anchor(424242),))

@@ -195,6 +195,18 @@ class Wagon:
         """
         return None
 
+    def set_control_config(
+        self,
+        *,
+        have_control: bool | None = None,
+        priority: int | None = None,
+    ) -> None:
+        """在编组停放时由配置界面调用的最小控制车配置入口。"""
+        if have_control is not None:
+            self.config.have_control = have_control
+        if priority is not None:
+            self.config.priority = priority
+
 
 @dataclass
 class Consist:
@@ -230,6 +242,14 @@ class Consist:
         控制车的计划（Q4/Q5/Q6）。
         """
         return [w for w in self.wagons if w.have_control]
+
+    def control_winner(self) -> Wagon | None:
+        """按已定规则选出当前执行计划的控制车。"""
+        return min(
+            self.control_cars(),
+            key=lambda wagon: (-wagon.priority, wagon.wagon_id),
+            default=None,
+        )
 
     @property
     def total_length(self) -> float:

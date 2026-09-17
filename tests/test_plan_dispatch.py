@@ -620,4 +620,22 @@ assert unclosed_train.state.occupancy.route == []
 assert "缺少末条→第一条" in unclosed_train.plan_status
 print("✅ ⑱ 玩家循环计划缺少 n→1 路线时首轮前明确拒绝执行")
 
+# ⑲ P7 事件链在最后一条推进后必须停在尾后，不得回绕或重新寻路。
+complete_wagon = create_simple_car(
+    length=10.0, mass=30.0, P_rated=1000.0, have_control=True,
+)
+complete_wagon.plan = Plan([PlanItem.wait_couple()], repeat=False)
+complete_wagon.plan.advance()
+complete_train = TrainEntity(
+    TrainState(OccupancyState([(loop_start_edge, 1)], 20.0, 10.0, []), 0.0, 0.0,
+               Consist([complete_wagon])),
+    network6,
+    SimplePhysics(a_max=2.0, b_max=3.0),
+)
+loop_plans.tick(complete_train, [complete_train])
+assert complete_wagon.plan.is_complete
+assert complete_train.is_parked() and complete_train.state.occupancy.route == []
+assert "一次性事件链已消费完毕" in complete_train.plan_status
+print("✅ ⑲ P7 一次性事件链完成后停车，不回绕也不寻路")
+
 print("\n全部通过")

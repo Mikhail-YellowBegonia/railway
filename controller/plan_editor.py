@@ -39,12 +39,11 @@ class PlanEditor:
         controls = train.state.consist.control_cars()
         if not controls:
             return False, "计划编辑拒绝：编组没有控制车"
-        owner = min(controls, key=lambda wagon: (-wagon.priority, wagon.wagon_id))
+        owner = train.state.consist.control_winner()
+        assert owner is not None
         self.active = True
         self.train = train
         self.owner = owner
-        if owner.plan is not None:
-            owner.plan.requires_closed_cycle = True
         self.draft = PlanDraft()
         return True, f"计划编辑开启：控制车 {owner.wagon_id[:8]}"
 
@@ -55,18 +54,21 @@ class PlanEditor:
         self.draft = PlanDraft()
 
     def finalize_cycle(self) -> tuple[bool, str]:
-        """编辑期冻结末目标到第一目标的循环接缝；运行期仍不得寻路。"""
+        """确认普通计划闭环，或确认含连挂条目的一次性事件链。"""
         if self.owner is None or self.train is None:
             return False, "计划闭环失败：编辑态未开启"
         plan = self.owner.plan
         if plan is None or not plan.items:
             return True, "计划编辑关闭：空计划"
-        plan.requires_closed_cycle = True
-        # 重新确认闭环前先使旧接缝失效；失败时不得继续保留可能已过期的路线。
+        # 重新确认前先使旧接缝失效；失败时不得继续保留可能已过期的路线。
         plan.loop_route = None
         plan.has_wrapped = False
         if any(item.command is not PlanCommand.GOTO for item in plan.items):
-            return False, "计划闭环失败：当前阶段只支持纯前往（goto）计划；连挂计划暂不闭环"
+            plan.requires_closed_cycle = False
+            plan.repeat = False
+            return True, "计划已确认为一次性连挂事件链：执行完毕后停车，不回绕"
+        plan.requires_closed_cycle = True
+        plan.repeat = True
         first = plan.items[0]
         last = plan.items[-1]
         if first.goal is None or last.goal is None:
@@ -166,6 +168,8 @@ class PlanEditor:
             return False, "计划编辑错误：编辑态未开启"
         if self.owner.plan is None:
             self.owner.plan = Plan(requires_closed_cycle=True)
+        self.owner.plan.repeat = False
+        self.owner.plan.requires_closed_cycle = False
         self.owner.plan.append(PlanItem.wait_couple())
         self.draft = PlanDraft()
         return True, f"计划已追加等待连挂为第 {len(self.owner.plan)} 条"
@@ -208,6 +212,8 @@ class PlanEditor:
         )
         if self.owner.plan is None:
             self.owner.plan = Plan(requires_closed_cycle=True)
+        self.owner.plan.repeat = False
+        self.owner.plan.requires_closed_cycle = False
         self.owner.plan.append(frozen)
         self.draft = PlanDraft()
         return True, f"计划已冻结前往连挂并追加为第 {len(self.owner.plan)} 条"

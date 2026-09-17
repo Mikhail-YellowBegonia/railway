@@ -50,6 +50,40 @@ try:
     gl = GameLoop(_tmp)
     e0, e2 = edges[0], edges[2]
 
+    # 默认三车编组的执行权必须显式且可配置，不能依赖 UUID 平手。
+    gl.editor.set_mode(gl_module.EditMode.PLAY)
+    gl._play_left_click(net.nodes[0].position)
+    gl._play_left_click(net.nodes[1].position)
+    default_train = gl.active_train
+    assert default_train is not None
+    default_wagons = default_train.state.consist.wagons
+    assert [wagon.have_control for wagon in default_wagons] == [True, False, False]
+    assert default_train.state.consist.control_winner() is default_wagons[0]
+    gl.inspect_train = default_train
+    assert gl._handle_inspect_control_key(
+        pygame.event.Event(pygame.KEYDOWN, key=pygame.K_2),
+    )
+    assert gl._handle_inspect_control_key(
+        pygame.event.Event(pygame.KEYDOWN, key=pygame.K_c),
+    )
+    assert default_wagons[1].have_control
+    assert gl._handle_inspect_control_key(
+        pygame.event.Event(pygame.KEYDOWN, key=pygame.K_RIGHTBRACKET),
+    )
+    assert default_wagons[1].priority == 1
+    assert default_train.state.consist.control_winner() is default_wagons[1]
+    default_train.assign_route([(e0.edge_id, 1)], 10.0, (e0.edge_id, 0.5, 1))
+    before_priority = default_wagons[1].priority
+    gl._handle_inspect_control_key(
+        pygame.event.Event(pygame.KEYDOWN, key=pygame.K_RIGHTBRACKET),
+    )
+    assert default_wagons[1].priority == before_priority
+    default_train.emergency_stop()
+    gl.trains.clear()
+    gl.active_train = None
+    gl.inspect_train = None
+    print("✅ 控制车：默认执行权显式，I 面板只允许停放时调整")
+
     def place(eid, head_s, direction=1):
         wagons = [create_simple_wagon(length=20.0, mass=50.0, P_rated=3000.0)]
         occ = OccupancyState(occupied=[(eid, direction)], occupied_offset=0.0,

@@ -125,7 +125,12 @@ ok, message = editor.append_wait_couple()
 assert ok and len(wagon.plan) == 2
 assert wagon.plan.items[1].command is PlanCommand.WAIT_COUPLE
 ok, message = editor.finalize_cycle()
-assert not ok and "只支持纯前往" in message
-print("✅ ⑥ 编辑态 K/W 创建冻结连挂与原地等待条目")
+assert ok and "一次性连挂事件链" in message
+assert not wagon.plan.repeat and not wagon.plan.requires_closed_cycle
+assert wagon.plan.loop_route is None
+wagon.plan.advance()
+wagon.plan.advance()
+assert wagon.plan.is_complete and wagon.plan.current() is None
+print("✅ ⑥ 编辑态 K/W 创建并确认一次性连挂事件链，执行完毕不回绕")
 
 print("\n全部通过")
