@@ -9,7 +9,7 @@ from model.block import BlockManager
 from model.dispatch import TrainDispatcher
 from model.occupancy import OccupancyState
 from model.plan import END_FRONT, END_REAR, FixedRoute, Plan, PlanItem, TrainRef
-from model.plan_dispatch import PlanDispatcher
+from model.plan_dispatch import PLAN_CRUISE_SPEED, PlanDispatcher
 from model.rail_network import RailNetwork
 from model.signal import SignalTable
 from model.train_entity import TrainEntity, TrainState
@@ -547,5 +547,36 @@ assert ring_train.state.occupancy.route == [
 ]
 assert ring_train.state.goal == (loop_start_edge, 0.5, -1)
 print("✅ ⑯ 回绕第一条时使用末目标→第一目标的独立冻结接缝")
+
+# ⑰ GUI 手动巡航值可能每帧写回 0；计划执行期间必须重新取得速度控制权。
+# 若列车因此曾在目标前停成 parked，也应从冻结路线当前后缀恢复，不能静默卡住。
+speed_wagon = create_simple_car(
+    length=10.0, mass=30.0, P_rated=1000.0, have_control=True,
+)
+speed_wagon.plan = Plan([PlanItem.goto(
+    (loop_goal_edge, 1.0, 1),
+    fixed_route=FixedRoute(
+        ((loop_start_edge, 1), (loop_goal_edge, 1)), 20.0, 0.0,
+    ),
+)])
+speed_train = TrainEntity(
+    TrainState(OccupancyState([(loop_start_edge, 1)], 20.0, 10.0, []), 0.0, 0.0,
+               Consist([speed_wagon])),
+    network6,
+    SimplePhysics(a_max=2.0, b_max=3.0),
+)
+loop_plans.tick(speed_train, [speed_train])
+assert speed_train.plan_execution is not None
+speed_train.v_target = 0.0  # 模拟 GameLoop 在下一帧写回手动巡航值。
+loop_plans.tick(speed_train, [speed_train])
+assert speed_train.v_target == PLAN_CRUISE_SPEED
+
+speed_train.emergency_stop()  # 模拟目标前因速度所有权冲突而真正停放并丢 route。
+assert speed_train.is_parked() and speed_train.plan_execution is not None
+loop_plans.tick(speed_train, [speed_train])
+assert speed_train.plan_execution is not None
+assert speed_train.state.occupancy.route == [(loop_goal_edge, 1)]
+assert speed_train.v_target == PLAN_CRUISE_SPEED
+print("✅ ⑰ 计划持续持有巡航速度，目标前意外 parked 可从冻结后缀恢复")
 
 print("\n全部通过")

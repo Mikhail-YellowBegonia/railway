@@ -85,11 +85,22 @@ class PlanDispatcher:
                 self._clear_execution(train)
                 self._report_once(train, "计划被临时行车指令覆盖，等待重新对齐")
                 return
+            # 计划自动驾驶拥有本条指令期间的巡航速度。GUI 的手动巡航值可能仍为
+            # 0，若这里只在首次激活时设速，下一帧会被写回 0 并在目标前停成
+            # parked；旧逻辑随后因激活令牌仍有效而永久静默等待。
+            if item.command in (PlanCommand.GOTO, PlanCommand.GOTO_COUPLE):
+                train.v_target = max(train.v_target, PLAN_CRUISE_SPEED)
             # 新激活的极短路线可能在首次物理帧内就完成，因而不在 GameLoop
             # 的 moving_before 集合里；这里补偿该停车事件，仍只推进一次。
-            if train.is_parked() and item.command is PlanCommand.GOTO and self._at_goal(train, item):
-                plan.advance()
+            if train.is_parked() and item.command is PlanCommand.GOTO:
                 self._clear_execution(train)
+                if self._at_goal(train, item):
+                    plan.advance()
+                    return
+                # 未到目标却丢失 route/controller：从当前车头重新消费同一冻结
+                # 路线后缀。这里只做投影，不调用 P2/Dijkstra；失败由 _activate
+                # 的起点契约明确报告，不能继续保持无原因的 parked 状态。
+                self._activate(train, winner, plan, trains)
                 return
             # P4 可机械改写 FixedRoute；已有运行 route 已在同一事务中被改写。
             # 这里只同步令牌，不能从当前车头重新下单或重新寻路。
