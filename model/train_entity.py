@@ -105,6 +105,9 @@ class TrainEntity:
         # P3b：计划激活令牌和提示均是编组运行期派生，由 PlanDispatcher 写入。
         self.plan_execution = None
         self.plan_status = ""
+        # 玩家显式暂停计划自动驾驶。暂停只属于当前列车实体的运行期状态，
+        # 不移动控制车计划指针，也不修改冻结路线。
+        self.plan_paused = False
 
         # 编组作业信号豁免（docs/consist_ui.md §5.5，2026-09）：连挂驶向/解挂
         # 分离时，本车与"配对列车"之间的物理占用检查需要放开——见
@@ -223,13 +226,9 @@ class TrainEntity:
     def reverse_in_place(self) -> bool:
         """原地掉头：车头车尾定义互换，车身占用的物理边集合不变。
 
-        2026-09 语义（用户拍板，勿回退）：**只切换前进方向（逻辑），不反转
-        列车编组**（历史实现曾反转 consist，其镜像函数已于 2026-09-10 作为死代码
-        删除，见 docs/wagon_centric_data.md §6.2/T1-2）。车厢在轨道上的前后位置随掉头
-        对调（等价整列车原地旋转 180°），而 consist 列表顺序保持不变——
-        `wagons[0]` 仍是同一节车厢，成为新前进方向的头部。
-        （历史：早期实现同时 reversed_consist，会把编组顺序也倒过来，与
-        "掉头只换向、不改编组"的现实调车语义不符。）
+        列车前进方向属于编组逻辑，车厢物理朝向属于车厢。折返时反转成员顺序、
+        翻转每节 ``Wagon.orientation``，并反转轨道占用方向；这样逻辑车头/车尾
+        互换，但每节车厢的世界位置与物理朝向保持不变。
 
         **任意位置可调用**（不限死端），但要求列车车身所在轨道段没有道岔：
         车身覆盖的 occupied 边链内部节点若 `connection_count() >= 3`（道岔），
@@ -267,6 +266,19 @@ class TrainEntity:
         body_occ = OccupancyState(occupied=body_edges, occupied_offset=offset,
                                   s=occ.s, route=[])
 
+        # 计划折返与手动折返共用严格 simple_segment 约束。P0 分区同时在
+        # 度数 != 2 和二度节点过境不许可处切分，避免旧 endpoint 遍历的急折盲区。
+        from model.segments import build_partition
+        partition = build_partition(self.network)
+        segment_ids = {
+            segment.index
+            for edge_id, _direction in body_edges
+            if (segment := partition.segment_of_edge(edge_id)) is not None
+        }
+        if len(segment_ids) != 1:
+            print("折返拒绝：列车车身未完整位于同一 simple_segment")
+            return False
+
         # 车身段不得含道岔：检查边链内部连接节点（相邻两条边共享的节点）。
         for i in range(len(body_edges) - 1):
             eid, direction = body_edges[i]
@@ -278,21 +290,49 @@ class TrainEntity:
                       f"{node.connection_count()} 条分支），请先驶入无分歧线段")
                 return False
 
+        self._apply_logical_reversal(body_occ)
+        return True
+
+    def reverse_for_coupling(self) -> bool:
+        """为头头/尾尾连挂归一化逻辑首尾，不施加调度折返的区段门禁。
+
+        这是已贴合端头的机械连接内部步骤，不是玩家或计划发出的折返命令。
+        它只沿当前已占用的确定车身链重排逻辑方向，仍保持每节车厢的世界位置
+        与物理朝向；因此不要求整列位于一个 ``simple_segment``。
+        """
+        if self.controller is not None or not self.state.occupancy.occupied:
+            return False
+        occupied = list(self.state.occupancy.occupied)
+        offset = self.state.occupancy.occupied_offset
+        k = 0
+        while k < len(occupied) - 1:
+            edge_length = self.network.edges[occupied[k][0]].length
+            if offset > edge_length + 1e-9:
+                offset -= edge_length
+                k += 1
+            else:
+                break
+        body_occ = OccupancyState(
+            occupied=occupied[k:], occupied_offset=offset,
+            s=self.state.s, route=[],
+        )
+        self._apply_logical_reversal(body_occ)
+        return True
+
+    def _apply_logical_reversal(self, body_occ: OccupancyState) -> None:
+        """沿已确定的车身链翻转列车逻辑方向，并保持车厢物理姿态。"""
         self.state.occupancy = body_occ
         self.kinematics = self._build_kinematics()
-
         real_tail_bogie_abs_s = self.kinematics.real_tail_bogie_abs_s(self.state.s)
         self.state.occupancy = reverse_occupancy(
             self.network, self.state.occupancy,
             real_tail_bogie_abs_s, self.state.consist.total_length,
         )
-        # 不反转 consist（用户语义）：车厢位置随 occupied 镜像对调，
-        # wagons 顺序保持——新车头 = 原车尾那一侧的车厢。
+        self.state.consist.reverse_logical_direction()
         self.state.occupancy.route = []
         self.state.remaining_to_goal = 0.0
         self.authority_remaining = None
         self.kinematics = self._build_kinematics()
-        return True
 
     # ------------------------------------------------------------------
     # 每帧更新
@@ -501,8 +541,8 @@ class TrainEntity:
             bogie_s.append((front_s, rear_s))
             if i < len(wagons) - 1:
                 next_wagon = wagons[i + 1]
-                gap = (wagon.coupler_2_pos - wagon.bogies[1].pos) + \
-                      (next_wagon.bogies[0].pos - next_wagon.coupler_1_pos)
+                gap = (wagon.logical_rear_coupler_pos - wagon.logical_rear_bogie_pos) + \
+                      (next_wagon.logical_front_bogie_pos - next_wagon.logical_front_coupler_pos)
                 current_s = solve_rear_bogie_s(rear_s, gap, path_kin)
 
         rear_head_s = bogie_s[wagon_idx + 1][0]
@@ -579,16 +619,27 @@ class TrainEntity:
             + [de for de in self.state.occupancy.occupied if de[0] not in rear_ids]
         )
         occ_total = sum(self.network.edges[eid].length for eid, _d in merged_edges)
-        offset = rear.state.occupancy.occupied_offset  # 车尾在窗口起点后的弧长
+        head_edge_id, head_t, head_direction = self.current_directed_edge_and_t()
+        head_abs = None
+        walked = 0.0
+        for eid, direction in merged_edges:
+            edge_length = self.network.edges[eid].length
+            if (eid, direction) == (head_edge_id, head_direction):
+                local = head_t * edge_length if direction > 0 else (1.0 - head_t) * edge_length
+                head_abs = walked + local
+            walked += edge_length
+        if head_abs is None:
+            raise RuntimeError("couple_with: 合并窗口无法定位前段车头")
+        offset = 0.0
         combined = new_consist.total_length
-        if occ_total - offset < combined - 1e-6:
+        if head_abs < combined - 1e-6:
             print("⚠️ couple: 合并车身超过可用轨道覆盖，几何可能异常"
-                  f"（窗口 {occ_total - offset:.1f} m < 车身 {combined:.1f} m）")
+                  f"（窗口 {head_abs:.1f} m < 车身 {combined:.1f} m）")
 
         new_occ = OccupancyState(
             occupied=merged_edges,
             occupied_offset=offset,
-            s=combined,  # 窗口正常时 s（头相对尾偏移）= 车长
+            s=head_abs,
             route=[],
         )
         new_state = TrainState(

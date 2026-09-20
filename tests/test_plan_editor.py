@@ -12,7 +12,7 @@ from model.train_entity import TrainEntity, TrainState
 from model.train_physics import SimplePhysics
 from model.vec3 import Vec3
 from model.wagon import Consist, create_simple_car
-from model.plan import END_REAR, Plan, PlanCommand, PlanItem
+from model.plan import Plan, PlanCommand, PlanItem
 
 
 network = RailNetwork()
@@ -113,25 +113,22 @@ target = TrainEntity(
     SimplePhysics(),
 )
 ok, message = editor.append_goto_couple(target, "head")
-assert not ok and "只支持驶向目标车尾" in message
-ok, message = editor.append_goto_couple(target, "tail")
 assert ok and wagon.plan is not None and len(wagon.plan) == 1
 couple_item = wagon.plan.items[0]
 assert couple_item.command is PlanCommand.GOTO_COUPLE
-assert couple_item.train_ref.wagon_id == target_wagon.wagon_id
-assert couple_item.train_ref.end == END_REAR
+assert couple_item.train_ref is None and couple_item.couple_edge_id == e1
 assert couple_item.fixed_route is not None
 ok, message = editor.append_wait_couple()
 assert ok and len(wagon.plan) == 2
 assert wagon.plan.items[1].command is PlanCommand.WAIT_COUPLE
 ok, message = editor.finalize_cycle()
-assert ok and "一次性连挂事件链" in message
-assert not wagon.plan.repeat and not wagon.plan.requires_closed_cycle
+assert ok and "循环执行" in message
+assert wagon.plan.repeat and not wagon.plan.requires_closed_cycle
 assert wagon.plan.loop_route is None
 wagon.plan.advance()
 wagon.plan.advance()
-assert wagon.plan.is_complete and wagon.plan.current() is None
-print("✅ ⑥ 编辑态 K/W 创建并确认一次性连挂事件链，执行完毕不回绕")
+assert not wagon.plan.is_complete and wagon.plan.current() is couple_item
+print("✅ ⑥ 编辑态 K/W 创建固定-edge连挂链，计划可回绕")
 
 # ⑦ 最小管理能力：编辑态可删除当前条目或清空计划；不在数据层隐式重算路线。
 wagon.plan = Plan([PlanItem.wait_couple(), PlanItem.wait_couple()], repeat=False)

@@ -70,13 +70,16 @@ class RigidWagonKinematics:
             else:
                 wagon_heading = line_vec.normalize()
 
-            poses.append(Pose(position=wagon_pos, heading=wagon_heading))
+            poses.append(Pose(
+                position=wagon_pos,
+                heading=wagon_heading * wagon.orientation,
+            ))
 
             # 计算下一节前转向架 s（车钩间隙）
             if i < len(self.consist.wagons) - 1:
                 next_wagon = self.consist.wagons[i + 1]
-                gap = (wagon.coupler_2_pos - wagon.bogies[1].pos) + \
-                      (next_wagon.bogies[0].pos - next_wagon.coupler_1_pos)
+                gap = (wagon.logical_rear_coupler_pos - wagon.logical_rear_bogie_pos) + \
+                      (next_wagon.logical_front_bogie_pos - next_wagon.logical_front_coupler_pos)
                 current_s = solve_rear_bogie_s(rear_s, gap, self._path_kin)
             else:
                 current_s = rear_s
@@ -102,8 +105,8 @@ class RigidWagonKinematics:
             # 计算下一节前转向架 s（车钩间隙）
             if i < len(self.consist.wagons) - 1:
                 next_wagon = self.consist.wagons[i + 1]
-                gap = (wagon.coupler_2_pos - wagon.bogies[1].pos) + \
-                      (next_wagon.bogies[0].pos - next_wagon.coupler_1_pos)
+                gap = (wagon.logical_rear_coupler_pos - wagon.logical_rear_bogie_pos) + \
+                      (next_wagon.logical_front_bogie_pos - next_wagon.logical_front_coupler_pos)
                 current_s = solve_rear_bogie_s(rear_s, gap, self._path_kin)
             else:
                 current_s = rear_s
@@ -131,9 +134,14 @@ class RigidWagonKinematics:
 
             if i < len(wagons) - 1:
                 next_wagon = wagons[i + 1]
-                rear_coupler_offset = wagon.coupler_2_pos - wagon.bogies[1].pos
+                rear_coupler_offset = (
+                    wagon.logical_rear_coupler_pos - wagon.logical_rear_bogie_pos
+                )
                 rear_coupler_s = solve_rear_bogie_s(rear_s, rear_coupler_offset, self._path_kin)
-                front_coupler_offset = next_wagon.bogies[0].pos - next_wagon.coupler_1_pos
+                front_coupler_offset = (
+                    next_wagon.logical_front_bogie_pos
+                    - next_wagon.logical_front_coupler_pos
+                )
                 gap = rear_coupler_offset + front_coupler_offset
                 next_front_s = solve_rear_bogie_s(rear_s, gap, self._path_kin)
                 front_coupler_s = solve_rear_bogie_s(rear_s, front_coupler_offset, self._path_kin)
@@ -166,8 +174,8 @@ class RigidWagonKinematics:
             rear_s = solve_rear_bogie_s(current_s, wagon.bogie_spacing, self._path_kin)
             if i < len(wagons) - 1:
                 next_wagon = wagons[i + 1]
-                gap = (wagon.coupler_2_pos - wagon.bogies[1].pos) + \
-                      (next_wagon.bogies[0].pos - next_wagon.coupler_1_pos)
+                gap = (wagon.logical_rear_coupler_pos - wagon.logical_rear_bogie_pos) + \
+                      (next_wagon.logical_front_bogie_pos - next_wagon.logical_front_coupler_pos)
                 current_s = solve_rear_bogie_s(rear_s, gap, self._path_kin)
             else:
                 current_s = rear_s  # 末节后转向架
@@ -181,7 +189,9 @@ class RigidWagonKinematics:
         """
         tail_bogie_s = self.real_tail_bogie_abs_s(front_bogie_s)
         tail_wagon = self.consist.wagons[-1]
-        tail_coupler_offset = tail_wagon.coupler_2_pos - tail_wagon.bogies[1].pos
+        tail_coupler_offset = (
+            tail_wagon.logical_rear_coupler_pos - tail_wagon.logical_rear_bogie_pos
+        )
         return solve_rear_bogie_s(tail_bogie_s, tail_coupler_offset, self._path_kin)
 
     def get_end_coupler_data(self, front_bogie_s: float) -> tuple[
@@ -199,7 +209,9 @@ class RigidWagonKinematics:
 
         # 车头前车钩：首节前转向架向前偏移 bogie[0].pos - coupler_1_pos
         head_wagon = wagons[0]
-        head_offset = head_wagon.bogies[0].pos - head_wagon.coupler_1_pos
+        head_offset = (
+            head_wagon.logical_front_bogie_pos - head_wagon.logical_front_coupler_pos
+        )
         # 车头方向是正向（abs_s 本身是前转向架），前车钩在前转向架更前方
         # 用 pose_at 的 heading 外推
         head_pose = self._path_kin.pose_at(abs_s)

@@ -20,36 +20,8 @@ SAVE_PATH = "manual_track.geojson"
 PAN_BUTTONS_IDLE = {1, 2, 3}
 PAN_BUTTONS_OTHER = {2}
 
-# 控制台回显缓冲（最近 N 条，显示在游戏右下角）
-_console_messages: list[str] = []
-
-
-class _TeeLogger:
-    """把 stdout 写入同时追加到消息缓冲，保留最近 max 条。"""
-    MAX = 60
-
-    def __init__(self, lines: list[str], orig) -> None:
-        self._lines = lines
-        self._orig = orig
-        self._buf = ""
-
-    def write(self, s: str) -> None:
-        self._orig.write(s)
-        self._buf += s
-        while "\n" in self._buf:
-            line, self._buf = self._buf.split("\n", 1)
-            if line.strip():
-                self._lines.append(line)
-                if len(self._lines) > self.MAX:
-                    self._lines.pop(0)
-
-    def flush(self) -> None:
-        self._orig.flush()
-
-
 class GameLoop:
     def __init__(self, geo_path: str) -> None:
-        sys.stdout = _TeeLogger(_console_messages, sys.stdout)
         pygame.init()
         self.surface = pygame.display.set_mode((WINDOW_W, WINDOW_H), pygame.RESIZABLE)
         pygame.display.set_caption("Railway")
@@ -119,6 +91,8 @@ class GameLoop:
         self.train_v_target: float = 0.0           # 焦点列车的巡航速度（m/s）
         self.inspect_train: "TrainEntity | None" = None  # 编组面板目标（I 键切换）
         self.inspect_wagon_index: int = 0
+        # 基础调度计划选单骨架：O 键开关。当前只读，后续交互在此入口扩展。
+        self.plan_menu_open: bool = False
         # 车钩悬停状态（docs/consist_ui.md F 阶段完整 UI）：
         # None = 未悬停；否则 (列车, kind, key)——
         #   kind='internal', key=int(i)  → 第 i 个节间车钩（decouple_at(i) 的解挂点）
@@ -178,6 +152,7 @@ class GameLoop:
                 if not (self.plan_editor.active and self.plan_editor.train is t):
                     self.plan_dispatcher.tick(t, self.trains)
                 self.dispatcher.tick(t, dt, t.v_target, self.trains)
+            self._execute_plan_decouples()
             just_stopped = [t for t in self.trains
                             if id(t) in moving_before and t.is_parked()]
             for t in just_stopped:
@@ -329,11 +304,9 @@ class GameLoop:
                     self.renderer.surface, self.renderer._font,
                     self.active_train, self.plan_editor.active,
                 )
-            # 右下角控制台回显
-            from view.renderer import (draw_console_log, draw_train_tooltip,
-                                       draw_consist_panel, draw_coupler_highlight,
+            from view.renderer import (draw_train_tooltip, draw_consist_panel,
+                                       draw_coupler_highlight,
                                        draw_end_coupler_highlight, draw_text_tooltip)
-            draw_console_log(self.renderer.surface, self.renderer._font, _console_messages)
             # PLAY 模式：车钩悬停检测 + 高亮 + tooltip（docs/consist_ui.md §4/§5）
             if self.editor.mode == EditMode.PLAY:
                 self._hovered_coupler = self._hit_test_coupler(mouse_world)
@@ -399,6 +372,12 @@ class GameLoop:
                 draw_consist_panel(
                     self.renderer.surface, self.renderer._font,
                     idx, self.inspect_train, self.inspect_wagon_index,
+                )
+            if self.plan_menu_open and self.active_train in self.trains:
+                from view.renderer import draw_schedule_menu
+                draw_schedule_menu(
+                    self.renderer.surface, self.renderer._font,
+                    self.trains.index(self.active_train) + 1, self.active_train,
                 )
             pygame.display.flip()
             self.clock.tick(60)
@@ -470,6 +449,9 @@ class GameLoop:
         if self._handle_inspect_control_key(event):
             return
         if event.key == pygame.K_ESCAPE:
+            if self.plan_menu_open:
+                self.plan_menu_open = False
+                return
             if self.plan_editor.active:
                 ok, message = self.plan_editor.finalize_cycle()
                 print(message)
@@ -499,6 +481,13 @@ class GameLoop:
             else:
                 _ok, message = self.plan_editor.enter(self.active_train)
                 print(message)
+        elif event.key == pygame.K_o:
+            if self.editor.mode != EditMode.PLAY:
+                print("调度计划选单只在 PLAY 模式可用")
+            elif self.active_train is None:
+                print("调度计划选单：请先选中列车")
+            else:
+                self.plan_menu_open = not self.plan_menu_open
         elif event.key == pygame.K_BACKSPACE and self.plan_editor.active:
             print(self.plan_editor.backspace())
         elif event.key == pygame.K_DELETE and self.plan_editor.active:
@@ -515,11 +504,15 @@ class GameLoop:
                 print("计划编辑错误：请悬停其它列车的车尾后按 K")
             else:
                 target, kind, end = self._hovered_coupler
-                if kind != "end":
-                    print("计划编辑错误：内部车钩不能作为前往连挂目标")
+                if kind == "internal":
+                    _ok, message = self.plan_editor.append_decouple(int(end) + 1)
+                    print(message)
                 else:
                     _ok, message = self.plan_editor.append_goto_couple(target, str(end))
                     print(message)
+        elif event.key == pygame.K_r and self.plan_editor.active:
+            _ok, message = self.plan_editor.append_reverse()
+            print(message)
         elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER) and self.plan_editor.active:
             _ok, message = self.plan_editor.confirm()
             print(message)
@@ -613,8 +606,8 @@ class GameLoop:
             elif event.key == pygame.K_k and self.editor.mode == EditMode.PLAY:
                 print("PLAY: 悬停列车内部车钩按 K 解挂，悬停其它列车端头车钩按 K 连挂")
         elif event.key == pygame.K_r:
-            # R 键（PLAY 模式）：选中列车原地折返——只切换前进方向（逻辑），
-            # 不改编组顺序；任意位置可用，但要求列车停放、车身所在段无道岔。
+            # R 键（PLAY 模式）：选中列车原地折返——互换列车逻辑首尾，保持
+            # 每节车厢物理姿态；要求列车停放并完整位于 strict simple_segment。
             # 2026-09 用户要求（服务"玩家手动要求列车折返"场景）。
             if self.editor.mode != EditMode.PLAY:
                 print("PLAY: R 折返只在 PLAY 模式可用（P 键进入）")
@@ -626,10 +619,11 @@ class GameLoop:
                 t = self.active_train
                 if t.reverse_in_place():
                     print(f"PLAY: 列车 #{self.trains.index(t)+1} 已原地折返"
-                          f"（只换前进方向，编组顺序不变）")
+                          f"（逻辑首尾互换，车厢物理朝向保持）")
                 # 失败原因由 reverse_in_place 打印（跨道岔等）
         elif event.key == pygame.K_SPACE:
-            # 空格键：PLAY 模式且悬停内部车钩(停放) = 解挂确认；否则 = 列车紧急停止
+            # 空格键：PLAY 模式且悬停内部车钩(停放) = 解挂确认；否则，有计划的
+            # 列车切换自动驾驶暂停，无计划列车执行紧急停止。
             # （行驶中按空格仍应能紧急停车，不能被悬停语义吞掉；非 PLAY 模式
             # 残留的 _hovered_coupler 不应占用空格，避免 BUILD 里误吞急停）
             if (self.editor.mode == EditMode.PLAY
@@ -639,9 +633,23 @@ class GameLoop:
                     self._decouple_at_hovered(train, int(key))
                     return
             if self.active_train is not None:
-                self.active_train.emergency_stop()
-                self.train_v_target = 0.0
-                print("列车紧急停止")
+                train = self.active_train
+                winner = train.state.consist.control_winner()
+                has_plan = winner is not None and winner.plan is not None
+                if has_plan:
+                    paused = not train.plan_paused
+                    self.plan_dispatcher.set_paused(train, paused)
+                    if paused:
+                        self.train_v_target = 0.0
+                        print("计划自动驾驶已暂停；再次按空格继续")
+                    else:
+                        from model.plan_dispatch import PLAN_CRUISE_SPEED
+                        self.train_v_target = PLAN_CRUISE_SPEED
+                        print("计划自动驾驶继续")
+                else:
+                    train.emergency_stop()
+                    self.train_v_target = 0.0
+                    print("列车紧急停止")
     def _handle_mouse_down(self, event: pygame.event.Event) -> None:
         # 滚轮先处理（不参与平移逻辑）
         if event.button in (4, 5):
@@ -764,6 +772,35 @@ class GameLoop:
             return
         print("计划编辑错误：请点击节点或轨道")
 
+    def _execute_plan_decouples(self) -> None:
+        """在列车 tick 遍历结束后原子执行计划解挂，避免迭代中修改列表。"""
+        for action in self.plan_dispatcher.take_decouple_actions():
+            train = action.train
+            if train not in self.trains:
+                continue
+            current = action.plan.current()
+            if (current is not action.item
+                    or train.state.consist.control_winner() is not action.winner):
+                train.plan_execution = None
+                continue
+            try:
+                front, rear = train.decouple_at(action.after - 1)
+            except (RuntimeError, ValueError) as exc:
+                train.plan_execution = None
+                print(f"计划解挂失败：{exc}")
+                continue
+            action.plan.advance()
+            front.plan_execution = None
+            rear.plan_execution = None
+            idx = self.trains.index(train)
+            self.trains[idx:idx + 1] = [front, rear]
+            if self.active_train is train:
+                self.active_train = front if action.winner in front.state.consist.wagons else rear
+            print(
+                f"计划解挂：从车头后第 {action.after} 位切开，"
+                f"{len(front.state.consist.wagons)}+{len(rear.state.consist.wagons)} 节"
+            )
+
     def _decouple_at_hovered(self, train: "TrainEntity", coupler_idx: int) -> None:
         """解挂确认（docs/consist_ui.md §4）：悬停内部车钩 + K/空格/回车。
 
@@ -797,9 +834,9 @@ class GameLoop:
         """K 键手动连挂确认（docs/consist_ui.md §5）：悬停其它列车端头车钩 + K。
 
         三情形（§5.2，就近对接语义，2026-09 用户拍板；2026-09 bug1 放宽门槛）：
-        - 已贴住（<1m、同向、双停）→ 立即 couple；
-        - 可前进驶向对接（两车同向停放、B 尾钩在 A 车头前方、未超护栏距离）→
-          下达驶向指令（目标 = B 尾钩，可达性由寻路判定，允许隔弧/隔节点/
+        - 已贴住（<1m、端头共线、双停）→ 立即 couple；
+        - 可前进驶向对接（目标任一暴露端在 A 车头前方且未超护栏距离）→
+          下达驶向指令（可达性由寻路判定，允许隔弧/隔节点/
           隔岔路的远距驶向），停车事件自动连挂接管（§5.2/§9-4 定稿）；
         - 其余（已越过目标需倒车 / 逆行对顶 / 未停）→ 提示，不下达。
         K 键与右键吸附车钩**语义等价**（§9 定稿），目标端 head/tail 都接受——
@@ -840,17 +877,17 @@ class GameLoop:
 
         goal = drive_couple_goal(front, target_train)
         if goal is None:
-            print(f"PLAY: 无法连挂——两车需**同向停放**、本车车头朝前且在对方"
-                  f"车尾的**后方**（相距过远或已越过对方时先手动行驶到其后方，"
+            print(f"PLAY: 无法连挂——目标列车没有位于本车前进方向内的可用端头"
+                  f"（相距过远或已越过目标时先手动调整位置，"
                   f"本版本不支持倒车连挂）")
             return
         _edge_id, _t = goal
         # stop_before = 本车车钩与头转向架的间距：停车点是头转向架，但连挂要让
         # **车钩** 停在对方尾钩处，须提前该距离停车（_apply_route_result 说明）。
         self._issue_goal_order(front, _edge_id, _t,
-                               f"连挂 #{self.trains.index(target_train)+1} 车尾",
+                               f"连挂 #{self.trains.index(target_train)+1} 端头",
                                stop_before_m=head_hook_offset(front),
-                               goal_direction=target_train.current_direction(),
+                               goal_direction=front.current_direction(),
                                ignore_signals=True)
         # 信号豁免（docs/consist_ui.md §5.5）：驶向连挂目标时，调度层对本车
         # 全放行（dispatch._resolve_couple_target → 调车分支），允许开进对方
@@ -858,13 +895,13 @@ class GameLoop:
         # update 的 min(remaining, authority) 保证不压线）。
         front.couple_approach_partner = target_train
         print(f"PLAY: 已下达驶向 #{self.trains.index(target_train)+1} "
-              f"车尾指令，到位后自动连挂")
+              f"端头指令，到位后自动连挂")
 
     def _auto_couple_on_stop(self, stopped: "TrainEntity") -> None:
         """停车事件自动连挂（docs/consist_ui.md §5.2/§9-4，2026-09 定稿）。
 
         在 run() 每帧检测到某列车刚由行驶变停放时调用一次：扫描全部其它
-        停放列车，端头车钩 <1m 且同向即自动 couple（距离最近优先）。普通
+        停放列车，端头车钩 <1m 且共线即自动 couple（距离最近优先）。普通
         右键寻路只要停在别的列车端头车钩旁就会自动挂上，无需再按 K。
         """
         from controller.coupling import find_couple_pair
@@ -882,11 +919,41 @@ class GameLoop:
             {wagon.wagon_id for wagon in train.state.consist.wagons}
             for train in (merged_head, merged_rear)
         )
+        control_wagons = [
+            wagon
+            for participant in (merged_head, merged_rear)
+            for wagon in participant.state.consist.wagons
+            if wagon.have_control
+        ]
+        future_winner = min(
+            control_wagons, key=lambda wagon: (-wagon.priority, wagon.wagon_id),
+            default=None,
+        )
+        expected_target_wagon_id = next(
+            (
+                execution.target_wagon_id
+                for participant in (merged_head, merged_rear)
+                if (execution := getattr(participant, "plan_execution", None)) is not None
+                and future_winner is not None
+                and execution.wagon_id == future_winner.wagon_id
+            ),
+            None,
+        )
+        if match.reverse_head and not merged_head.reverse_for_coupling():
+            print("PLAY: 连挂失败，前段无法完成逻辑方向归一化")
+            return
+        if match.reverse_rear and not merged_rear.reverse_for_coupling():
+            if match.reverse_head:
+                merged_head.reverse_for_coupling()
+            print("PLAY: 连挂失败，后段无法完成逻辑方向归一化")
+            return
         new_train = merged_head.couple_with(merged_rear)
         self.trains.remove(merged_head)
         self.trains.remove(merged_rear)
         self.trains.append(new_train)
-        self.plan_dispatcher.on_coupled(new_train, participant_wagon_groups)
+        self.plan_dispatcher.on_coupled(
+            new_train, participant_wagon_groups, expected_target_wagon_id,
+        )
         self.active_train = new_train
         self.train_path = None
         self.inspect_train = None
@@ -1212,10 +1279,9 @@ class GameLoop:
         方向歧义），但 PLAY 模式下玩家右键点选轨道并不表达"以哪个方向进站"
         的意图，所以在这一层统一枚举两个方向。
 
-        fixed_goal_direction: 连挂驶向用（2026-09 bug2）：到达方向必须使
-        车头在目标钩位处与目标列车同向——枚举 -1 时可能找到"绕行后从反方向
-        接近目标车尾"的路径（A 冲到 B 尾旁却因朝向不符连不上）。传 B 的
-        current_direction() 时只尝试该方向，绕行反向接近自然判不可达。其余
+        fixed_goal_direction: 连挂驶向用：到达方向固定为本车当前逻辑前进方向，
+        防止寻路为了更短路径擅自选择相反到达方向。目标列车可同向或反向，端头
+        配对由停车后的四端组合归一化处理。其余
         场景（右键普通寻路）不传，保持枚举。
 
         ignore_signals: 连挂驶向用（2026-09 bug2 现场，用户裁决"调车忽略
@@ -1318,9 +1384,8 @@ class GameLoop:
         远场寻路（Dijkstra，默认只看拓扑 + One-Way PBS 反方向硬性禁止）选方向
         -> 下达完整远场 route。
 
-        goal_direction: 连挂驶向用——固定到达方向为目标列车 current_direction()
-        （否则枚举 ±1 时，单向信号迫使绕行会让车从**反方向**接近目标车尾，
-        贴上了却因朝向不符连不上）。普通右键寻路不传（保持枚举）。
+        goal_direction: 连挂驶向用——固定为本车当前逻辑前进方向，避免寻路擅自
+        改变接近方向；目标端自身朝向不作为拒绝条件。普通右键寻路不传。
 
         ignore_signals: 连挂驶向用（2026-09 用户裁决"调车忽略一切限制"）——
         寻路过滤用纯拓扑（忽略 One-Way 背面禁行），配合 dispatch 的调车全放行
@@ -1389,7 +1454,7 @@ class GameLoop:
 
         # Couple-2：检查是否吸附到其他列车端头车钩（5m 范围内）。
         # 与 K 键语义等价（2026-09 定稿）：吸附命中后走 drive_couple_goal 宽松栅栏
-        # 判定（同向 + 前方 + 护栏距离），可达性交给寻路，不再是"无条件把车头开到
+        # 判定（前方 + 护栏距离），可达性交给寻路，不再是"无条件把车头开到
         # 任意端头坐标"（那会在目标在身后时绕大圈/折返边，见 docs/consist_ui.md §5.2）。
         COUPLE_SNAP = 5.0
         snapped_target = None  # 被吸附端头车钩所属的列车（连挂豁免用，§5.5）
@@ -1410,14 +1475,13 @@ class GameLoop:
             from controller.coupling import drive_couple_goal, head_hook_offset
             goal = drive_couple_goal(train, snapped_target)
             if goal is None:
-                print(f"PLAY: 无法连挂——两车需同向停放、本车车头朝前且在对方"
-                      f"车尾的后方（不支持倒车连挂）")
+                print("PLAY: 无法连挂——前进方向内没有可用端头（不支持倒车连挂）")
                 return
             goal_edge_id, goal_t = goal
             self._issue_goal_order(train, goal_edge_id, goal_t,
-                                   f"连挂 #{self.trains.index(snapped_target)+1} 车尾",
+                                   f"连挂 #{self.trains.index(snapped_target)+1} 端头",
                                    stop_before_m=head_hook_offset(train),
-                                   goal_direction=snapped_target.current_direction(),
+                                   goal_direction=train.current_direction(),
                                    ignore_signals=True)
             train.couple_approach_partner = snapped_target
             print(f"PLAY: 吸附到列车 #{self.trains.index(snapped_target)+1} 车钩，"

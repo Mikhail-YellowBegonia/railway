@@ -127,6 +127,9 @@ class Wagon:
     config: WagonConfig
     data_log: WagonDataLog = field(default_factory=WagonDataLog)
     plan: "Plan | None" = None
+    orientation: int = 1
+    # 物理前端（config 的 coupler_1 一侧）相对编组逻辑前进方向。
+    # +1 = 同向，-1 = 反向；连挂/解挂时随车厢对象保留。
     # [A·状态] 本车厢自己的数据包（未来承载调度命令/状态标记；近期无生产者）。
     # 2026-09-10 从 `Consist` 迁入、再从 `WagonConfig` 移到本类（T2-2 → 本次拆分）：
     # 数据包和计划**随车厢走**，解挂/连挂不需要任何归并/拆分记账（见 Q9）。
@@ -177,6 +180,34 @@ class Wagon:
     @property
     def bogie_spacing(self) -> float:
         return self.config.bogie_spacing
+
+    def __post_init__(self) -> None:
+        if self.orientation not in (1, -1):
+            raise ValueError(f"Wagon.orientation={self.orientation} 非法（应为 ±1）")
+
+    @property
+    def logical_front_bogie_pos(self) -> float:
+        if len(self.bogies) != 2:
+            raise ValueError(f"车厢需要恰好 2 个转向架，当前 {len(self.bogies)} 个")
+        return self.bogies[0].pos if self.orientation > 0 else self.length - self.bogies[1].pos
+
+    @property
+    def logical_rear_bogie_pos(self) -> float:
+        if len(self.bogies) != 2:
+            raise ValueError(f"车厢需要恰好 2 个转向架，当前 {len(self.bogies)} 个")
+        return self.bogies[1].pos if self.orientation > 0 else self.length - self.bogies[0].pos
+
+    @property
+    def logical_front_coupler_pos(self) -> float:
+        return self.coupler_1_pos if self.orientation > 0 else self.length - self.coupler_2_pos
+
+    @property
+    def logical_rear_coupler_pos(self) -> float:
+        return self.coupler_2_pos if self.orientation > 0 else self.length - self.coupler_1_pos
+
+    def reverse_relative_to_consist(self) -> None:
+        """编组逻辑方向翻转时保持本车物理朝向不变。"""
+        self.orientation *= -1
 
     # ------------------------------------------------------------------
     # 每帧更新钩子（车厢 tick）
@@ -275,6 +306,12 @@ class Consist:
         不再需要归并记账（T2-2）。
         """
         return Consist(wagons=self.wagons + rear.wagons)
+
+    def reverse_logical_direction(self) -> None:
+        """翻转编组逻辑首尾，同时保持每节车厢的物理朝向。"""
+        self.wagons.reverse()
+        for wagon in self.wagons:
+            wagon.reverse_relative_to_consist()
 
 
 # ===== D2: 弧长/割线求解器 =====

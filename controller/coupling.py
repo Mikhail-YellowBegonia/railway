@@ -6,8 +6,8 @@
 哪列车的哪个端头连挂 / 谁离谁最近"，供 GameLoop 交互与端到端测试共用。
 
 关键语义（与 specs §5 一致）：
-- 物理配对只允许"反向端"贴一起：A 车尾钩 ↔ B 车头钩，或 A 车头钩 ↔ B 车尾钩。
-  车头对车头 / 车尾对车尾一律拒绝。
+- 四种暴露端组合都可形成机械连接。头头/尾尾会先归一化其中一列的**逻辑**
+  首尾，再按“前段尾钩 ↔ 后段头钩”合并；车厢对象自身的物理朝向不变。
 - 连挂要求两车都停放（is_parked），数据层 couple_with/decouple_at 自带断言，
   这里不重复抛错，只返回判定结果，由调用方决定提示。
 
@@ -21,10 +21,9 @@
 修复（三层，判据按使用场景分家，勿回退）：
 1. **已贴住（<1m）判定**用接触端各自的切线方向（end_heading：head 端取首节
    车厢 heading，tail 端取末节车厢 heading）——贴住时两端头位置几乎重合，切线
-   天然一致，不会误杀；反向重叠（头对头贴住）时接触端切线相反，正确拒绝。
-2. **驶向连挂（未贴住）预判**用**整列车列方向**（头钩−尾钩连线近似）判同向，
-   不用端头切线（端头切线随弧角分叉，同向弧上相距远会误杀合法追尾）——
-   只保留"同向 + 前方 + 护栏距离"宽松栅栏，**可达性交给 find_path_from_point**
+   天然共线，不会误杀；取点积绝对值，因此头对头也可连挂。
+2. **驶向连挂（未贴住）预判**不再要求两列车逻辑同向，只扫描本车前进半平面内
+   最近的目标暴露端，并保留护栏距离；**可达性交给 find_path_from_point**
    （支持折返 allow_reversal=True，隔弧/隔节点/隔岔路都能驶向）。见
    `drive_couple_goal` 与 docs/consist_ui.md §5.2（2026-09 bug1 放宽记录）。
 """
@@ -53,6 +52,8 @@ class CoupleMatch:
     merged_head: "TrainEntity"
     merged_rear: "TrainEntity"
     pair_dist: float
+    reverse_head: bool = False
+    reverse_rear: bool = False
 
 
 def end_coupler_pos(train: "TrainEntity", which: str):
@@ -90,16 +91,47 @@ def head_hook_offset(train: "TrainEntity") -> float:
     stop_before_m 参数）。
     """
     wagon = train.state.consist.wagons[0]
-    return wagon.bogies[0].pos - wagon.coupler_1_pos
+    return wagon.logical_front_bogie_pos - wagon.logical_front_coupler_pos
 
 
 def _ends_aligned(a: "TrainEntity", a_end: str, b: "TrainEntity", b_end: str) -> bool:
-    """接触端切线方向是否一致（点积 > HEADING_DOT）。按端各取各的 heading。"""
+    """接触端是否共线；同向和反向车厢都可形成有效机械连接。"""
     ha = end_heading(a, a_end)
     hb = end_heading(b, b_end)
     if ha is None or hb is None:
         return False
-    return ha.dot(hb) >= HEADING_DOT
+    return abs(ha.dot(hb)) >= HEADING_DOT
+
+
+def couple_match_for_ends(
+    train_a: "TrainEntity",
+    a_end: str,
+    train_b: "TrainEntity",
+    b_end: str,
+    max_dist: float = COUPLE_DIST,
+) -> CoupleMatch | None:
+    """把任意两个接触端归一化成“逻辑前段尾钩 ↔ 逻辑后段头钩”。
+
+    头头或尾尾连接会在合并前逻辑折返其中一列。折返同时翻转车厢相对编组的
+    orientation，因此不会改变任一车厢的世界位置或物理朝向。
+    """
+    if train_a is train_b or not train_a.is_parked() or not train_b.is_parked():
+        return None
+    a_data = end_coupler_pos(train_a, a_end)
+    b_data = end_coupler_pos(train_b, b_end)
+    distance = (a_data[0] - b_data[0]).length()
+    if distance >= max_dist or not _ends_aligned(train_a, a_end, train_b, b_end):
+        return None
+
+    if a_end == "tail" and b_end == "head":
+        return CoupleMatch(train_a, train_b, distance)
+    if a_end == "head" and b_end == "tail":
+        return CoupleMatch(train_b, train_a, distance)
+    if a_end == "head" and b_end == "head":
+        return CoupleMatch(train_b, train_a, distance, reverse_head=True)
+    if a_end == "tail" and b_end == "tail":
+        return CoupleMatch(train_a, train_b, distance, reverse_rear=True)
+    return None
 
 
 # 连挂驶向的护栏距离（米）：A 头钩 → B 尾钩 直线距离超过此值不下达。这只是
@@ -113,13 +145,11 @@ def drive_couple_goal(
     train_a: "TrainEntity",
     target_train: "TrainEntity",
 ) -> tuple[int, float] | None:
-    """判定 train_a 能否"前进驶向 target_train 车尾"完成连挂，返回目标 (edge_id, t)。
+    """选择 train_a 前进方向上最近的目标暴露端，返回目标 (edge_id, t)。
 
     本仓库**没有倒车能力**（`advance_occupied_path` 只沿 route 正向推进，
-    `reverse_in_place` 是原地掉头不是物理倒车），因此只支持一种布局：A 与
-    target 同向停放、A 车头朝前、target 尾钩在 A 车头前方。判定是"必要不充分"
-    的宽松栅栏，**能否真到由寻路决定**（两车隔着弧/节点/岔路都能驶向，只要
-    沿轨道正向可达）。
+    `reverse_in_place` 是原地逻辑换向不是物理倒车）。目标可以同向或反向停放：
+    头对头接触后可通过逻辑方向归一化连接，车厢物理朝向保持不变。
 
     2026-09 bug1 放宽记录（用户拍板"先放宽就近对接门槛"）：旧版两处误杀——
     1) 端头切线一致判据（`_ends_aligned`，HEADING_DOT=0.9 ≈ 25.8°）：同向两车
@@ -148,22 +178,18 @@ def drive_couple_goal(
     b_tail = end_coupler_pos(target_train, "tail")
     b_head = end_coupler_pos(target_train, "head")
 
-    # 护栏：直线距离（防误触远方列车；可达性交给寻路）。
-    dist = (b_tail[0] - a_head[0]).length()
-    if not (0.0 < dist <= DRIVE_COUPLE_MAX_DIST):
-        return None
-
-    # 同向判据（车列方向 = 头钩 − 尾钩，弧上同向不随弧角分叉）。
     a_forward = a_head[0] - a_tail[0]
-    b_forward = b_head[0] - b_tail[0]
-    if a_forward.dot(b_forward) <= 0.0:
+    candidates: list[tuple[float, int, float]] = []
+    for endpoint in (b_head, b_tail):
+        delta = endpoint[0] - a_head[0]
+        distance = delta.length()
+        if (0.0 < distance <= DRIVE_COUPLE_MAX_DIST
+                and delta.dot(a_forward) > 0.0):
+            candidates.append((distance, endpoint[1], endpoint[2]))
+    if not candidates:
         return None
-
-    # 前方判据：B 尾钩须在 A 车头前进方向的前半平面（防已越过/身后绕大圈）。
-    if (b_tail[0] - a_head[0]).dot(a_forward) <= 0.0:
-        return None
-
-    return (b_tail[1], b_tail[2])
+    _distance, edge_id, t = min(candidates)
+    return edge_id, t
 
 
 def find_couple_pair(
@@ -194,19 +220,13 @@ def find_couple_pair(
         b_head = end_coupler_pos(other, "head")
         b_tail = end_coupler_pos(other, "tail")
 
-        # A 尾 ↔ B 头：A 在前面、B 跟在后面 → A 当头，B 挂 A 尾。
-        # 接触端 = A 车尾端 · B 车头端。
-        d1 = (a_tail[0] - b_head[0]).length()
-        if d1 < max_dist and _ends_aligned(train_a, "tail", other, "head"):
-            if best is None or d1 < best.pair_dist:
-                best = CoupleMatch(merged_head=train_a, merged_rear=other, pair_dist=d1)
-
-        # A 头 ↔ B 尾：B 在前面、A 跟在后面 → B 当头，A 挂 B 尾。
-        # 接触端 = A 车头端 · B 车尾端。
-        d2 = (a_head[0] - b_tail[0]).length()
-        if d2 < max_dist and _ends_aligned(train_a, "head", other, "tail"):
-            if best is None or d2 < best.pair_dist:
-                best = CoupleMatch(merged_head=other, merged_rear=train_a, pair_dist=d2)
+        for a_end, b_end in (
+            ("tail", "head"), ("head", "tail"),
+            ("head", "head"), ("tail", "tail"),
+        ):
+            match = couple_match_for_ends(train_a, a_end, other, b_end, max_dist)
+            if match is not None and (best is None or match.pair_dist < best.pair_dist):
+                best = match
 
     return best
 
@@ -234,16 +254,14 @@ def try_couple_to(
     if not train_a.is_parked() or not target_train.is_parked():
         return None
 
-    if target_end == "head":
-        b_head = end_coupler_pos(target_train, "head")
-        a_tail = end_coupler_pos(train_a, "tail")
-        d = (a_tail[0] - b_head[0]).length()
-        if d < max_dist and _ends_aligned(train_a, "tail", target_train, "head"):
-            return CoupleMatch(merged_head=train_a, merged_rear=target_train, pair_dist=d)
-    else:  # target_end == 'tail'
-        b_tail = end_coupler_pos(target_train, "tail")
-        a_head = end_coupler_pos(train_a, "head")
-        d = (a_head[0] - b_tail[0]).length()
-        if d < max_dist and _ends_aligned(train_a, "head", target_train, "tail"):
-            return CoupleMatch(merged_head=target_train, merged_rear=train_a, pair_dist=d)
-    return None
+    if target_end not in ("head", "tail"):
+        return None
+    # 明确目标端时，尝试本车两个暴露端；计划连挂会直接指定本车 head。
+    best = None
+    for own_end in ("head", "tail"):
+        match = couple_match_for_ends(
+            train_a, own_end, target_train, target_end, max_dist,
+        )
+        if match is not None and (best is None or match.pair_dist < best.pair_dist):
+            best = match
+    return best

@@ -1,8 +1,7 @@
-"""调度计划的数据类型（计划层 P1 / P3a：**纯模型，无运行消费点**）。
+"""调度计划的数据类型（计划层 P1 / P3a / P7b）。
 
 规格：`docs/plan_layer_roadmap.md` §2（Q23-1 定稿）。本模块**只定义数据结构与
-自洽校验**，不产生任何行为、不被任何运行链路引用（P1 阶段的纪律；消费点从 P3 起
-才接）。
+自洽校验**；运行消费点位于 ``model.plan_dispatch``，本模块不执行列车行为。
 
 **模型要点**（逐条对应已拍板结论）：
 
@@ -16,11 +15,11 @@
   Q22-5）⇒ 不需要独立的控制点概念，`Anchor.exit_edge_id` 给定时即控制点。
 - **终点沿用现有 `TrainEntity.goal` 的三元组** `(edge_id, t, direction)`，
   允许停在边中途（站台停靠不需要新实体）。
-- **demo 命令集合 = `goto` / `goto_couple` / `wait_couple`，无跳转命令**（Q23-8）：
-  循环只靠"走完回绕第一项"。
+- **demo 命令集合 = `goto` / `goto_couple` / `wait_couple` / `decouple` /
+  `reverse`，无跳转命令**（Q23-8）：循环只靠"走完回绕第一项"。
 - **引用一律落在物理要素上**（Q22-2）：锚点 → `node_id`、控制点 → `edge_id`、
-  终点 → `(edge_id, t)`；连挂目标 → **目标车厢的 `wagon_id`**（见 `TrainRef`：
-  车厢是稳定主体，连挂/解挂只重组编组、不销毁车厢，故它比"列车对象引用"稳）。
+  终点 → `(edge_id, t)`；demo 新连挂目标 → **固定 `edge_id`**，运行时按冻结路线
+  进入方向选择第一个可达暴露端。旧式 `TrainRef(wagon_id,end)` 仅保留兼容。
   **"段（simple_segment）"不参与引用**（`model/segments.py` 只作派生视图）。
 - **失效语义的判据由本模块提供**（Q23-2 的"永久失效 = 引用对象不存在"）：
   `validate(...)` 在给出 network 时检查节点/边是否仍存在、控制点出口是否可达。
@@ -52,11 +51,13 @@ END_REAR = -1
 
 
 class PlanCommand(Enum):
-    """计划条目的命令（demo 三条，**无跳转命令**，Q23-7/Q23-8）。"""
+    """计划条目的命令（无跳转命令，循环靠计划自然回绕）。"""
 
     GOTO = "goto"                # 前往：走到目标点并停稳（自然步进）
     GOTO_COUPLE = "goto_couple"  # 前往连挂：开到指定车厢的指定端头并完成连挂（事件步进）
     WAIT_COUPLE = "wait_couple"  # 等待连挂：原地等待别的列车来连挂（只由事件推进）
+    DECOUPLE = "decouple"        # 解挂：从逻辑车头后第 n 位切开（动作完成即步进）
+    REVERSE = "reverse"          # 折返：在同一 simple_segment 内切换逻辑方向
 
 
 #: 命令的中文名（GUI 展示 / 失效提示用；Q23-3 要求失效条目"可见 + 带原因"）。
@@ -64,6 +65,8 @@ COMMAND_LABELS: dict[PlanCommand, str] = {
     PlanCommand.GOTO: "前往",
     PlanCommand.GOTO_COUPLE: "前往连挂",
     PlanCommand.WAIT_COUPLE: "等待连挂",
+    PlanCommand.DECOUPLE: "解挂",
+    PlanCommand.REVERSE: "折返",
 }
 
 
@@ -192,6 +195,8 @@ class PlanItem:
     command: PlanCommand
     goal: Goal | None = None
     train_ref: TrainRef | None = None
+    couple_edge_id: int | None = None
+    decouple_after: int | None = None
     anchors: tuple[Anchor, ...] = ()
     fixed_route: FixedRoute | None = None
 
@@ -213,13 +218,16 @@ class PlanItem:
     @classmethod
     def goto_couple(
         cls,
-        train_ref: TrainRef,
+        train_ref: TrainRef | None = None,
         anchors: tuple[Anchor, ...] = (),
         fixed_route: FixedRoute | None = None,
+        *,
+        edge_id: int | None = None,
     ) -> PlanItem:
         return cls(
             command=PlanCommand.GOTO_COUPLE,
             train_ref=train_ref,
+            couple_edge_id=edge_id,
             anchors=anchors,
             fixed_route=fixed_route,
         )
@@ -227,6 +235,14 @@ class PlanItem:
     @classmethod
     def wait_couple(cls) -> PlanItem:
         return cls(command=PlanCommand.WAIT_COUPLE)
+
+    @classmethod
+    def decouple(cls, after: int) -> PlanItem:
+        return cls(command=PlanCommand.DECOUPLE, decouple_after=after)
+
+    @classmethod
+    def reverse(cls) -> PlanItem:
+        return cls(command=PlanCommand.REVERSE)
 
     @property
     def label(self) -> str:
@@ -253,10 +269,12 @@ class PlanItem:
             if self.train_ref is not None:
                 problems.append(f"{label}：不应带连挂目标 train_ref")
         elif self.command is PlanCommand.GOTO_COUPLE:
-            if self.train_ref is None:
-                problems.append(f"{label}：缺少连挂目标 train_ref")
+            if self.train_ref is None and self.couple_edge_id is None:
+                problems.append(f"{label}：缺少连挂目标（固定 edge 或兼容车厢引用）")
+            if self.train_ref is not None and self.couple_edge_id is not None:
+                problems.append(f"{label}：不能同时指定车厢和固定 edge")
             if self.goal is not None:
-                problems.append(f"{label}：不应带终点 goal（目标由 train_ref 给出）")
+                problems.append(f"{label}：不应带终点 goal（目标由运行时端头给出）")
         elif self.command is PlanCommand.WAIT_COUPLE:
             if self.goal is not None or self.train_ref is not None:
                 problems.append(f"{label}：不应带终点或连挂目标")
@@ -264,6 +282,18 @@ class PlanItem:
                 problems.append(f"{label}：不应带路径限定（等待条目不产生路径）")
             if self.fixed_route is not None:
                 problems.append(f"{label}：不应带固定路径")
+        elif self.command is PlanCommand.DECOUPLE:
+            if self.decouple_after is None or self.decouple_after < 1:
+                problems.append(f"{label}：车头后解挂位次必须 >= 1")
+            if (self.goal is not None or self.train_ref is not None
+                    or self.couple_edge_id is not None or self.anchors
+                    or self.fixed_route is not None):
+                problems.append(f"{label}：不应带路径或连挂目标")
+        elif self.command is PlanCommand.REVERSE:
+            if (self.goal is not None or self.train_ref is not None
+                    or self.couple_edge_id is not None or self.decouple_after is not None
+                    or self.anchors or self.fixed_route is not None):
+                problems.append(f"{label}：不应带其它载荷")
 
         if require_fixed_route and self.command in (
             PlanCommand.GOTO, PlanCommand.GOTO_COUPLE,
@@ -283,6 +313,11 @@ class PlanItem:
         # ③ 连挂目标自洽
         if self.train_ref is not None:
             problems.extend(f"{label}：{p}" for p in self.train_ref.validate())
+        if (self.couple_edge_id is not None and network is not None
+                and self.couple_edge_id not in network.edges):
+            problems.append(
+                f"{label}：固定连挂边 {self.couple_edge_id} 不存在（引用永久失效）"
+            )
 
         # ④ 固定路径。P3a 允许未确认的草稿继续通过普通 validate；P3b 会传
         # require_fixed_route=True，确保执行链路没有回退到 Dijkstra 的机会。
@@ -291,6 +326,11 @@ class PlanItem:
             problems.extend(
                 f"{label}：{p}" for p in self.fixed_route.validate(network, goal=route_goal)
             )
+            if (self.command is PlanCommand.GOTO_COUPLE
+                    and self.couple_edge_id is not None
+                    and self.fixed_route.edges
+                    and self.fixed_route.edges[-1][0] != self.couple_edge_id):
+                problems.append(f"{label}：固定路径末边不是连挂 edge")
 
         # ⑤ 路径限定（硬约束锚点）自洽 + 引用存在性
         for i, anchor in enumerate(self.anchors):
@@ -338,8 +378,8 @@ class PlanItem:
 class Plan:
     """有序条目 + 指令指针（指针落在控制车上；Q14/Q15）。
 
-    空计划 = **列车停车等待**（Q15）。普通 ``goto`` 计划循环；含连挂事件的 demo
-    计划可以是一次性链，走完后指针停在尾后（``current() is None``）。`advance()`
+    空计划 = **列车停车等待**（Q15）。计划可循环，也保留兼容的一次性模式；后者
+    走完后指针停在尾后（``current() is None``）。`advance()`
     只做指针移动；**步进策略不在这里**（roadmap §2.3 / P3）。
     """
 

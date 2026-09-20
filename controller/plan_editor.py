@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
-from model.plan import END_REAR, Anchor, Plan, PlanCommand, PlanItem, TrainRef
+from model.plan import Anchor, Plan, PlanCommand, PlanItem
 from model.plan_path import PathStart, PlanResolution, resolve_plan_item
 from model.rail_network import RailNetwork
 from model.train_entity import TrainEntity
@@ -54,7 +54,7 @@ class PlanEditor:
         self.draft = PlanDraft()
 
     def finalize_cycle(self) -> tuple[bool, str]:
-        """确认普通计划闭环，或确认含连挂条目的一次性事件链。"""
+        """确认纯行车计划闭环，或启用可重复的固定场景调车计划。"""
         if self.owner is None or self.train is None:
             return False, "计划闭环失败：编辑态未开启"
         plan = self.owner.plan
@@ -65,8 +65,8 @@ class PlanEditor:
         plan.has_wrapped = False
         if any(item.command is not PlanCommand.GOTO for item in plan.items):
             plan.requires_closed_cycle = False
-            plan.repeat = False
-            return True, "计划已确认为一次性连挂事件链：执行完毕后停车，不回绕"
+            plan.repeat = True
+            return True, "固定场景调车计划已确认为循环执行"
         plan.requires_closed_cycle = True
         plan.repeat = True
         first = plan.items[0]
@@ -186,7 +186,6 @@ class PlanEditor:
             return False, "计划编辑错误：编辑态未开启"
         if self.owner.plan is None:
             self.owner.plan = Plan(requires_closed_cycle=True)
-        self.owner.plan.repeat = False
         self.owner.plan.requires_closed_cycle = False
         self.owner.plan.append(PlanItem.wait_couple())
         self.draft = PlanDraft()
@@ -199,54 +198,81 @@ class PlanEditor:
             return False, "计划编辑错误：编辑态未开启"
         if target_train is self.train:
             return False, "计划编辑错误：连挂目标不能是本编组"
-        if target_end != "tail":
-            return False, "计划编辑错误：当前版本只支持驶向目标车尾"
         if not target_train.is_parked():
             return False, "计划编辑错误：连挂目标列车必须停稳"
 
         from controller.coupling import end_coupler_pos
-        _position, edge_id, t = end_coupler_pos(target_train, "tail")
-        target_wagon = target_train.state.consist.wagons[-1]
-        item = PlanItem.goto_couple(
-            TrainRef(target_wagon.wagon_id, END_REAR),
-            anchors=self.draft.anchors,
-        )
-        result = resolve_plan_item(
-            self.network,
-            self._construction_start(),
-            item,
-            passable_fn=self.passable_fn,
-            allow_reversal=True,
-            consist_length=self.train.state.consist.total_length,
-            couple_target=(edge_id, t, target_train.current_direction()),
-        )
+        end = "head" if target_end == "head" else "tail"
+        _position, edge_id, t = end_coupler_pos(target_train, end)
+        item = PlanItem.goto_couple(anchors=self.draft.anchors, edge_id=edge_id)
+        result = None
+        for target_direction in (1, -1):
+            candidate = resolve_plan_item(
+                self.network,
+                self._construction_start(),
+                item,
+                passable_fn=self.passable_fn,
+                allow_reversal=True,
+                consist_length=self.train.state.consist.total_length,
+                couple_target=(edge_id, t, target_direction),
+            )
+            if (candidate.path is not None
+                    and (result is None or result.path is None
+                         or candidate.path.remaining_to_goal < result.path.remaining_to_goal)):
+                result = candidate
+            elif result is None:
+                result = candidate
+        assert result is not None
         if result.path is None:
             self.draft = PlanDraft(self.draft.anchors, resolution=result)
             return False, f"计划解析失败：{result.failure}"
         frozen = PlanItem.goto_couple(
-            item.train_ref,
             anchors=item.anchors,
             fixed_route=result.path.freeze(),
+            edge_id=edge_id,
         )
         if self.owner.plan is None:
             self.owner.plan = Plan(requires_closed_cycle=True)
-        self.owner.plan.repeat = False
         self.owner.plan.requires_closed_cycle = False
         self.owner.plan.append(frozen)
         self.draft = PlanDraft()
-        return True, f"计划已冻结前往连挂并追加为第 {len(self.owner.plan)} 条"
+        return True, f"计划已冻结驶入 edge {edge_id} 连挂并追加为第 {len(self.owner.plan)} 条"
+
+    def append_decouple(self, after: int) -> tuple[bool, str]:
+        if self.owner is None or self.train is None:
+            return False, "计划编辑错误：编辑态未开启"
+        if not (1 <= after < len(self.train.state.consist.wagons)):
+            return False, f"计划编辑错误：无法从车头后第 {after} 位解挂"
+        if self.owner.plan is None:
+            self.owner.plan = Plan(requires_closed_cycle=False)
+        self.owner.plan.requires_closed_cycle = False
+        self.owner.plan.append(PlanItem.decouple(after))
+        return True, f"计划已追加从车头后第 {after} 位解挂"
+
+    def append_reverse(self) -> tuple[bool, str]:
+        if self.owner is None:
+            return False, "计划编辑错误：编辑态未开启"
+        if self.owner.plan is None:
+            self.owner.plan = Plan(requires_closed_cycle=False)
+        self.owner.plan.requires_closed_cycle = False
+        self.owner.plan.append(PlanItem.reverse())
+        return True, f"计划已追加折返为第 {len(self.owner.plan)} 条"
 
     def _construction_start(self) -> PathStart:
         assert self.train is not None
-        if self.owner is not None and self.owner.plan is not None and self.owner.plan.items:
-            previous = self.owner.plan.items[-1]
-            if previous.goal is not None:
-                return PathStart(*previous.goal)
-            if previous.fixed_route is not None:
-                edge_id, direction = previous.fixed_route.edges[-1]
-                edge_length = self.network.edges[edge_id].length
-                t = (1.0 - previous.fixed_route.end_offset / edge_length
-                     if direction > 0 else previous.fixed_route.end_offset / edge_length)
-                return PathStart(edge_id, t, direction)
         edge_id, t = self.train.current_edge_and_t()
-        return PathStart(edge_id, t, self.train.current_direction())
+        start = PathStart(edge_id, t, self.train.current_direction())
+        if self.owner is None or self.owner.plan is None:
+            return start
+        for item in self.owner.plan.items:
+            if item.goal is not None:
+                start = PathStart(*item.goal)
+            elif item.fixed_route is not None:
+                route_edge_id, direction = item.fixed_route.edges[-1]
+                edge_length = self.network.edges[route_edge_id].length
+                route_t = (1.0 - item.fixed_route.end_offset / edge_length
+                           if direction > 0 else item.fixed_route.end_offset / edge_length)
+                start = PathStart(route_edge_id, route_t, direction)
+            if item.command is PlanCommand.REVERSE:
+                start = PathStart(start.edge_id, start.t, -start.direction)
+        return start

@@ -30,6 +30,7 @@ from model.wagon import Consist, create_simple_wagon
 from model.occupancy import OccupancyState
 from model.train_entity import TrainEntity, TrainState
 from model.train_physics import RealisticElectric
+from model.plan import FixedRoute, Plan, PlanItem
 
 DT = 1.0 / 60.0
 
@@ -151,6 +152,42 @@ try:
     assert abs(cx - 84.0) < 2.0, \
         f"死端折返后应精确停在 goal x≈84，实际 head_x={cx:.1f}（修复前会冲过到 x≈0）"
     print(f"✅ bug2 场景 C：死端折返后精确到 goal（head_x={cx:.1f}，不再冲过）")
+
+    # ---- 场景 D：空格显式暂停计划自动驾驶；调度器不得下一帧重新抢回控制。
+    tD = place(e0.edge_id, head_s=20.0)
+    driver = tD.state.consist.control_winner()
+    assert driver is not None
+    driver.plan = Plan([PlanItem.goto(
+        (e2.edge_id, 0.5, 1),
+        fixed_route=FixedRoute(
+            ((e0.edge_id, 1), (edges[1].edge_id, 1), (e2.edge_id, 1)),
+            20.0, 30.0,
+        ),
+    )])
+    gl.trains = [tD]
+    gl.active_train = tD
+    gl.train_v_target = 12.0
+    gl.plan_dispatcher.tick(tD, gl.trains)
+    assert tD.plan_execution is not None and tD.controller is not None
+    gl._handle_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_SPACE))
+    assert tD.plan_paused and tD.is_parked()
+    assert not tD.state.occupancy.route and tD.plan_execution is None
+    for _ in range(3):
+        gl.plan_dispatcher.tick(tD, gl.trains)
+    assert tD.is_parked() and not tD.state.occupancy.route, \
+        "计划暂停后调度器不得自动重新投影路线"
+    gl._handle_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_SPACE))
+    assert not tD.plan_paused
+    gl.plan_dispatcher.tick(tD, gl.trains)
+    assert tD.plan_execution is not None and tD.controller is not None
+    print("✅ 计划空格暂停：彻底停车并锁住调度；再次空格后从冻结路线继续")
+
+    # 基础调度计划选单入口：O 开关，Esc 优先关闭选单。
+    gl._handle_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_o))
+    assert gl.plan_menu_open
+    gl._handle_keydown(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_ESCAPE))
+    assert not gl.plan_menu_open and gl.active_train is tD
+    print("✅ 基础调度计划选单：O 打开，Esc 关闭且不丢失焦点列车")
 
     gl.running = False
 finally:

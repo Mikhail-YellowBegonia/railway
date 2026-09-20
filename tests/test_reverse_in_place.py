@@ -1,16 +1,15 @@
-"""原地折返（reverse_in_place）回归：任意位置可调 + 只换前进方向不改编组。
+"""原地折返回归：列车逻辑首尾互换，车厢物理姿态保持。
 
 2026-09 用户规格（临时追加功能 1）：
 - **任意位置**可调用（不限死端），但**仍要求车身所在段无道岔**
   （`connection_count() >= 3` 的节点）——车身跨分歧点时镜像会把分歧边一起带上
   （Step3 死循环 bug 同源），直接拒绝并返回 False。
-- **只切换前进方向（逻辑），不反转列车编组（物理）**：`consist` 列表顺序不变
-  （wagon_id 顺序保持），车厢在轨道上的前后位置随掉头对调（等价整列车原地
-  旋转 180°）。
+- 列车逻辑方向与车厢物理方向分离：`consist` 列表反转，每节
+  `Wagon.orientation` 同步翻转；按 wagon_id 观察的世界位置与物理朝向不变。
 - 场景一 = 玩家手动折返（PLAY 模式选中停放列车按 R）；
   场景二 = 指令要求折返（`_do_auto_reversal` 折返标记消费，另见 test_dispatch）。
 
-覆盖：① 单边中部掉头：编组顺序不变 + 位置镜像 + 方向翻转 + route/remaining 清空；
+覆盖：① 单边中部掉头：逻辑顺序反转 + 物理位置/朝向不变 + route 清空；
 ② 二次掉头完全复原；③ 跨道岔拒绝且状态不变；④ R 键端到端（停放可折返、
 行驶中拒绝）。
 """
@@ -55,21 +54,23 @@ t.kinematics = t._build_kinematics()
 
 ids_before = [w.wagon_id for w in t.state.consist.wagons]
 pos_before = [p.position.x for p in t.kinematics.get_all_wagon_poses(t.state.s)]
+heading_before = [p.heading.x for p in t.kinematics.get_all_wagon_poses(t.state.s)]
 dir_before = t.current_direction()
 assert dir_before == 1
 
 assert t.reverse_in_place() is True, "单边中部应可折返（任意位置）"
 ids_after = [w.wagon_id for w in t.state.consist.wagons]
 pos_after = [p.position.x for p in t.kinematics.get_all_wagon_poses(t.state.s)]
-assert ids_after == ids_before, "编组顺序必须保持不变（不调 reversed_consist）"
+assert ids_after == list(reversed(ids_before)), "逻辑车头/车尾顺序必须反转"
 assert t.current_direction() == -1, "前进方向应翻转"
 assert not t.state.occupancy.route and t.state.remaining_to_goal == 0.0, \
     "折返后应清空 route/remaining（旧指令基于旧方向）"
+heading_after = [p.heading.x for p in t.kinematics.get_all_wagon_poses(t.state.s)]
 for i in range(3):
-    assert abs(pos_after[i] - pos_before[2 - i]) < 1e-6, \
-        f"车厢位置应镜像（等价原地旋转 180°）: {pos_before} → {pos_after}"
-print(f"✅ 任意位置掉头：编组顺序不变 {[w[:4] for w in ids_after]}，"
-      f"车厢位置镜像 {[round(x,1) for x in pos_before]} → {[round(x,1) for x in pos_after]}，"
+    assert abs(pos_after[i] - pos_before[2 - i]) < 1e-6
+    assert abs(heading_after[i] - heading_before[2 - i]) < 1e-6
+print(f"✅ 任意位置掉头：逻辑顺序反转 {[w[:4] for w in ids_after]}，"
+      f"物理位置保持 {[round(x,1) for x in pos_after]}，"
       f"方向 {dir_before} → {t.current_direction()}")
 
 # 2. 二次折返完全复原
@@ -102,6 +103,28 @@ assert t2.current_direction() == 1, "拒绝后方向不应改变"
 head_after = t2.kinematics.get_all_wagon_poses(t2.state.s)[0].position.x
 assert abs(head_after - head_before) < 1e-9, "拒绝后位置不应改变"
 print("✅ 跨道岔（车身段内含分歧点）折返被拒绝，状态不变")
+
+# 同一车身链若仅为头头/尾尾连挂做内部逻辑归一化，不套用调度折返门禁。
+poses_before = {
+    wagon.wagon_id: (pose.position, pose.heading)
+    for wagon, pose in zip(
+        t2.state.consist.wagons,
+        t2.kinematics.get_all_wagon_poses(t2.state.s),
+    )
+}
+assert t2.reverse_for_coupling() is True
+poses_after = {
+    wagon.wagon_id: (pose.position, pose.heading)
+    for wagon, pose in zip(
+        t2.state.consist.wagons,
+        t2.kinematics.get_all_wagon_poses(t2.state.s),
+    )
+}
+for wagon_id, (position, heading) in poses_before.items():
+    new_position, new_heading = poses_after[wagon_id]
+    assert (new_position - position).length() < 1e-6
+    assert new_heading.dot(heading) > 1.0 - 1e-6
+print("✅ 连挂内部逻辑归一化可跨道岔，且保持逐节车厢物理姿态")
 
 # 4. 行驶中拒绝（controller 非 None）
 t3 = TrainEntity(TrainState(
@@ -156,4 +179,4 @@ finally:
         os.remove(save)
     pygame.quit()
 
-print("\n✅ 全部原地折返（任意位置 / 只换方向不改编组 / 道岔拒绝 / R 键）回归通过")
+print("\n✅ 全部原地折返（逻辑换向 / 车厢物理朝向保持 / 道岔拒绝 / R 键）回归通过")

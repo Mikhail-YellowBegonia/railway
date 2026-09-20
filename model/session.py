@@ -115,6 +115,7 @@ def serialize_trains(trains: list["TrainEntity"]) -> list[dict]:
                 # 这两个字段就是"谁的司机在开车"的依据。
                 "have_control": w.have_control,
                 "priority": w.priority,
+                "orientation": w.orientation,
                 "coupler_1_pos": w.coupler_1_pos,
                 "coupler_2_pos": w.coupler_2_pos,
                 "bogies": [
@@ -175,7 +176,7 @@ def deserialize_trains(
     - 行驶中（route 非空）：构造后调 assign_route(route, remaining, goal) 重建
       controller；state.v 已写入。
     """
-    from model.wagon import WagonConfig, Consist, BogieConfig, GeometricRole
+    from model.wagon import Wagon, WagonConfig, Consist, BogieConfig, GeometricRole
     from model.occupancy import OccupancyState
     from model.train_entity import TrainEntity, TrainState
     from model.train_physics import DEFAULT_PHYSICS
@@ -222,7 +223,7 @@ def deserialize_trains(
                 )
                 for b in w.get("bogies", [])
             ]
-            wagons.append(WagonConfig(
+            wagons.append(Wagon(WagonConfig(
                 length=w["length"],
                 mass=w["mass"],
                 P_rated=w.get("P_rated"),
@@ -234,7 +235,7 @@ def deserialize_trains(
                 coupler_2_pos=w.get("coupler_2_pos", w["length"]),
                 bogies=bogies,
                 wagon_id=w["wagon_id"],
-            ))
+            ), orientation=int(w.get("orientation", 1))))
         if not wagons:
             continue
 

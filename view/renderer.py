@@ -775,6 +775,8 @@ def draw_plan_hud(
             line = "计划: 一次性事件链已完成"
         else:
             line = f"计划: {winner.plan.pointer + 1}/{len(winner.plan)} {item.label}"
+    if getattr(train, "plan_paused", False):
+        line += " 【已暂停】"
     if editing:
         line += " 【编辑中】"
     validation = ""
@@ -989,32 +991,6 @@ def draw_train_hud(
         surface.blit(text, (10 + padding, 10 + padding + i * line_height))
 
 
-def draw_console_log(
-    surface: pygame.Surface,
-    font: pygame.font.Font,
-    messages: list[str],
-    max_lines: int = 18,
-) -> None:
-    """右下角半透明控制台回显（最近 max_lines 条）。"""
-    if not messages:
-        return
-    w, h = surface.get_width(), surface.get_height()
-    visible = messages[-max_lines:]
-    line_h = font.get_linesize()
-    pad = 5
-    surfs = [font.render(m[:90], True, (180, 190, 175)) for m in visible]
-    box_w = min(max(s.get_width() for s in surfs) + pad * 2, w - 16)
-    box_h = line_h * len(surfs) + pad * 2
-    bx = w - box_w - 8
-    by = h - box_h - 8
-    bg = pygame.Surface((box_w, box_h))
-    bg.set_alpha(110)
-    bg.fill((8, 8, 8))
-    surface.blit(bg, (bx, by))
-    for i, s in enumerate(surfs):
-        surface.blit(s, (bx + pad, by + pad + i * line_h))
-
-
 def draw_coupler_highlight(
     surface: pygame.Surface,
     camera: Camera,
@@ -1095,7 +1071,7 @@ def draw_consist_panel(
         selected = ">" if i == selected_wagon_index else " "
         lines.append(
             f"{selected}[{i+1}] {role:<5} {w.length:.0f}m {w.mass:.0f}t "
-            f"{control} P={w.priority:+d}{active}"
+            f"{control} P={w.priority:+d} O={'F' if w.orientation > 0 else 'R'}{active}"
         )
     if winner is not None and winner.plan is not None:
         plan = winner.plan
@@ -1127,3 +1103,51 @@ def draw_consist_panel(
     for i, line in enumerate(lines):
         color = (180, 220, 255) if i == 0 else (200, 200, 200)
         surface.blit(font.render(line, True, color), (bx + pad, by + pad + i * line_h))
+
+
+def draw_schedule_menu(
+    surface: pygame.Surface,
+    font: pygame.font.Font,
+    train_idx: int,
+    train,
+) -> None:
+    """基础调度计划选单骨架；当前只读，后续在此增加选择与编辑控件。"""
+    winner = train.state.consist.control_winner()
+    lines = [f"调度计划 · Train #{train_idx}"]
+    if winner is None:
+        lines.append("无控制车")
+    elif winner.plan is None:
+        lines.append(f"控制车 {winner.wagon_id[:8]} 尚无计划")
+    elif winner.plan.is_empty:
+        lines.append("计划为空")
+    else:
+        plan = winner.plan
+        state = "已暂停" if getattr(train, "plan_paused", False) else "运行中"
+        mode = "循环" if plan.repeat else "单次"
+        lines.append(f"{state} · {mode} · 控制车 {winner.wagon_id[:8]}")
+        lines.append("")
+        for index, item in enumerate(plan.items):
+            marker = "▶" if plan.current() is item else " "
+            lines.append(f"{marker} {index + 1:02d}  {item.label}")
+    lines.extend(("", "Space  暂停 / 继续", "P  进入计划编辑", "O / Esc  关闭选单"))
+
+    line_h = font.get_linesize() + 3
+    pad = 14
+    width = max(360, max(font.size(line)[0] for line in lines) + pad * 2)
+    height = line_h * len(lines) + pad * 2
+    x = surface.get_width() // 2 - width // 2
+    y = surface.get_height() // 2 - height // 2
+    bg = pygame.Surface((width, height))
+    bg.set_alpha(225)
+    bg.fill((18, 22, 32))
+    surface.blit(bg, (x, y))
+    pygame.draw.rect(surface, (90, 125, 165), (x, y, width, height), 2)
+    for index, line in enumerate(lines):
+        if index == 0:
+            color = (235, 240, 250)
+        elif line.startswith("▶"):
+            color = (255, 220, 100)
+        else:
+            color = (195, 205, 220)
+        surface.blit(font.render(line, True, color),
+                     (x + pad, y + pad + index * line_h))

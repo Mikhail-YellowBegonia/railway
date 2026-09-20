@@ -638,4 +638,95 @@ assert complete_train.is_parked() and complete_train.state.occupancy.route == []
 assert "一次性事件链已消费完毕" in complete_train.plan_status
 print("✅ ⑲ P7 一次性事件链完成后停车，不回绕也不寻路")
 
+# ⑳ 固定 edge 连挂：沿进入方向选择第一个可达端头，而非绑定 wagon_id。
+edge_net = RailNetwork()
+q0 = edge_net.add_node(Vec3(0.0, 0.0, 0.0))
+q1 = edge_net.add_node(Vec3(200.0, 0.0, 0.0))
+qe = edge_net.add_edge(q0, q1).edge_id
+edge_driver = create_simple_car(
+    length=10.0, mass=30.0, P_rated=1000.0, have_control=True,
+)
+edge_driver.plan = Plan([PlanItem.goto_couple(
+    edge_id=qe,
+    fixed_route=FixedRoute(((qe, 1),), 10.0, 0.0),
+)])
+edge_train = TrainEntity(
+    TrainState(OccupancyState([(qe, 1)], 0.0, 10.0, []), 0.0, 0.0,
+               Consist([edge_driver])), edge_net, SimplePhysics(),
+)
+near_wagon = create_simple_car(length=10.0, mass=30.0)
+far_wagon = create_simple_car(length=10.0, mass=30.0)
+near_train = TrainEntity(
+    TrainState(OccupancyState([(qe, 1)], 50.0, 10.0, []), 0.0, 0.0,
+               Consist([near_wagon])), edge_net, SimplePhysics(),
+)
+far_train = TrainEntity(
+    TrainState(OccupancyState([(qe, 1)], 120.0, 10.0, []), 0.0, 0.0,
+               Consist([far_wagon])), edge_net, SimplePhysics(),
+)
+edge_plans = PlanDispatcher(edge_net)
+edge_plans.tick(edge_train, [edge_train, far_train, near_train])
+assert edge_train.plan_execution is not None
+assert edge_train.plan_execution.target_wagon_id == near_wagon.wagon_id
+assert edge_train.couple_approach_partner is near_train
+print("✅ ⑳ 固定 edge 连挂按进入方向选择第一个可达端头")
+
+# 反向进入同一 edge 时应从 node_b 一侧扫描，即优先选择 t 更大的端头。
+reverse_driver = create_simple_car(
+    length=10.0, mass=30.0, P_rated=1000.0, have_control=True,
+)
+reverse_driver.plan = Plan([PlanItem.goto_couple(
+    edge_id=qe,
+    fixed_route=FixedRoute(((qe, -1),), 10.0, 0.0),
+)])
+reverse_train = TrainEntity(
+    TrainState(OccupancyState([(qe, -1)], 0.0, 10.0, []), 0.0, 0.0,
+               Consist([reverse_driver])), edge_net, SimplePhysics(),
+)
+edge_plans.tick(reverse_train, [reverse_train, near_train, far_train])
+assert reverse_train.plan_execution is not None
+assert reverse_train.plan_execution.target_wagon_id == far_wagon.wagon_id
+assert reverse_train.couple_approach_partner is far_train
+print("✅ ⑳b 固定 edge 反向进入时从高 t 端选择第一个可达端头")
+
+# 激活后锁定端头；运行中若出现一个更靠前的候选，必须停车等待而非换目标。
+inserted_wagon = create_simple_car(length=10.0, mass=30.0)
+inserted_train = TrainEntity(
+    TrainState(OccupancyState([(qe, 1)], 25.0, 10.0, []), 0.0, 0.0,
+               Consist([inserted_wagon])), edge_net, SimplePhysics(),
+)
+edge_plans.tick(edge_train, [edge_train, inserted_train, near_train, far_train])
+assert edge_train.plan_execution is None
+assert edge_train.couple_approach_partner is None
+assert "移动" in edge_train.plan_status or "重新确认" in edge_train.plan_status
+print("✅ ⑳c 固定 edge 端头激活后锁定，候选变化不会静默切换目标")
+
+# ㉑ 动作条目：折返立即步进；解挂排入延迟动作，成功后循环回绕。
+action_wagons = [
+    create_simple_car(length=10.0, mass=30.0, P_rated=1000.0,
+                      have_control=(i == 0))
+    for i in range(3)
+]
+action_wagons[0].plan = Plan([PlanItem.reverse(), PlanItem.decouple(1)])
+action_train = TrainEntity(
+    TrainState(OccupancyState([(qe, 1)], 0.0, 60.0, []), 0.0, 0.0,
+               Consist(action_wagons)), edge_net, SimplePhysics(),
+)
+edge_plans.tick(action_train, [action_train])
+assert action_wagons[0].plan.pointer == 1 and action_train.current_direction() == -1
+edge_plans.tick(action_train, [action_train])
+actions = edge_plans.take_decouple_actions()
+assert len(actions) == 1 and actions[0].after == 1
+edge_plans._decouple_actions = actions
+from controller.game_loop import GameLoop
+loop = GameLoop.__new__(GameLoop)
+loop.plan_dispatcher = edge_plans
+loop.trains = [action_train]
+loop.active_train = action_train
+loop._execute_plan_decouples()
+assert actions[0].plan.pointer == 0
+assert len(loop.trains) == 2
+assert action_wagons[0] in loop.active_train.state.consist.wagons
+print("✅ ㉑ 计划折返与‘车头后第 n 位解挂’由 GameLoop 原子执行并循环步进")
+
 print("\n全部通过")

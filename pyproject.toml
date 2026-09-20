@@ -1,8 +1,9 @@
 [project]
 name = "railway"
 version = "0.1.0"
-description = "Add your description here"
+description = "A 2D railway sandbox focused on track construction, signalling, consists, and reproducible schedule operations"
 readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.11"
 dependencies = [
     "pygame-ce>=2.5.7",

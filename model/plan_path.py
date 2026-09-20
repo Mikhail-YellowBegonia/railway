@@ -140,7 +140,9 @@ def resolve_plan_item(
     if problems:
         return PlanResolution(failure="条目非法：" + problems[0])
 
-    if item.command is PlanCommand.WAIT_COUPLE:
+    if item.command in (
+        PlanCommand.WAIT_COUPLE, PlanCommand.DECOUPLE, PlanCommand.REVERSE,
+    ):
         # 等待类条目不产生路径（内容是"原地等待"，由事件推进；Q13 / roadmap §2.3）
         return PlanResolution(is_no_path=True)
 

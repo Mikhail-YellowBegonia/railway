@@ -3,12 +3,12 @@
 覆盖：
 1. 模型层：多节解挂 → 位置连续；原样 couple 回来（回归基线）。
 2. controller.coupling 纯判定：find_couple_pair（距离最近）、try_couple_to
-   （显式端头）、朝向不符拒绝、自己端头拒绝。
+   （显式端头）、四端组合归一化、自己端头拒绝。
 3. GameLoop 层端到端（SDL dummy driver）：
    - 解挂：悬停内部车钩 + K → trains 2+2，位置连续；
    - 手动连挂：悬停其它列车端头 + K（已贴住）→ 立即 couple；
    - 自动连挂：右键/指令驶向对方车尾，停车事件帧自动 couple；
-   - 拒绝：行驶中不可解挂、自己端头不连挂、朝向不符不连挂、左键不触发解挂。
+   - 拒绝：行驶中不可解挂、自己端头不连挂、端头不共线不连挂、左键不触发解挂。
 4. 信号豁免（docs/consist_ui.md §5.5）：有信号保护区间内，连挂驶向能冒进
    目标占用的受保护区间；解挂分离后前段驶离不被后段占的共享边卡住。
 
@@ -26,7 +26,7 @@ from model.train_entity import TrainEntity, TrainState
 from model.train_physics import RealisticElectric
 from model.pathfinding import _directed_from
 
-from controller.coupling import find_couple_pair, try_couple_to
+from controller.coupling import couple_match_for_ends, find_couple_pair, try_couple_to
 
 DT = 1.0 / 60.0
 
@@ -153,11 +153,11 @@ assert pair.merged_head is front and pair.merged_rear is rear, \
     f"front 应在前段当车头：{pair.merged_head.state.consist.wagons[0].length} vs {pair.merged_rear.state.consist.wagons[0].length}"
 print("✅ find_couple_pair：解挂两段可还原，合并方向正确（前段为车头）")
 
-# 朝向不符：把 rear 翻转朝向 → 不可配对
+# 远离接触点的反向列车仍不可配对（拒绝原因是几何不贴合，而非逻辑方向）。
 rear_rev = make_train(net, [(eid, -1) for eid, _d in reversed(front.state.occupancy.occupied)], [18.0, 22.0])
 r2 = find_couple_pair(front, [rear_rev])
-assert r2 is None or not True, "朝向不一致不应自动连挂（若返回配对则破坏同向约束）"
-print("✅ 朝向约束：反向列车不自动连挂")
+assert r2 is None, "未贴合的反向列车不应自动连挂"
+print("✅ 几何约束：未贴合的反向列车不自动连挂")
 
 # try_couple_to 显式端头：front.tail ↔ rear.head
 m2 = try_couple_to(front, rear, "head")
@@ -179,6 +179,35 @@ assert best_pair is not None and best_pair.merged_head is front \
     and best_pair.merged_rear is rear, \
     f"应选择最近的 rear（0m）而非 far_train: {best_pair}"
 print("✅ 多候选取最近：解挂两段优先于远车")
+
+# 头对头：允许连接，但必须保留每节车厢原有世界位置与物理朝向。
+head_net = build_straight_net([0.0, 100.0, 200.0])
+head_edges = list(head_net.edges.values())
+left = make_train(head_net, [(head_edges[0].edge_id, 1)], [20.0])
+left.state.occupancy.s = 97.5
+left.kinematics = left._build_kinematics()
+right = make_train(head_net, [(head_edges[1].edge_id, -1)], [20.0])
+right.state.occupancy.s = 97.5
+right.kinematics = right._build_kinematics()
+before = {}
+for train_part in (left, right):
+    for wagon_obj, pose in zip(
+        train_part.state.consist.wagons,
+        train_part.kinematics.get_all_wagon_poses(train_part.state.s),
+    ):
+        before[wagon_obj.wagon_id] = (pose.position, pose.heading)
+head_match = couple_match_for_ends(left, "head", right, "head")
+assert head_match is not None and head_match.reverse_head
+assert head_match.merged_head.reverse_in_place()
+head_merged = head_match.merged_head.couple_with(head_match.merged_rear)
+for wagon_obj, pose in zip(
+    head_merged.state.consist.wagons,
+    head_merged.kinematics.get_all_wagon_poses(head_merged.state.s),
+):
+    old_pos, old_heading = before[wagon_obj.wagon_id]
+    assert (pose.position - old_pos).length() < 1e-6
+    assert pose.heading.dot(old_heading) > 1.0 - 1e-9
+print("✅ 头对头连挂：逻辑归一化后每节车厢物理位置与朝向保持")
 
 # ---------------------------------------------------------------------------
 # 3. GameLoop 层端到端
@@ -660,16 +689,17 @@ _tA_far = _mk_d(20.0, 1)
 _tB_far = _mk_d(160.0, 1)
 # 160 处无 node（节点在 180），改用 A 头 x=0 与 B 头 x=170 距离过大场景跳过
 # 直接验证 DRIVE_COUPLE_MAX_DIST 阈值逻辑：构造相距 >300 的两车（本网络最长 180，
-# 距离不足，改验"反向"拒绝）
+# 距离不足，改验反向目标也可生成驶向目标）
 _tA_rev = _mk_d(20.0, 1)
-_tB_rev = _mk_d(140.0, -1)   # B 朝 -1，尾钩朝 +x 方向但接触端切线不一致
-assert drive_couple_goal(_tA_rev, _tB_rev) is None, "朝向不符应拒绝"
-print("✅ 就近对接·朝向不符拒绝：接触端切线不一致不下达")
+_tB_rev = _mk_d(140.0, -1)   # B 逻辑朝 -1；允许驶向其前方可达端头
+assert drive_couple_goal(_tA_rev, _tB_rev) is not None, \
+    "目标列车逻辑反向时也应允许生成驶向连挂目标"
+print("✅ 就近对接·反向目标放行：头对头/尾对尾由端头连挂归一化")
 
 # 4f. 放宽回归（2026-09 bug1，用户拍板"先放宽就近对接门槛"）：旧判据两处误杀——
 #     1) 300m 直线距离上限挡住合法远距驶向；2) 端头切线一致（HEADING_DOT=0.9）
 #     在同向弧上相距较远时随弧角分叉、误杀合法追尾。放宽后：
-#     同向停放 + B 尾钩在 A 前方半平面 + 距离 ≤ DRIVE_COUPLE_MAX_DIST(2000) 即放行，
+#     任一目标端位于 A 前方半平面 + 距离 ≤ DRIVE_COUPLE_MAX_DIST(2000) 即放行，
 #     真实可达性交给寻路。
 net_l = RailNetwork()
 for _lx in range(0, 481, 60):          # 8 节点 × 60m = 480m 长直轨

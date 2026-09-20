@@ -58,6 +58,7 @@ t1 = make_train(net, east, [20.0, 18.0, 22.0])
 t1.state.occupancy = OccupancyState(
     occupied=east, occupied_offset=20.0, s=40.0, route=[])
 t1.kinematics = t1._build_kinematics()
+t1.state.consist.wagons[1].orientation = -1
 h0 = head_x(t1)
 
 ser = serialize_trains([t1])
@@ -71,8 +72,10 @@ assert abs(b.state.s - 40.0) < 1e-9
 assert [w.length for w in b.state.consist.wagons] == [20.0, 18.0, 22.0]
 assert [w.wagon_id for w in b.state.consist.wagons] == \
     [w.wagon_id for w in t1.state.consist.wagons], "wagon_id 应稳定"
+assert [w.orientation for w in b.state.consist.wagons] == [1, -1, 1], \
+    "每节车厢的物理朝向应独立往返"
 assert b.is_parked(), "停放列车重载后应停放"
-print("✅ 停放列车往返：位置/occupancy/编组/wagon_id 一致")
+print("✅ 停放列车往返：位置/occupancy/编组/wagon_id/混合物理朝向一致")
 
 # =========================================================================
 # 2. 行驶中列车往返

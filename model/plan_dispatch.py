@@ -31,6 +31,16 @@ class PlanExecution:
     pointer: int
     route_signature: tuple
     projected_goal: Goal | None
+    target_wagon_id: str | None = None
+
+
+@dataclass(frozen=True)
+class DecoupleAction:
+    train: TrainEntity
+    winner: Wagon
+    plan: Plan
+    item: PlanItem
+    after: int
 
 
 class PlanDispatcher:
@@ -38,9 +48,33 @@ class PlanDispatcher:
 
     def __init__(self, network: RailNetwork) -> None:
         self.network = network
+        self._decouple_actions: list[DecoupleAction] = []
+
+    def take_decouple_actions(self) -> list[DecoupleAction]:
+        actions, self._decouple_actions = self._decouple_actions, []
+        return actions
+
+    def set_paused(self, train: TrainEntity, paused: bool) -> None:
+        """暂停/继续该列车的计划自动驾驶，不移动计划指针。"""
+        train.plan_paused = paused
+        self._decouple_actions = [
+            action for action in self._decouple_actions if action.train is not train
+        ]
+        self._clear_execution(train)
+        if paused:
+            train.emergency_stop()
+            train.plan_status = "计划已暂停（空格继续）"
+        else:
+            train.plan_status = ""
 
     def tick(self, train: TrainEntity, trains: list[TrainEntity] | None = None) -> None:
         """在既有信号调度前运行一次；只在首次激活时写入列车指令。"""
+        if getattr(train, "plan_paused", False):
+            if not train.is_parked():
+                train.emergency_stop()
+            self._clear_execution(train)
+            self._report_once(train, "计划已暂停（空格继续）")
+            return
         winner = self._winner(train)
         execution = getattr(train, "plan_execution", None)
 
@@ -78,7 +112,9 @@ class PlanDispatcher:
             if item.command is PlanCommand.GOTO_COUPLE:
                 outcome = self._couple_goal(train, item, trains)
                 expected_goal = outcome[3]
-                if outcome[0] != "ready" or expected_goal != execution.projected_goal:
+                target_id = outcome[4]
+                if (outcome[0] != "ready" or expected_goal != execution.projected_goal
+                        or target_id != execution.target_wagon_id):
                     train.emergency_stop()
                     self._clear_execution(train)
                     if outcome[0] == "permanent":
@@ -147,6 +183,7 @@ class PlanDispatcher:
         self,
         new_train: TrainEntity,
         participant_wagon_groups: tuple[set[str], set[str]],
+        expected_target_wagon_id: str | None = None,
     ) -> None:
         """合并实体产生后，只推进新控制车当前的连挂事件条目。"""
         winner = self._winner(new_train)
@@ -157,16 +194,24 @@ class PlanDispatcher:
         if item is None:
             return
         if item.command is PlanCommand.GOTO_COUPLE:
-            target_id = item.train_ref.wagon_id if item.train_ref is not None else ""
             winner_group = next(
                 (group for group in participant_wagon_groups if winner.wagon_id in group),
                 set(),
             )
+            # 固定-edge 命令不永久引用某节车厢；连挂事件只需来自合并前另一编组。
             target_group = next(
-                (group for group in participant_wagon_groups if target_id in group),
-                set(),
+                (group for group in participant_wagon_groups if group is not winner_group), set(),
             )
-            if not target_group or target_group is winner_group:
+            legacy_target_mismatch = (
+                item.train_ref is not None
+                and item.train_ref.wagon_id not in target_group
+            )
+            fixed_edge_target_mismatch = (
+                item.couple_edge_id is not None
+                and expected_target_wagon_id is not None
+                and expected_target_wagon_id not in target_group
+            )
+            if not target_group or legacy_target_mismatch or fixed_edge_target_mismatch:
                 self._report_once(new_train, "计划错误：连挂事件与当前目标不匹配，未推进")
                 return
             winner.plan.advance()
@@ -203,6 +248,36 @@ class PlanDispatcher:
                 train.couple_approach_partner = None
                 self._report_once(train, "计划等待连挂")
                 return
+            if item.command is PlanCommand.REVERSE:
+                if not train.is_parked():
+                    self._report_once(train, "计划等待当前运行指令结束")
+                    return
+                if not train.reverse_in_place():
+                    self._report_once(train, "计划等待：当前车身不能在同一 simple_segment 内折返")
+                    return
+                plan.advance()
+                self._clear_execution(train)
+                train.plan_status = ""
+                return
+            if item.command is PlanCommand.DECOUPLE:
+                if not train.is_parked():
+                    self._report_once(train, "计划等待当前运行指令结束")
+                    return
+                after = item.decouple_after or 0
+                if after >= len(train.state.consist.wagons):
+                    self._report_once(
+                        train, f"计划等待：当前编组不足以从车头后第 {after} 位解挂",
+                    )
+                    return
+                train.plan_execution = PlanExecution(
+                    wagon_id=winner.wagon_id,
+                    plan_id=id(plan), item_id=id(item), pointer=plan.pointer,
+                    route_signature=(), projected_goal=None,
+                )
+                action = DecoupleAction(train, winner, plan, item, after)
+                if action not in self._decouple_actions:
+                    self._decouple_actions.append(action)
+                return
             if item.command is PlanCommand.GOTO_COUPLE:
                 outcome = self._couple_goal(train, item, trains)
                 if outcome[0] == "permanent":
@@ -214,7 +289,7 @@ class PlanDispatcher:
                         train.emergency_stop()
                     self._report_once(train, f"计划等待：{outcome[1]}")
                     return
-                target_train, goal = outcome[2], outcome[3]
+                target_train, goal, target_id = outcome[2], outcome[3], outcome[4]
                 if not train.is_parked():
                     self._report_once(train, "计划等待当前运行指令结束")
                     return
@@ -248,6 +323,7 @@ class PlanDispatcher:
                     pointer=plan.pointer,
                     route_signature=self._route_signature(item.fixed_route, goal),
                     projected_goal=goal,
+                    target_wagon_id=target_id,
                 )
                 train.plan_status = ""
                 return
@@ -296,12 +372,14 @@ class PlanDispatcher:
         train: TrainEntity,
         item: PlanItem,
         trains: list[TrainEntity] | None,
-    ) -> tuple[str, str, TrainEntity | None, Goal | None]:
+    ) -> tuple[str, str, TrainEntity | None, Goal | None, str | None]:
         ref = item.train_ref
-        if ref is None:
-            return "permanent", "前往连挂缺少目标", None, None
         if trains is None:
-            return "temporary", "当前列车表不可用，无法解析连挂目标", None, None
+            return "temporary", "当前列车表不可用，无法解析连挂目标", None, None, None
+        if item.couple_edge_id is not None:
+            return self._couple_goal_on_edge(train, item, trains)
+        if ref is None:
+            return "permanent", "前往连挂缺少目标", None, None, None
         target_train = next(
             (candidate for candidate in trains
              if any(wagon.wagon_id == ref.wagon_id
@@ -309,30 +387,67 @@ class PlanDispatcher:
             None,
         )
         if target_train is None:
-            return "permanent", f"连挂目标车厢 {ref.wagon_id[:8]} 已不存在", None, None
+            return "permanent", f"连挂目标车厢 {ref.wagon_id[:8]} 已不存在", None, None, None
         if target_train is train:
-            return "temporary", "连挂目标已在本编组内", None, None
+            return "temporary", "连挂目标已在本编组内", None, None, None
         if ref.end == END_FRONT:
-            return "temporary", "当前版本不支持计划驶向目标前端（无倒车连挂）", None, None
+            return "temporary", "旧式车厢目标不支持前端", None, None, None
         if ref.end != END_REAR:
-            return "permanent", f"连挂目标端头非法：{ref.end}", None, None
+            return "permanent", f"连挂目标端头非法：{ref.end}", None, None, None
         if target_train.state.consist.wagons[-1].wagon_id != ref.wagon_id:
-            return "temporary", "目标车厢的指定后端当前未暴露", None, None
+            return "temporary", "目标车厢的指定后端当前未暴露", None, None, None
         if not target_train.is_parked():
-            return "temporary", "连挂目标列车尚未停稳", None, None
+            return "temporary", "连挂目标列车尚未停稳", None, None, None
         if item.fixed_route is None:
-            return "permanent", "前往连挂尚未冻结固定路径", None, None
+            return "permanent", "前往连挂尚未冻结固定路径", None, None, None
 
         from controller.coupling import end_coupler_pos
         _position, edge_id, t = end_coupler_pos(target_train, "tail")
         direction = target_train.current_direction()
         if item.fixed_route.edges[-1] != (edge_id, direction):
-            return "temporary", "目标后钩已离开固定路线末边或改变方向", None, None
+            return "temporary", "目标后钩已离开固定路线末边或改变方向", None, None, None
         edge_length = self.network.edges[edge_id].length
         runtime_end_offset = edge_length * ((1.0 - t) if direction > 0 else t)
         if abs(runtime_end_offset - item.fixed_route.end_offset) > COUPLE_TARGET_DRIFT_M:
-            return "temporary", "目标后钩偏离冻结位置超过 5 米", None, None
-        return "ready", "", target_train, (edge_id, t, direction)
+            return "temporary", "目标后钩偏离冻结位置超过 5 米", None, None, None
+        return "ready", "", target_train, (edge_id, t, direction), ref.wagon_id
+
+    def _couple_goal_on_edge(
+        self, train: TrainEntity, item: PlanItem, trains: list[TrainEntity],
+    ) -> tuple[str, str, TrainEntity | None, Goal | None, str | None]:
+        edge_id = item.couple_edge_id
+        route = item.fixed_route
+        if edge_id is None or route is None:
+            return "permanent", "固定 edge 连挂缺少冻结路线", None, None, None
+        edge = self.network.edges.get(edge_id)
+        if edge is None:
+            return "permanent", f"固定连挂边 {edge_id} 不存在", None, None, None
+        direction = route.edges[-1][1]
+        from controller.coupling import end_coupler_pos, head_hook_offset
+        candidates: list[tuple[float, TrainEntity, str, str, float]] = []
+        own_ids = {wagon.wagon_id for wagon in train.state.consist.wagons}
+        for target in trains:
+            if target is train or not target.is_parked():
+                continue
+            for end, wagon in (
+                ("head", target.state.consist.wagons[0]),
+                ("tail", target.state.consist.wagons[-1]),
+            ):
+                _pos, candidate_edge_id, t = end_coupler_pos(target, end)
+                if candidate_edge_id != edge_id or wagon.wagon_id in own_ids:
+                    continue
+                progress = t if direction > 0 else 1.0 - t
+                runtime_end_offset = edge.length * (1.0 - progress)
+                if self._project_route_start(
+                    train, route,
+                    end_offset=runtime_end_offset + head_hook_offset(train),
+                ) is None:
+                    continue
+                candidates.append((progress, target, end, wagon.wagon_id, t))
+        if not candidates:
+            return "temporary", f"edge {edge_id} 上没有从进入方向可达的停放端头", None, None, None
+        _progress, target, _end, wagon_id, t = min(candidates, key=lambda value: value[0])
+        return "ready", "", target, (edge_id, t, direction), wagon_id
 
     def _project_route_start(
         self,
@@ -422,7 +537,7 @@ class PlanDispatcher:
 
     @staticmethod
     def _active_route(plan: Plan, item: PlanItem) -> FixedRoute | None:
-        if plan.pointer == 0 and plan.has_wrapped:
+        if plan.pointer == 0 and plan.has_wrapped and plan.loop_route is not None:
             return plan.loop_route
         return item.fixed_route
 
