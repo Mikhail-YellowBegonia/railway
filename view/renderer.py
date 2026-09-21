@@ -774,7 +774,7 @@ def draw_plan_hud(
         if item is None:
             line = "计划: 一次性事件链已完成"
         else:
-            line = f"计划: {winner.plan.pointer + 1}/{len(winner.plan)} {item.label}"
+            line = f"计划: {winner.plan.pointer + 1}/{len(winner.plan)} {item.display_label}"
     if getattr(train, "plan_paused", False):
         line += " 【已暂停】"
     if editing:
@@ -1079,7 +1079,7 @@ def draw_consist_panel(
         lines.append(f"--- Plan ({mode}) ---")
         for i, item in enumerate(plan.items):
             current = ">" if plan.current() is item else " "
-            lines.append(f"{current}{i + 1}. {item.label}")
+            lines.append(f"{current}{i + 1}. {item.display_label}")
         if plan.is_complete:
             lines.append("  completed")
     elif winner is not None:
@@ -1128,7 +1128,7 @@ def draw_schedule_menu(
         lines.append("")
         for index, item in enumerate(plan.items):
             marker = "▶" if plan.current() is item else " "
-            lines.append(f"{marker} {index + 1:02d}  {item.label}")
+            lines.append(f"{marker} {index + 1:02d}  {item.display_label}")
     lines.extend(("", "Space  暂停 / 继续", "P  进入计划编辑", "O / Esc  关闭选单"))
 
     line_h = font.get_linesize() + 3

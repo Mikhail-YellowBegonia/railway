@@ -101,9 +101,9 @@ done
   direction while preserving each wagon's physical orientation.
 - Plans are not persisted yet.
 - POIs, cargo, advanced vehicle physics, and LOD are outside the first demo scope.
-- The first declarative coupling selector currently uses a fixed edge as its range.
+- The first declarative coupling selector uses a fixed edge and approach direction.
   Its automated model/locking checks pass, but the final GUI shunting scenarios still
-  require manual release validation; POI-based ranges remain under consideration.
+  require manual release validation; POI-based ranges are deferred until after the demo.
 
 ## License
 

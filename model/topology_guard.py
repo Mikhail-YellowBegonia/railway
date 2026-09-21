@@ -82,7 +82,7 @@ class EdgeSplit:
                 if fixed_route is not None and fixed_route.edges
                 else self.second_edge_id
             )
-            couple_selector = CoupleSelector(couple_edge_id)
+            couple_selector = CoupleSelector(couple_edge_id, item.couple_selector.direction)
             changed = True
 
         return item if not changed else replace(

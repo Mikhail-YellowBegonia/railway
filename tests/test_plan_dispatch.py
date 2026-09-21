@@ -648,6 +648,7 @@ edge_driver = create_simple_car(
 )
 edge_driver.plan = Plan([PlanItem.goto_couple(
     edge_id=qe,
+    direction=1,
     fixed_route=FixedRoute(((qe, 1),), 10.0, 0.0),
 )])
 edge_train = TrainEntity(
@@ -679,6 +680,7 @@ reverse_driver = create_simple_car(
 )
 reverse_driver.plan = Plan([PlanItem.goto_couple(
     edge_id=qe,
+    direction=-1,
     fixed_route=FixedRoute(((qe, -1),), 10.0, 0.0),
 )])
 reverse_train = TrainEntity(
@@ -709,6 +711,7 @@ claim_driver = create_simple_car(
 )
 claim_driver.plan = Plan([PlanItem.goto_couple(
     edge_id=qe,
+    direction=1,
     fixed_route=FixedRoute(((qe, 1),), 10.0, 0.0),
 )])
 claim_train = TrainEntity(

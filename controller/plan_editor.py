@@ -202,15 +202,21 @@ class PlanEditor:
         from controller.coupling import end_coupler_pos
         end = "head" if target_end == "head" else "tail"
         _position, edge_id, t = end_coupler_pos(target_train, end)
-        item = PlanItem.goto_couple(anchors=self.draft.anchors, edge_id=edge_id)
         result = None
         for target_direction in (1, -1):
+            item = PlanItem.goto_couple(
+                anchors=self.draft.anchors,
+                edge_id=edge_id,
+                direction=target_direction,
+            )
             candidate = resolve_plan_item(
                 self.network,
                 self._construction_start(),
                 item,
                 passable_fn=self.passable_fn,
-                allow_reversal=True,
+                # P7c 调车计划必须用显式 reverse 条目管理每次折返；selector
+                # 接近路线不得偷偷依赖寻路器的死端自动换向。
+                allow_reversal=False,
                 consist_length=self.train.state.consist.total_length,
                 couple_target=(edge_id, t, target_direction),
             )
@@ -225,9 +231,10 @@ class PlanEditor:
             self.draft = PlanDraft(self.draft.anchors, resolution=result)
             return False, f"计划解析失败：{result.failure}"
         frozen = PlanItem.goto_couple(
-            anchors=item.anchors,
+            anchors=self.draft.anchors,
             fixed_route=result.path.freeze(),
             edge_id=edge_id,
+            direction=result.path.edges[-1][1],
         )
         if self.owner.plan is None:
             self.owner.plan = Plan(requires_closed_cycle=True)
@@ -235,7 +242,8 @@ class PlanEditor:
         self.owner.plan.append(frozen)
         self.draft = PlanDraft()
         return True, (
-            f"计划已冻结驶入 edge {edge_id} 的声明式连挂 selector，"
+            f"计划已冻结驶入 edge {edge_id} dir {result.path.edges[-1][1]:+d} 的"
+            "声明式连挂 selector，"
             f"并追加为第 {len(self.owner.plan)} 条"
         )
 

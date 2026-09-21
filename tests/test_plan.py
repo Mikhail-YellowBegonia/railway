@@ -57,7 +57,7 @@ EDGE_TB = net.add_edge(t, b).edge_id
 anchors = (Anchor(m.node_id), Anchor(t.node_id, EDGE_TC))
 item_goto = PlanItem.goto((EDGE_MA, 0.5, 1), anchors)
 item_couple = PlanItem.goto_couple(TrainRef(wagon_id="w-42", end=END_FRONT))
-item_selector = PlanItem.goto_couple(edge_id=EDGE_MA)
+item_selector = PlanItem.goto_couple(edge_id=EDGE_MA, direction=1)
 item_wait = PlanItem.wait_couple()
 
 assert item_goto.validate() == [], item_goto.validate()
@@ -86,7 +86,7 @@ cases = [
         PlanItem(
             command=PlanCommand.GOTO_COUPLE,
             train_ref=TrainRef("w1"),
-            couple_selector=CoupleSelector(EDGE_TM),
+            couple_selector=CoupleSelector(EDGE_TM, 1),
         ),
         "不能同时指定",
     ),
@@ -115,8 +115,10 @@ assert any("wagon_id" in p for p in ref_problems), ref_problems
 assert any("端头" in p for p in ref_problems), ref_problems
 assert TrainRef("w", END_REAR).validate() == []
 assert TrainRef("w", END_FRONT).validate() == []
-assert CoupleSelector(EDGE_MA).validate(net) == []
-assert any("不存在" in p for p in CoupleSelector(99999).validate(net))
+assert CoupleSelector(EDGE_MA, 1).validate(net) == []
+assert any("不存在" in p for p in CoupleSelector(99999, 1).validate(net))
+assert any("direction" in p for p in CoupleSelector(EDGE_MA, 0).validate(net))
+assert item_selector.display_label.endswith(f"edge {EDGE_MA} dir +1")
 print("✅ ④ TrainRef 与 CoupleSelector 自洽校验通过")
 
 # ── ⑤ 不可变 ────────────────────────────────────────────────────────────
@@ -125,7 +127,7 @@ for target, attr in (
     (Anchor(1), "node_id"),
     (item_goto, "command"),
     (TrainRef("w"), "wagon_id"),
-    (CoupleSelector(EDGE_MA), "edge_id"),
+    (CoupleSelector(EDGE_MA, 1), "edge_id"),
 ):
     try:
         setattr(target, attr, None)

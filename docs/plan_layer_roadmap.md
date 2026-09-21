@@ -276,7 +276,8 @@ P5 正式编辑交互落地后移除。
 不在物理执行层，而在计划过早绑定具体目标。采用以下三层结构：
 
 1. **计划意图层**：正式数据类型 `CoupleSelector` 表达“去哪里寻找什么端头”。demo
-   首版只含固定 `edge_id`；`PlanItem` 允许 `TrainRef`（精确兼容入口）或
+   首版固定为 `edge_id + direction`，其中 direction 是**执行列车驶入该 edge 的方向**，
+   不是目标列车朝向或指定端头；`PlanItem` 允许 `TrainRef`（精确兼容入口）或
    `CoupleSelector`（声明式入口）二选一，不能并存。固定 edge 是刻意保留的开发期兜底：
    玩家必须在预期完成连挂的 edge 上创建命令；POI/范围 selector 落地前，这个限制属于
    已知且可见的交互边界。筛选至少包含停放、端头暴露、当前不属于执行编组、从冻结路线
@@ -315,7 +316,7 @@ P5 正式编辑交互落地后移除。
 
 **P7c 实施与人工检查点**：
 
-1. **C1 数据模型检查点（自动）**：加入 `CoupleSelector(edge_id)`、互斥校验、拓扑切边
+1. **C1 数据模型检查点（自动）**：加入 `CoupleSelector(edge_id, direction)`、互斥校验、拓扑切边
    改写和删除保护；旧式 `TrainRef` 回归不变。此阶段不改物理行为。
 2. **C2 解析/认领检查点（自动 + 小型人工）**：稳定排序、唯一端头令牌、已有认领排除、
    错误并跳过；用两列执行车争抢同一目标验证不会双重下单。
@@ -325,15 +326,15 @@ P5 正式编辑交互落地后移除。
    预建末步 selector；执行解挂 → 绕行/折返 → 重新连挂。由于固定 edge 是当前范围，
    玩家必须选对最终连挂 edge；选错 edge 应明确失败，不视为物理链故障。
 
-**POI 决策门**：先完成 C1–C4，不让 POI 扩大 P7c 的数据面。C4 后单独评审固定 edge
-交互是否足以清晰演示 demo：若只是操作不便但流程稳定，POI 保持 P10（demo 后）；若
-固定 edge 使核心 demo 难以可靠创建或讲解，则在 P9 发布验收前插入 **P7d / P10a 最小
-POI 范围**，只实现“有向点/命名范围 → selector edge 集合”的解析与最小编辑入口，仍
-复用 P7c 的候选、认领和锁定层。站台长度、建筑集合、车型/复杂编组筛选继续留在完整 P10。
+**POI 边界已定（2026-09-21）**：本轮和 demo 发布前均不实现 POI。固定
+`edge_id + direction` selector 足以承担 headshunt 验收；POI、站台长度、建筑集合、
+车型与复杂编组筛选全部留在独立 P10。将来扩展范围时只能复用 P7c 的候选、认领和
+锁定层，不得重写物理执行链。
 
 **2026-09-21 实施记录（C1/C2 已完成）**：
 
-- `model.plan.CoupleSelector(edge_id)` 已成为正式不可变类型；`PlanItem` 的 selector 与
+- `model.plan.CoupleSelector(edge_id, direction)` 已成为正式不可变类型；direction 与
+  冻结路线末段严格一致；`PlanItem` 的 selector 与
   兼容 `TrainRef` 严格互斥，固定路线末边、拓扑切边改写和引用失效校验均已覆盖。
 - selector 候选键已固定为“沿进入方向的位置 → `wagon_id` → head/tail 固定顺序”；
   `PlanExecution` 锁定 `wagon_id + end`，后续 tick 只验证锁定端头，不重新搜索。
@@ -341,6 +342,11 @@ POI 范围**，只实现“有向点/命名范围 → selector edge 集合”的
   锁定目标失效、无候选及认领冲突均明确报错并跳过当前条目。
 - 编辑器允许用本编组暴露端所在 edge 预建 selector，不绑定当前车厢。全套 23/23
   回归脚本通过；C3 锁定执行与 C4 机回联合场景仍需人工 GUI 验收。
+
+**显式折返纪律（2026-09-21）**：复杂调车计划不应依赖寻路器的自动换向。P7c 的
+selector 接近路线以 `allow_reversal=False` 构造；玩家必须用计划中的 `reverse` 条目
+明确表达每一次折返，编辑器会据此更新后续条目的构造方向。普通右键与既有 `goto`
+暂时保留自动换向以兼容现有行为；未来可另立阶段评估默认关闭乃至移除寻路层换向逻辑。
 
 #### P10 POI 与高级筛选扩展（**demo 后**）
 
@@ -520,7 +526,8 @@ POI 范围**，只实现“有向点/命名范围 → selector edge 集合”的
 **P7 ✅ / P7b ✅（2026-09-20 人工验收完成）**
 
 - 旧式 `TrainRef(wagon_id,end)` 执行路径保留兼容；demo 新建条目使用
-  `goto_couple(edge_id)`。运行时扫描该固定 edge 上所有停放列车的暴露端，从冻结路线
+  `goto_couple(CoupleSelector(edge_id, direction))`。运行时扫描该固定有向 edge 上所有
+  停放列车的暴露端，从冻结路线
   进入方向取第一个仍可达者，并把目标 wagon_id 锁入激活令牌。
 - 四种端头组合均支持。头头/尾尾连挂只归一化列车逻辑首尾；每节车厢持有独立
   `orientation`，连挂前后物理位置与朝向不变。显式折返仍受 strict segment 约束，

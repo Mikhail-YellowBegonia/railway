@@ -440,7 +440,9 @@ class PlanDispatcher:
         edge = self.network.edges.get(edge_id)
         if edge is None:
             return "permanent", f"固定连挂边 {edge_id} 不存在", None, None, None, None
-        direction = route.edges[-1][1]
+        direction = selector.direction
+        if route.edges[-1] != (edge_id, direction):
+            return "permanent", "selector direction 与冻结路线末段不一致", None, None, None, None
         from controller.coupling import end_coupler_pos, head_hook_offset
         candidates: list[tuple[float, str, int, TrainEntity, str, float]] = []
         own_ids = {wagon.wagon_id for wagon in train.state.consist.wagons}
@@ -514,7 +516,9 @@ class PlanDispatcher:
         route = item.fixed_route
         if route is None:
             return "permanent", "固定 edge 连挂缺少冻结路线", None, None, None, None
-        direction = route.edges[-1][1]
+        direction = selector.direction
+        if route.edges[-1] != (selector.edge_id, direction):
+            return "permanent", "selector direction 与冻结路线末段不一致", None, None, None, None
         edge = self.network.edges[edge_id]
         progress = t if direction > 0 else 1.0 - t
         runtime_end_offset = edge.length * (1.0 - progress)

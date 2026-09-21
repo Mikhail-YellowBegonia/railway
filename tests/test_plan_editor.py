@@ -117,8 +117,10 @@ assert ok and wagon.plan is not None and len(wagon.plan) == 1
 couple_item = wagon.plan.items[0]
 assert couple_item.command is PlanCommand.GOTO_COUPLE
 assert couple_item.train_ref is None
-assert couple_item.couple_selector is not None and couple_item.couple_selector.edge_id == e1
+assert couple_item.couple_selector is not None
+assert couple_item.couple_selector.edge_id == e1
 assert couple_item.fixed_route is not None
+assert couple_item.couple_selector.direction == couple_item.fixed_route.edges[-1][1]
 ok, message = editor.append_wait_couple()
 assert ok and len(wagon.plan) == 2
 assert wagon.plan.items[1].command is PlanCommand.WAIT_COUPLE
@@ -142,6 +144,7 @@ assert wagon.plan is not None and len(wagon.plan) == 1
 own_selector = wagon.plan.items[0].couple_selector
 assert own_selector is not None
 assert wagon.plan.items[0].train_ref is None
+assert own_selector.direction in (1, -1)
 print("✅ ⑥b 本编组暴露端可用于预建 selector，计划不绑定当前车厢")
 
 # ⑦ 最小管理能力：编辑态可删除当前条目或清空计划；不在数据层隐式重算路线。

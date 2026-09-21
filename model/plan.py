@@ -18,8 +18,8 @@
 - **demo 命令集合 = `goto` / `goto_couple` / `wait_couple` / `decouple` /
   `reverse`，无跳转命令**（Q23-8）：循环只靠"走完回绕第一项"。
 - **引用一律落在物理要素上**（Q22-2）：锚点 → `node_id`、控制点 → `edge_id`、
-  终点 → `(edge_id, t)`；demo 新连挂目标 → `CoupleSelector(edge_id)`，运行时按冻结
-  路线进入方向选择、认领并锁定第一个可达暴露端。旧式
+  终点 → `(edge_id, t)`；demo 新连挂目标 → `CoupleSelector(edge_id, direction)`，运行时按
+  冻结路线进入方向选择、认领并锁定第一个可达暴露端。旧式
   `TrainRef(wagon_id,end)` 仅保留兼容。
   **"段（simple_segment）"不参与引用**（`model/segments.py` 只作派生视图）。
 - **失效语义的判据由本模块提供**（Q23-2 的"永久失效 = 引用对象不存在"）：
@@ -191,11 +191,14 @@ class TrainRef:
 
 @dataclass(frozen=True)
 class CoupleSelector:
-    """声明式连挂目标（P7c 首版：在固定 edge 上选择一个暴露端头）。"""
+    """声明式连挂目标（P7c 首版：固定 edge + 执行列车驶入方向）。"""
 
     edge_id: int
+    direction: int
 
     def validate(self, network: RailNetwork | None = None) -> list[str]:
+        if self.direction not in (1, -1):
+            return [f"固定连挂 edge direction 非法：{self.direction}（应为 ±1）"]
         if self.edge_id < 0:
             return [f"固定连挂边 id 非法：{self.edge_id}"]
         if network is not None and self.edge_id not in network.edges:
@@ -238,11 +241,15 @@ class PlanItem:
         fixed_route: FixedRoute | None = None,
         *,
         edge_id: int | None = None,
+        direction: int | None = None,
     ) -> PlanItem:
         return cls(
             command=PlanCommand.GOTO_COUPLE,
             train_ref=train_ref,
-            couple_selector=(CoupleSelector(edge_id) if edge_id is not None else None),
+            couple_selector=(
+                CoupleSelector(edge_id, direction if direction is not None else 0)
+                if edge_id is not None else None
+            ),
             anchors=anchors,
             fixed_route=fixed_route,
         )
@@ -262,6 +269,14 @@ class PlanItem:
     @property
     def label(self) -> str:
         return COMMAND_LABELS.get(self.command, self.command.value)
+
+    @property
+    def display_label(self) -> str:
+        """面向玩家的简短描述；selector 必须显式展示 edge 与方向。"""
+        if self.command is PlanCommand.GOTO_COUPLE and self.couple_selector is not None:
+            selector = self.couple_selector
+            return f"{self.label} edge {selector.edge_id} dir {selector.direction:+d}"
+        return self.label
 
     def validate(
         self,
@@ -346,8 +361,10 @@ class PlanItem:
             if (self.command is PlanCommand.GOTO_COUPLE
                     and self.couple_selector is not None
                     and self.fixed_route.edges
-                    and self.fixed_route.edges[-1][0] != self.couple_selector.edge_id):
-                problems.append(f"{label}：固定路径末边不是连挂 edge")
+                    and self.fixed_route.edges[-1] != (
+                        self.couple_selector.edge_id, self.couple_selector.direction
+                    )):
+                problems.append(f"{label}：固定路径末段不是 selector 指定的 edge + direction")
 
         # ⑤ 路径限定（硬约束锚点）自洽 + 引用存在性
         for i, anchor in enumerate(self.anchors):
