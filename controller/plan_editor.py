@@ -202,8 +202,31 @@ class PlanEditor:
         from controller.coupling import end_coupler_pos
         end = "head" if target_end == "head" else "tail"
         _position, edge_id, t = end_coupler_pos(target_train, end)
+        return self.append_goto_couple_edge(edge_id, target_t=t)
+
+    def append_goto_couple_edge(
+        self, edge_id: int, *, target_t: float = 0.5,
+        direction: int | None = None,
+    ) -> tuple[bool, str]:
+        """按 edge 创建声明式连挂入口。
+
+        计划编辑时不要求 edge 上当前已经存在一列“外部目标车”。这使得
+        headshunt 可以在目标仍属于本编组、端头仍受 PLAY 手动连挂保护时，
+        预先写下未来的 ``CoupleSelector(edge, direction)``。
+
+        ``target_t`` 只用于编辑期冻结接近路线；运行期候选端头会在同一 edge
+        上重新解析。未指定 direction 时尝试两个方向并选择可达且代价较低者。
+        """
+        if self.owner is None or self.train is None:
+            return False, "计划编辑错误：编辑态未开启"
+        edge = self.network.edges.get(edge_id)
+        if edge is None:
+            return False, f"计划编辑错误：edge {edge_id} 不存在"
+        target_t = max(0.0, min(1.0, float(target_t)))
+        directions = (direction,) if direction in (1, -1) else (1, -1)
         result = None
-        for target_direction in (1, -1):
+        selected_direction = None
+        for target_direction in directions:
             item = PlanItem.goto_couple(
                 anchors=self.draft.anchors,
                 edge_id=edge_id,
@@ -218,12 +241,13 @@ class PlanEditor:
                 # 接近路线不得偷偷依赖寻路器的死端自动换向。
                 allow_reversal=False,
                 consist_length=self.train.state.consist.total_length,
-                couple_target=(edge_id, t, target_direction),
+                couple_target=(edge_id, target_t, target_direction),
             )
             if (candidate.path is not None
                     and (result is None or result.path is None
                          or candidate.path.remaining_to_goal < result.path.remaining_to_goal)):
                 result = candidate
+                selected_direction = target_direction
             elif result is None:
                 result = candidate
         assert result is not None
@@ -234,7 +258,9 @@ class PlanEditor:
             anchors=self.draft.anchors,
             fixed_route=result.path.freeze(),
             edge_id=edge_id,
-            direction=result.path.edges[-1][1],
+            direction=(selected_direction
+                       if selected_direction in (1, -1)
+                       else result.path.edges[-1][1]),
         )
         if self.owner.plan is None:
             self.owner.plan = Plan(requires_closed_cycle=True)
@@ -242,7 +268,7 @@ class PlanEditor:
         self.owner.plan.append(frozen)
         self.draft = PlanDraft()
         return True, (
-            f"计划已冻结驶入 edge {edge_id} dir {result.path.edges[-1][1]:+d} 的"
+            f"计划已冻结驶入 edge {edge_id} dir {frozen.couple_selector.direction:+d} 的"
             "声明式连挂 selector，"
             f"并追加为第 {len(self.owner.plan)} 条"
         )

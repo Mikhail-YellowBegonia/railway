@@ -49,7 +49,7 @@ project files.
 | `B` / `D` / `H` | Track build / delete / signal mode |
 | `S` | Save the network, signals, and trains to `manual_track.geojson` |
 | `I` | Open the selected train's consist panel in PLAY mode |
-| `K` | Couple or decouple at the highlighted coupler; add the corresponding plan command while editing |
+| `K` | Couple or decouple at the highlighted coupler; while editing, add decouple at an internal coupler or fixed-edge coupling over a hovered track edge/end coupler |
 | `R` | Reverse a parked train; add a reversal command while editing |
 | `W` | Add a wait-for-coupling command while editing |
 | `Enter` | Freeze the current plan route candidate |

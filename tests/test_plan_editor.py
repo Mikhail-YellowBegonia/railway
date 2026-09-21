@@ -147,6 +147,15 @@ assert wagon.plan.items[0].train_ref is None
 assert own_selector.direction in (1, -1)
 print("✅ ⑥b 本编组暴露端可用于预建 selector，计划不绑定当前车厢")
 
+# P7c UX：不依赖受保护的本车端头，直接在目标 edge 上按 K 预建 selector。
+wagon.plan = None
+ok, message = editor.append_goto_couple_edge(e1, target_t=0.5)
+assert ok, message
+edge_selector = wagon.plan.items[0].couple_selector
+assert edge_selector is not None and edge_selector.edge_id == e1
+assert edge_selector.direction in (1, -1)
+print("✅ ⑥c 直接选择 edge 创建 selector，支持目标仍在本编组时的 headshunt")
+
 # ⑦ 最小管理能力：编辑态可删除当前条目或清空计划；不在数据层隐式重算路线。
 wagon.plan = Plan([PlanItem.wait_couple(), PlanItem.wait_couple()], repeat=False)
 ok, message = editor.remove_current()

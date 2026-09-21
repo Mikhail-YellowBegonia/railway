@@ -345,7 +345,10 @@ class GameLoop:
                         other_idx = self.trains.index(train) + 1
                         which = "车头" if key == "head" else "车尾"
                         if train is self.active_train:
-                            txt = f"本车{which}（连挂请悬停其它列车端头）"
+                            if self.plan_editor.active:
+                                txt = f"计划连挂 edge 目标（本车{which}）· K 创建 selector"
+                            else:
+                                txt = f"本车{which}（连挂请悬停其它列车端头）"
                         else:
                             txt = f"连挂目标 #{other_idx}（{which}）· K 确认"
                             if not train.is_parked():
@@ -501,11 +504,33 @@ class GameLoop:
             print(message)
         elif event.key == pygame.K_k and self.plan_editor.active:
             if self._hovered_coupler is None:
-                print("计划编辑错误：请悬停其它列车的车尾后按 K")
+                # P7c 的声明式入口不要求当前已经存在外部目标：在轨道 edge
+                # 上按 K 即可预建 selector，供 headshunt 在解挂后重新解析。
+                snap = self.editor._snap(self._mouse_world_pos())
+                if snap.snapped_edge_id is None:
+                    print("计划编辑错误：请悬停端头或轨道 edge 后按 K")
+                else:
+                    _ok, message = self.plan_editor.append_goto_couple_edge(
+                        snap.snapped_edge_id,
+                        target_t=(snap.snapped_edge_t
+                                  if snap.snapped_edge_t is not None else 0.5),
+                    )
+                    print(message)
             else:
                 target, kind, end = self._hovered_coupler
                 if kind == "internal":
                     _ok, message = self.plan_editor.append_decouple(int(end) + 1)
+                    print(message)
+                elif target is self.active_train:
+                    # PLAY 手动连挂仍保护本车端头；计划编辑中则只取它所在
+                    # edge（以及编辑器推导出的进入方向），不绑定当前车厢。
+                    from controller.coupling import end_coupler_pos
+                    _position, edge_id, target_t = end_coupler_pos(
+                        target, "head" if end == "head" else "tail",
+                    )
+                    _ok, message = self.plan_editor.append_goto_couple_edge(
+                        edge_id, target_t=target_t,
+                    )
                     print(message)
                 else:
                     _ok, message = self.plan_editor.append_goto_couple(target, str(end))
