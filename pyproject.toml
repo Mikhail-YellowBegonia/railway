@@ -3,7 +3,11 @@ name = "railway"
 version = "0.1.0"
 description = "A 2D railway sandbox focused on track construction, signalling, consists, and reproducible schedule operations"
 readme = "README.md"
-license = { file = "LICENSE" }
+authors = [
+    { name = "Mikhail" },
+]
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     "pygame-ce>=2.5.7",

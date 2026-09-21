@@ -7,8 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Python railway sandbox game inspired by Transport Fever 2 + AutoCAD. MVC architecture.
 
 **编辑器已稳固**（Steps 0–6 + 吸附 + 空间索引全部完成，权威规格 `docs/editor.md`）。
-当前重心不在编辑器，而在**补齐 demo 缺口并发布**：最大缺口是**计划式自动驾驶**
-——**✅ 设计已研讨完毕、规划已封口（2026-09-10）**；**P0~P3b 已完成，P5（最小交互）代码完成、等待人工 GUI 验收；通过后进入 P7（连挂条目）→ P9（demo 收口）**。
+当前重心不在编辑器，而在**补齐 demo 缺口并发布**：计划式自动驾驶的 P0~P7b 已完成
+并人工验收；当前推进 P9 无争议整理项，随后完成 demo 发布门禁 P7c（声明式连挂候选
+层），再做 P9 发布验收。
 **实施路线看 `docs/plan_layer_roadmap.md`（P0~P9，已封口；§3.1 = 各阶段实现要点与验收标准，§3.2 = 已完成记录）**；**总账看 `docs/roadmap.md`**
 （含「计划式自动驾驶」专项章节与「当前重心」）。
 ⚡ **上下文吃紧 / 换新会话时，先读 `docs/progress_snapshot.md`**——进度快照与研讨
@@ -32,8 +33,9 @@ Python railway sandbox game inspired by Transport Fever 2 + AutoCAD. MVC archite
   + 不自动删**）；对象**在**但条件不满足 ⇒ **原地等待**。
 - **编辑**：**仅停放（`is_parked()`）列车可编辑，确认即生效**；交互 = **点几下**
   （选中列车 → 依次点击要素追加锚点 / 道岔再点出边 / 退一步 / 确认），**不做面板 GUI**。
-- **demo 不做**：计划落盘（Q23-6）、`Wagon.tick` 接线（Q23-9）、`goto_couple` 的全图
-  搜索与限制（Q23-7）、显式跳转/标签（Q23-8）、**POI 的 O1~O9**（Q22-1 移出关键路径）。
+- **demo 不做**：计划落盘（Q23-6）、`Wagon.tick` 接线（Q23-9）、显式跳转/标签
+  （Q23-8）、**POI 的 O1~O9**（Q22-1 移出关键路径）以及车型/复杂编组高级筛选。
+  但固定 edge 范围的声明式连挂 selector 已列为 P7c，必须在 demo 发布前完成。
 - **不变的底层**：执行层**零改动**——`route: list[DirectedEdge]` → 进路预约 → 授权 →
   物理 → 位移 照旧（今天已是"下单时算一次、之后照 route 走"；全仓唯一跑 Dijkstra 的
   只有 `GameLoop._find_route`，被右键与 K 连挂调用）。普通右键/K 调车是非计划临时
@@ -44,7 +46,8 @@ Python railway sandbox game inspired by Transport Fever 2 + AutoCAD. MVC archite
 - **demo 要做（最大缺口）**：**计划式自动驾驶**——创建计划并跟随计划。现状是
   "去哪里"仍由玩家逐次人工下达（右键设 goal / 车钩连挂指令 / `↑` 设巡航），
   没有"计划"这一层。**✅ 设计已研讨完毕、规划已封口（2026-09-10）**——见上一节
-  「计划层定案」；**实施路线 = `docs/plan_layer_roadmap.md`（P0~P9）——P0~P5 已完成，下一步 P7**；
+  「计划层定案」；**实施路线 = `docs/plan_layer_roadmap.md`——P0~P7b 已完成，当前
+  P9 整理，之后 P7c selector 与 P9 发布验收**；
   提案全文与代码核对见 `docs/path_level_plan.md`。**不得照抄任何一个同类游戏**
   （外部调研结论见 `docs/research_pxpatch.md`：可借鉴 3 条 / 陷阱 3 条）。
   ⚠ **POI 已降级为非前置**（Q22-1：锚点先用现成图要素），`docs/poi.md` 的
@@ -57,8 +60,8 @@ Python railway sandbox game inspired by Transport Fever 2 + AutoCAD. MVC archite
   4 项任务是 ①检查数据结构（**已执行，只汇报不修复**）②构思 POI ③新增调度
   计划数据类型 ④接入列车逻辑；②~④ 与 #7 合并研讨。详见 `docs/roadmap.md`
   「G 阶段背景与四项任务」与 `docs/train_control.md` G 章节。
-- **demo 最后一步**：**开源发布**（demo 完成同时开源；许可协议 / README /
-  仓库卫生待办）。
+- **demo 最后一步**：**开源发布**（demo 完成同时开源；许可已定为
+  `GPL-3.0-or-later`，README 截图 / 仓库卫生仍待收口）。
 - **demo 不做**：LOD（代码零实现）、真实物理扩展（roadmap #3）、无物理倒车
   （负向推进原语）、碰撞模型（无碰撞是有意取舍，见下「已知限制：调车/倒车」）、
   **货物/装载逻辑**（roadmap #10，2026-09-10 用户拍板"先缓缓"；参照：OpenTTD
@@ -253,11 +256,11 @@ A 在 B 前方想"倒出去"时只能先掉头（R 键）再前进——若前�
 **玩家手动折返已提供**（2026-09 临时追加功能 1，`reverse_in_place` 改造，
 回归 `tests/test_reverse_in_place.py`）：
 - PLAY 模式选中**停放**列车按 `R` 原地掉头；**任意位置**可用，但要求车身所在
-  轨道段无道岔（`connection_count() >= 3` 的节点），否则拒绝并提示。
-- 语义（用户拍板，勿回退）：**只切换前进方向（逻辑），不反转列车编组（物理）**
-  ——`consist` 顺序不变（**不调 `reversed_consist`**），车厢在轨道上的前后位置
-  随掉头对调（等价整列车原地旋转 180°）。历史：早期实现同时反转 consist，
-  会把编组顺序倒过来，与"掉头只换向、不改编组"的现实调车语义不符。
+  strict `simple_segment` 内，否则拒绝并提示。
+- 语义（2026-09-18 用户拍板，勿回退）：**逻辑朝向属于列车，物理朝向属于车厢**。
+  折返会反转 `consist` 的逻辑顺序，并同步翻转每节 `Wagon.orientation`；因此逻辑
+  车头/车尾互换，但每节车厢的世界位置与物理朝向保持不变。一个编组内允许不同
+  车厢具有不同物理朝向。
 - `reverse_in_place() -> bool`（True 成功 / False 拒绝并打印原因）；调用后清
   route/remaining；行驶中（controller 非 None）拒绝。指令场景（寻路折返标记
   消费）仍走 `_do_auto_reversal` → 同一原语。
@@ -499,8 +502,12 @@ R9 因"计划不落盘"延后、R10 已定并写进语义表、R11 押到 P3 与
 | `I` | any | Toggle spatial index visualization (debug) |
 | `C` | any | Toggle camera follow (train tracking) |
 | `K` | PLAY | 编组确认键：悬停内部车钩=解挂；悬停其它列车端头车钩=连挂（规格见 `docs/consist_ui.md`） |
-| `R` | PLAY | 选中停放列车原地折返（任意位置；只换前进方向、编组顺序不变；要求车身所在段无道岔） |
-| `Space` | PLAY | 悬停内部车钩(停放)=解挂确认；否则 = 紧急停止 |
+| `K` | PLAN 编辑 | 外部端头=追加固定-edge连挂；内部车钩=追加“从逻辑车头后第 n 位解挂” |
+| `R` | PLAY | 选中停放列车原地折返；逻辑首尾互换、车厢物理姿态保持；要求 strict simple_segment |
+| `R` | PLAN 编辑 | 追加 strict simple_segment 折返条目 |
+| `W` | PLAN 编辑 | 追加等待连挂条目 |
+| `O` | PLAY | 打开/关闭基础调度计划选单（当前只读） |
+| `Space` | PLAY | 悬停内部车钩(停放)=解挂确认；否则有计划列车=暂停/继续自动驾驶，无计划列车=紧急停止 |
 | `Enter` | PLAY | 悬停内部车钩(停放)=解挂确认（同 K） |
 | `↑` | Train active | Throttle (accelerate) |
 | `↓` | Train active | Brake (decelerate) |
@@ -525,6 +532,11 @@ tooltip「连挂目标 #k」→ K 确认（已贴住直接连挂；未贴住则�
 上限 30 m/s），列车只在"有指令（route 非空）**且**巡航 > 0"时才行驶；停放车
 巡航=0 时下达指令不会自动起步（下达打印提示"按 ↑ 起步"）。
 
+计划列车的空格暂停是 `TrainEntity.plan_paused` 运行期状态，不写入计划或存档，也不
+移动控制车计划指针。暂停会立即急停并清除本次计划投影；调度器在暂停期间不得重新
+激活条目。再次按空格后，下一帧从列车实际位置重新消费同一冻结路线。游戏窗口不再
+镜像终端打印；操作反馈保留在终端、HUD 与调度计划选单中。
+
 **下达寻路指令不清零巡航**（bug2，勿回退）：`_issue_goal_order`（右键设目的地
 与 K 连挂驶向共用）**不得**把 `self.train_v_target` 清零——真实 GUI 主循环
 `run()` 每帧执行 `active_train.v_target = train_v_target`（巡航写回），清零会
@@ -542,10 +554,9 @@ tooltip「连挂目标 #k」→ K 确认（已贴住直接连挂；未贴住则�
    尾弧长（occ 剩余 + route 全长）− goal 距其段尾折算(eo) − 停车提前量
    （`train._stop_before_m`，`_apply_route_result` 下达时记录，连挂驶向=
    head_hook_offset）。**不重新寻路**（避免折返振荡）。
-2. 连挂驶向（K/右键吸附）固定 `goal_direction = 目标列车 current_direction()`，
-   不再枚举 ±1——枚举可能选到"绕行后从反方向接近目标车尾"的路径（贴上了却因
-   `_ends_aligned` 朝向相反连不上）。被单向信号挡住无法正向到达时明确报不可达。
-   普通右键寻路仍枚举（玩家不表达进站方向）。
+2. 连挂驶向（K/右键吸附）固定 `goal_direction = 本车 current_direction()`，
+   不再枚举 ±1，避免寻路擅自改变接近方向。目标列车可同向或反向；头头/尾尾由
+   连挂层归一化逻辑首尾，车厢物理姿态不变。普通右键寻路仍枚举。
 
 Modifier keys are polled per frame in `GameLoop._sync_modifiers`, not edge-triggered.
 
