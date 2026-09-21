@@ -35,6 +35,10 @@ uv run python main.py
 The game starts from `test_track.geojson`. If `manual_track.geojson` exists, it is
 loaded as the current saved session instead.
 
+`manual_track.geojson` is intentionally ignored by Git: it is the local development
+save for each checkout. Pressing `S` creates or updates it without changing tracked
+project files.
+
 ## Essential controls
 
 | Input | Action |

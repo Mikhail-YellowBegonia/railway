@@ -5,5 +5,10 @@ __pycache__/
 .DS_Store
 .claude/
 
+# Local runtime save. The game intentionally reads/writes this fixed path during
+# development; each checkout owns its own copy and falls back to test_track.geojson
+# when it does not exist.
+manual_track.geojson
+
 # PhotoRec recovery artifacts (not part of this project)
 photorec.*
