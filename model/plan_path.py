@@ -132,9 +132,9 @@ def resolve_plan_item(
     """解析一个计划条目。
 
     - `passable_fn`：透传给寻路（信号层注入；`None` = 全通）。
-    - `couple_target`：连挂类条目的**运行时目标点**（由 P7 从 `TrainRef` 解析出
-      "目标端头车钩所在的边 + t + 到达方向"）。demo 的 `goto_couple` 必须由
-      调用方给出它；缺失即解析失败（而不是悄悄换个目标）。
+    - `couple_target`：连挂类条目的**编辑期目标点**。调用方可从兼容 `TrainRef`
+      或 `CoupleSelector` 创建时点击的端头位置得到“边 + t + 到达方向”；确认后只冻结
+      路径，运行期由 P7c selector 重新解析并锁定具体端头。缺失即解析失败。
     """
     problems = item.validate(network)
     if problems:

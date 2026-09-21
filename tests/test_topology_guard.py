@@ -46,7 +46,8 @@ couple_item = PlanItem.goto_couple(
 rewritten_couple = split.rewrite_plan_item(couple_item)
 assert rewritten_couple.fixed_route is not None
 assert rewritten_couple.fixed_route.edges == ((9, 1), (11, 1), (12, 1))
-assert rewritten_couple.couple_edge_id == 12
+assert rewritten_couple.couple_selector is not None
+assert rewritten_couple.couple_selector.edge_id == 12
 print("✅ ②b 固定-edge 连挂目标随切边改写到冻结路线末端子边")
 
 # ③ 信号只能阻止反向通行，正向路线仍可保留。上例刻意含折返，故另建单向路线。

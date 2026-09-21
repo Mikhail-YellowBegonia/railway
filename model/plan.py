@@ -18,8 +18,9 @@
 - **demo 命令集合 = `goto` / `goto_couple` / `wait_couple` / `decouple` /
   `reverse`，无跳转命令**（Q23-8）：循环只靠"走完回绕第一项"。
 - **引用一律落在物理要素上**（Q22-2）：锚点 → `node_id`、控制点 → `edge_id`、
-  终点 → `(edge_id, t)`；demo 新连挂目标 → **固定 `edge_id`**，运行时按冻结路线
-  进入方向选择第一个可达暴露端。旧式 `TrainRef(wagon_id,end)` 仅保留兼容。
+  终点 → `(edge_id, t)`；demo 新连挂目标 → `CoupleSelector(edge_id)`，运行时按冻结
+  路线进入方向选择、认领并锁定第一个可达暴露端。旧式
+  `TrainRef(wagon_id,end)` 仅保留兼容。
   **"段（simple_segment）"不参与引用**（`model/segments.py` 只作派生视图）。
 - **失效语义的判据由本模块提供**（Q23-2 的"永久失效 = 引用对象不存在"）：
   `validate(...)` 在给出 network 时检查节点/边是否仍存在、控制点出口是否可达。
@@ -189,13 +190,27 @@ class TrainRef:
 
 
 @dataclass(frozen=True)
+class CoupleSelector:
+    """声明式连挂目标（P7c 首版：在固定 edge 上选择一个暴露端头）。"""
+
+    edge_id: int
+
+    def validate(self, network: RailNetwork | None = None) -> list[str]:
+        if self.edge_id < 0:
+            return [f"固定连挂边 id 非法：{self.edge_id}"]
+        if network is not None and self.edge_id not in network.edges:
+            return [f"固定连挂边 {self.edge_id} 不存在（引用永久失效）"]
+        return []
+
+
+@dataclass(frozen=True)
 class PlanItem:
     """计划里的一条条目：命令、编辑元数据与确认后的固定路线。"""
 
     command: PlanCommand
     goal: Goal | None = None
     train_ref: TrainRef | None = None
-    couple_edge_id: int | None = None
+    couple_selector: CoupleSelector | None = None
     decouple_after: int | None = None
     anchors: tuple[Anchor, ...] = ()
     fixed_route: FixedRoute | None = None
@@ -227,7 +242,7 @@ class PlanItem:
         return cls(
             command=PlanCommand.GOTO_COUPLE,
             train_ref=train_ref,
-            couple_edge_id=edge_id,
+            couple_selector=(CoupleSelector(edge_id) if edge_id is not None else None),
             anchors=anchors,
             fixed_route=fixed_route,
         )
@@ -268,15 +283,18 @@ class PlanItem:
                 problems.append(f"{label}：缺少终点 goal")
             if self.train_ref is not None:
                 problems.append(f"{label}：不应带连挂目标 train_ref")
+            if self.couple_selector is not None:
+                problems.append(f"{label}：不应带连挂 selector")
         elif self.command is PlanCommand.GOTO_COUPLE:
-            if self.train_ref is None and self.couple_edge_id is None:
+            if self.train_ref is None and self.couple_selector is None:
                 problems.append(f"{label}：缺少连挂目标（固定 edge 或兼容车厢引用）")
-            if self.train_ref is not None and self.couple_edge_id is not None:
+            if self.train_ref is not None and self.couple_selector is not None:
                 problems.append(f"{label}：不能同时指定车厢和固定 edge")
             if self.goal is not None:
                 problems.append(f"{label}：不应带终点 goal（目标由运行时端头给出）")
         elif self.command is PlanCommand.WAIT_COUPLE:
-            if self.goal is not None or self.train_ref is not None:
+            if (self.goal is not None or self.train_ref is not None
+                    or self.couple_selector is not None):
                 problems.append(f"{label}：不应带终点或连挂目标")
             if self.anchors:
                 problems.append(f"{label}：不应带路径限定（等待条目不产生路径）")
@@ -286,12 +304,12 @@ class PlanItem:
             if self.decouple_after is None or self.decouple_after < 1:
                 problems.append(f"{label}：车头后解挂位次必须 >= 1")
             if (self.goal is not None or self.train_ref is not None
-                    or self.couple_edge_id is not None or self.anchors
+                    or self.couple_selector is not None or self.anchors
                     or self.fixed_route is not None):
                 problems.append(f"{label}：不应带路径或连挂目标")
         elif self.command is PlanCommand.REVERSE:
             if (self.goal is not None or self.train_ref is not None
-                    or self.couple_edge_id is not None or self.decouple_after is not None
+                    or self.couple_selector is not None or self.decouple_after is not None
                     or self.anchors or self.fixed_route is not None):
                 problems.append(f"{label}：不应带其它载荷")
 
@@ -313,10 +331,9 @@ class PlanItem:
         # ③ 连挂目标自洽
         if self.train_ref is not None:
             problems.extend(f"{label}：{p}" for p in self.train_ref.validate())
-        if (self.couple_edge_id is not None and network is not None
-                and self.couple_edge_id not in network.edges):
-            problems.append(
-                f"{label}：固定连挂边 {self.couple_edge_id} 不存在（引用永久失效）"
+        if self.couple_selector is not None:
+            problems.extend(
+                f"{label}：{p}" for p in self.couple_selector.validate(network)
             )
 
         # ④ 固定路径。P3a 允许未确认的草稿继续通过普通 validate；P3b 会传
@@ -327,9 +344,9 @@ class PlanItem:
                 f"{label}：{p}" for p in self.fixed_route.validate(network, goal=route_goal)
             )
             if (self.command is PlanCommand.GOTO_COUPLE
-                    and self.couple_edge_id is not None
+                    and self.couple_selector is not None
                     and self.fixed_route.edges
-                    and self.fixed_route.edges[-1][0] != self.couple_edge_id):
+                    and self.fixed_route.edges[-1][0] != self.couple_selector.edge_id):
                 problems.append(f"{label}：固定路径末边不是连挂 edge")
 
         # ⑤ 路径限定（硬约束锚点）自洽 + 引用存在性

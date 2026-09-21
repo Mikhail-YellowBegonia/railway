@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Iterable
 
-from model.plan import FixedRoute, Plan, PlanItem
+from model.plan import CoupleSelector, FixedRoute, Plan, PlanItem
 
 
 DirectedEdge = tuple[int, int]
@@ -75,18 +75,19 @@ class EdgeSplit:
         )
         changed = changed or rewritten_anchors != anchors
 
-        couple_edge_id = item.couple_edge_id
-        if couple_edge_id == self.old_edge_id:
+        couple_selector = item.couple_selector
+        if couple_selector is not None and couple_selector.edge_id == self.old_edge_id:
             couple_edge_id = (
                 fixed_route.edges[-1][0]
                 if fixed_route is not None and fixed_route.edges
                 else self.second_edge_id
             )
+            couple_selector = CoupleSelector(couple_edge_id)
             changed = True
 
         return item if not changed else replace(
             item, fixed_route=fixed_route, goal=goal, anchors=rewritten_anchors,
-            couple_edge_id=couple_edge_id,
+            couple_selector=couple_selector,
         )
 
 

@@ -116,7 +116,8 @@ ok, message = editor.append_goto_couple(target, "head")
 assert ok and wagon.plan is not None and len(wagon.plan) == 1
 couple_item = wagon.plan.items[0]
 assert couple_item.command is PlanCommand.GOTO_COUPLE
-assert couple_item.train_ref is None and couple_item.couple_edge_id == e1
+assert couple_item.train_ref is None
+assert couple_item.couple_selector is not None and couple_item.couple_selector.edge_id == e1
 assert couple_item.fixed_route is not None
 ok, message = editor.append_wait_couple()
 assert ok and len(wagon.plan) == 2
@@ -129,6 +130,19 @@ wagon.plan.advance()
 wagon.plan.advance()
 assert not wagon.plan.is_complete and wagon.plan.current() is couple_item
 print("✅ ⑥ 编辑态 K/W 创建固定-edge连挂链，计划可回绕")
+
+# P7c：允许用本编组暴露端头所在 edge 预建未来 selector，不绑定本车厢。
+wagon.plan = None
+editor.cancel()
+ok, _message = editor.enter(train)
+assert ok
+ok, message = editor.append_goto_couple(train, "head")
+assert ok, message
+assert wagon.plan is not None and len(wagon.plan) == 1
+own_selector = wagon.plan.items[0].couple_selector
+assert own_selector is not None
+assert wagon.plan.items[0].train_ref is None
+print("✅ ⑥b 本编组暴露端可用于预建 selector，计划不绑定当前车厢")
 
 # ⑦ 最小管理能力：编辑态可删除当前条目或清空计划；不在数据层隐式重算路线。
 wagon.plan = Plan([PlanItem.wait_couple(), PlanItem.wait_couple()], repeat=False)

@@ -196,8 +196,6 @@ class PlanEditor:
     ) -> tuple[bool, str]:
         if self.owner is None or self.train is None:
             return False, "计划编辑错误：编辑态未开启"
-        if target_train is self.train:
-            return False, "计划编辑错误：连挂目标不能是本编组"
         if not target_train.is_parked():
             return False, "计划编辑错误：连挂目标列车必须停稳"
 
@@ -236,7 +234,10 @@ class PlanEditor:
         self.owner.plan.requires_closed_cycle = False
         self.owner.plan.append(frozen)
         self.draft = PlanDraft()
-        return True, f"计划已冻结驶入 edge {edge_id} 连挂并追加为第 {len(self.owner.plan)} 条"
+        return True, (
+            f"计划已冻结驶入 edge {edge_id} 的声明式连挂 selector，"
+            f"并追加为第 {len(self.owner.plan)} 条"
+        )
 
     def append_decouple(self, after: int) -> tuple[bool, str]:
         if self.owner is None or self.train is None:

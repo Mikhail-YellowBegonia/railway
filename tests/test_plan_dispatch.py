@@ -214,7 +214,7 @@ approach_wagon.plan = Plan([
 ])
 couple_plans.tick(approach, [approach, target])
 assert approach_wagon.plan.pointer == 0 and "未暴露" in approach.plan_status
-print("✅ ⑧ 目标消失才跳过；不支持端头与换边只等待并报错")
+print("✅ ⑧ 连挂解析失败明确报错并安全跳过，进程继续")
 
 # ⑨ 连挂事件只推进合并后胜出控制车：goto_couple / wait_couple 均越过一次。
 target.state.consist = Consist([target_wagon])
@@ -669,6 +669,8 @@ edge_plans.tick(edge_train, [edge_train, far_train, near_train])
 assert edge_train.plan_execution is not None
 assert edge_train.plan_execution.target_wagon_id == near_wagon.wagon_id
 assert edge_train.couple_approach_partner is near_train
+edge_plans.tick(near_train, [edge_train, near_train, far_train])
+assert near_train.is_parked() and "连挂认领" in near_train.plan_status
 print("✅ ⑳ 固定 edge 连挂按进入方向选择第一个可达端头")
 
 # 反向进入同一 edge 时应从 node_b 一侧扫描，即优先选择 t 更大的端头。
@@ -689,17 +691,49 @@ assert reverse_train.plan_execution.target_wagon_id == far_wagon.wagon_id
 assert reverse_train.couple_approach_partner is far_train
 print("✅ ⑳b 固定 edge 反向进入时从高 t 端选择第一个可达端头")
 
-# 激活后锁定端头；运行中若出现一个更靠前的候选，必须停车等待而非换目标。
+# 激活后锁定端头；运行中若出现一个更靠前的候选，必须继续驶向原目标。
 inserted_wagon = create_simple_car(length=10.0, mass=30.0)
 inserted_train = TrainEntity(
     TrainState(OccupancyState([(qe, 1)], 25.0, 10.0, []), 0.0, 0.0,
                Consist([inserted_wagon])), edge_net, SimplePhysics(),
 )
 edge_plans.tick(edge_train, [edge_train, inserted_train, near_train, far_train])
+assert edge_train.plan_execution is not None
+assert edge_train.plan_execution.target_wagon_id == near_wagon.wagon_id
+assert edge_train.couple_approach_partner is near_train
+print("✅ ⑳c selector 激活后锁定原端头，新增更近候选不会打断或换目标")
+
+# 第二列执行车不能认领同一端头；它应排除已有 claim，稳定选择下一个候选。
+claim_driver = create_simple_car(
+    length=10.0, mass=30.0, P_rated=1000.0, have_control=True,
+)
+claim_driver.plan = Plan([PlanItem.goto_couple(
+    edge_id=qe,
+    fixed_route=FixedRoute(((qe, 1),), 10.0, 0.0),
+)])
+claim_train = TrainEntity(
+    TrainState(OccupancyState([(qe, 1)], 0.0, 10.0, []), 0.0, 0.0,
+               Consist([claim_driver])), edge_net, SimplePhysics(),
+)
+edge_plans.tick(
+    claim_train, [claim_train, edge_train, near_train, far_train],
+)
+assert claim_train.plan_execution is not None
+assert (
+    claim_train.plan_execution.target_wagon_id,
+    claim_train.plan_execution.target_end,
+) != (
+    edge_train.plan_execution.target_wagon_id,
+    edge_train.plan_execution.target_end,
+)
+print("✅ ⑳d 已认领端头不会被第二列计划重复选择")
+
+# 已锁定目标失效时不换到 far_train；明确报错、清令牌并跳过当前条目。
+edge_plans.tick(edge_train, [edge_train, far_train])
 assert edge_train.plan_execution is None
 assert edge_train.couple_approach_partner is None
-assert "移动" in edge_train.plan_status or "重新确认" in edge_train.plan_status
-print("✅ ⑳c 固定 edge 端头激活后锁定，候选变化不会静默切换目标")
+assert "计划跳过" in edge_train.plan_status and "锁定" in edge_train.plan_status
+print("✅ ⑳e 锁定目标失效时明确报错并跳过，不静默换到其它候选")
 
 # ㉑ 动作条目：折返立即步进；解挂排入延迟动作，成功后循环回绕。
 action_wagons = [

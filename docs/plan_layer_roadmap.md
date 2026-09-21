@@ -114,7 +114,7 @@ Plan = { items, pointer, loop_route, has_wrapped }
 | **P6** | ~~落盘与恢复~~ | —— | ❌ **取消**（Q23-6：demo 不落盘） |
 | **P7** ✅ | **旧式连挂条目**：`goto_couple(TrainRef)` + `wait_couple` + 事件推进 + R10；原定人工验收已完成，兼容路径保留 | `model/plan_dispatch.py` / `controller/plan_editor.py` + 测试 | ✅（Q23-7） |
 | **P7b** ✅ | **demo 固定场景循环调车**：固定 edge 首端头连挂、四端组合归一化、按逻辑车头位次解挂、strict `simple_segment` 折返；动作链允许自然回绕 | `model/plan_dispatch.py` / `controller/game_loop.py` / `controller/plan_editor.py` + 测试；2026-09-20 机回场景人工验收通过 | ✅ |
-| **P7c** ⏳ | **声明式连挂候选层**：保留具体 `TrainRef` 执行原语；计划先表达范围/筛选意图，激活时稳定解析、认领并锁定具体车厢/车钩，再复用 P7/P7b 执行链 | `CoupleSelector` + 解析/认领/锁定测试 + 最小编辑入口 | ✅；demo 发布前完成 |
+| **P7c** 🟡 | **声明式连挂候选层**：保留具体 `TrainRef` 执行原语；计划先表达范围/筛选意图，激活时稳定解析、认领并锁定具体车厢/车钩，再复用 P7/P7b 执行链 | `CoupleSelector` + 解析/认领/锁定测试 + 最小编辑入口；C1/C2 自动回归已完成，待 C3/C4 人工验收 | ✅；demo 发布前完成 |
 | **P8** | ~~`Wagon.tick` 接线~~ | —— | ❌ **不做**（Q23-9） |
 | **P9** | **demo 收口 + 开源**（roadmap #8）：README / 许可 / 仓库卫生 / 文档整理 | —— | ✅（最后一步） |
 | **P10** | **POI 与高级连挂筛选扩展（demo 后）**：站点/建筑范围、车型及复杂编组属性过滤、认领冲突策略 | 新立项后设计 | ❌（不阻塞 demo） |
@@ -330,6 +330,17 @@ P5 正式编辑交互落地后移除。
 固定 edge 使核心 demo 难以可靠创建或讲解，则在 P9 发布验收前插入 **P7d / P10a 最小
 POI 范围**，只实现“有向点/命名范围 → selector edge 集合”的解析与最小编辑入口，仍
 复用 P7c 的候选、认领和锁定层。站台长度、建筑集合、车型/复杂编组筛选继续留在完整 P10。
+
+**2026-09-21 实施记录（C1/C2 已完成）**：
+
+- `model.plan.CoupleSelector(edge_id)` 已成为正式不可变类型；`PlanItem` 的 selector 与
+  兼容 `TrainRef` 严格互斥，固定路线末边、拓扑切边改写和引用失效校验均已覆盖。
+- selector 候选键已固定为“沿进入方向的位置 → `wagon_id` → head/tail 固定顺序”；
+  `PlanExecution` 锁定 `wagon_id + end`，后续 tick 只验证锁定端头，不重新搜索。
+- 其它执行令牌会排除已认领端头；被认领目标列车保持停放。新增更近候选不会换目标；
+  锁定目标失效、无候选及认领冲突均明确报错并跳过当前条目。
+- 编辑器允许用本编组暴露端所在 edge 预建 selector，不绑定当前车厢。全套 23/23
+  回归脚本通过；C3 锁定执行与 C4 机回联合场景仍需人工 GUI 验收。
 
 #### P10 POI 与高级筛选扩展（**demo 后**）
 

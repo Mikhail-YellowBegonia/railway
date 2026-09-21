@@ -32,6 +32,7 @@ from model.plan import (
     END_FRONT,
     END_REAR,
     Anchor,
+    CoupleSelector,
     FixedRoute,
     Plan,
     PlanCommand,
@@ -56,10 +57,12 @@ EDGE_TB = net.add_edge(t, b).edge_id
 anchors = (Anchor(m.node_id), Anchor(t.node_id, EDGE_TC))
 item_goto = PlanItem.goto((EDGE_MA, 0.5, 1), anchors)
 item_couple = PlanItem.goto_couple(TrainRef(wagon_id="w-42", end=END_FRONT))
+item_selector = PlanItem.goto_couple(edge_id=EDGE_MA)
 item_wait = PlanItem.wait_couple()
 
 assert item_goto.validate() == [], item_goto.validate()
 assert item_couple.validate() == [], item_couple.validate()
+assert item_selector.validate(net) == [], item_selector.validate(net)
 assert item_wait.validate() == [], item_wait.validate()
 assert item_goto.validate(net) == [], item_goto.validate(net)
 assert item_goto.label == "前往" and item_wait.label == "等待连挂"
@@ -80,6 +83,14 @@ cases = [
     ),
     (PlanItem(command=PlanCommand.GOTO_COUPLE), "缺少连挂目标"),
     (
+        PlanItem(
+            command=PlanCommand.GOTO_COUPLE,
+            train_ref=TrainRef("w1"),
+            couple_selector=CoupleSelector(EDGE_TM),
+        ),
+        "不能同时指定",
+    ),
+    (
         PlanItem(command=PlanCommand.GOTO_COUPLE, train_ref=TrainRef("w1"), goal=(EDGE_TM, 0.0, 1)),
         "不应带终点",
     ),
@@ -89,7 +100,7 @@ cases = [
 for item, expect in cases:
     problems = item.validate()
     assert any(expect in p for p in problems), f"应标记「{expect}」，实际 {problems}"
-print("✅ ② 命令与载荷不匹配的 6 种非法组合逐个被标记")
+print("✅ ② 命令与载荷不匹配及 TrainRef/selector 互斥均被标记")
 
 # ── ③ 终点三元组越界 / 边不存在 ─────────────────────────────────────────
 assert any("越界" in p for p in PlanItem.goto((EDGE_TM, 1.5, 1)).validate())
@@ -104,7 +115,9 @@ assert any("wagon_id" in p for p in ref_problems), ref_problems
 assert any("端头" in p for p in ref_problems), ref_problems
 assert TrainRef("w", END_REAR).validate() == []
 assert TrainRef("w", END_FRONT).validate() == []
-print("✅ ④ TrainRef：缺少 wagon_id / 端头非法被标记，±1 端头通过")
+assert CoupleSelector(EDGE_MA).validate(net) == []
+assert any("不存在" in p for p in CoupleSelector(99999).validate(net))
+print("✅ ④ TrainRef 与 CoupleSelector 自洽校验通过")
 
 # ── ⑤ 不可变 ────────────────────────────────────────────────────────────
 assert isinstance(item_goto.anchors, tuple), "anchors 必须是 tuple（不可变）"
@@ -112,6 +125,7 @@ for target, attr in (
     (Anchor(1), "node_id"),
     (item_goto, "command"),
     (TrainRef("w"), "wagon_id"),
+    (CoupleSelector(EDGE_MA), "edge_id"),
 ):
     try:
         setattr(target, attr, None)
@@ -119,7 +133,7 @@ for target, attr in (
         assert "frozen" in str(exc).lower() or True
     else:
         raise AssertionError(f"{type(target).__name__}.{attr} 竟然可写（frozen 失效）")
-print("✅ ⑤ Anchor / PlanItem / TrainRef 均为 frozen，`anchors` 为 tuple")
+print("✅ ⑤ Anchor / PlanItem / TrainRef / CoupleSelector 均为 frozen")
 
 # ── ⑥ Plan 指针与编辑语义 ───────────────────────────────────────────────
 plan = Plan()

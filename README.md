@@ -101,9 +101,9 @@ done
   direction while preserving each wagon's physical orientation.
 - Plans are not persisted yet.
 - POIs, cargo, advanced vehicle physics, and LOD are outside the first demo scope.
-- A declarative coupling selector is still required before the demo release. It will
-  resolve a range/filter intent to a concrete wagon coupler and then reuse the current
-  coupling execution path.
+- The first declarative coupling selector currently uses a fixed edge as its range.
+  Its automated model/locking checks pass, but the final GUI shunting scenarios still
+  require manual release validation; POI-based ranges remain under consideration.
 
 ## License
 

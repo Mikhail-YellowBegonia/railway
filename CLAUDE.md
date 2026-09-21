@@ -8,8 +8,8 @@ Python railway sandbox game inspired by Transport Fever 2 + AutoCAD. MVC archite
 
 **编辑器已稳固**（Steps 0–6 + 吸附 + 空间索引全部完成，权威规格 `docs/editor.md`）。
 当前重心不在编辑器，而在**补齐 demo 缺口并发布**：计划式自动驾驶的 P0~P7b 已完成
-并人工验收；当前推进 P9 无争议整理项，随后完成 demo 发布门禁 P7c（声明式连挂候选
-层），再做 P9 发布验收。
+并人工验收；P7c 声明式连挂候选层的 C1/C2 代码与自动回归已完成，当前等待 C3/C4
+人工验收，再决定最小 POI 是否需提前，最后做 P9 发布验收。
 **实施路线看 `docs/plan_layer_roadmap.md`（P0~P9，已封口；§3.1 = 各阶段实现要点与验收标准，§3.2 = 已完成记录）**；**总账看 `docs/roadmap.md`**
 （含「计划式自动驾驶」专项章节与「当前重心」）。
 ⚡ **上下文吃紧 / 换新会话时，先读 `docs/progress_snapshot.md`**——进度快照与研讨
