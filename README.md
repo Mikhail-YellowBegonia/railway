@@ -25,6 +25,9 @@ implemented and manually tested.
 - [uv](https://docs.astral.sh/uv/)
 - A platform supported by pygame-ce
 
+The in-game screen-space controls use `pygame_gui`; `uv sync` installs the compatible
+pygame-ce GUI stack automatically.
+
 ## Run
 
 ```bash
@@ -47,19 +50,25 @@ project files.
 | Left click | Select a train, place a train, or add plan anchors while editing |
 | Right click | Issue a manual destination order in PLAY mode |
 | `B` / `D` / `H` | Track build / delete / signal mode |
+| `J` | Enter or leave POI mode |
+| `T` in POI mode | Create a Station from selected Platform POIs |
 | `S` | Save the network, signals, and trains to `manual_track.geojson` |
 | `I` | Open the selected train's consist panel in PLAY mode |
 | `K` | Couple or decouple at the highlighted coupler; while editing, add decouple at an internal coupler or fixed-edge coupling over a hovered track edge/end coupler |
 | `R` | Reverse a parked train; add a reversal command while editing |
 | `W` | Add a wait-for-coupling command while editing |
 | `Enter` | Freeze the current plan route candidate |
+| `Enter` in POI mode | Create the POI from the selected nodes or edges |
 | `Backspace` | Undo the current plan destination or last anchor |
+| `Backspace` in POI mode | Remove the last selected POI member |
 | `Delete` / `Ctrl+Delete` | Delete the current plan item / clear the plan while editing |
+| `Delete` in POI mode | Delete the POI under the pointer |
 | `Space` | Pause or resume plan autopilot; emergency-stop a train without a plan |
 | `O` | Open the read-only schedule menu |
 | `Esc` | Close the active overlay or cancel the current operation |
 
-The complete editor and interaction reference is in [docs/editor.md](docs/editor.md).
+The interaction architecture and editor reference are in
+[docs/ui_ux.md](docs/ui_ux.md) and [docs/editor.md](docs/editor.md).
 
 ## Suggested demo flow
 
@@ -88,6 +97,7 @@ done
 - [Project roadmap](docs/roadmap.md)
 - [Schedule-plan implementation roadmap](docs/plan_layer_roadmap.md)
 - [Current progress snapshot](docs/progress_snapshot.md)
+- [UI/UX and interaction state specification](docs/ui_ux.md)
 - [Editor specification](docs/editor.md)
 - [Train control and signalling](docs/train_control.md)
 - [Coupling and consist interaction](docs/consist_ui.md)
@@ -102,8 +112,8 @@ done
 - Plans are not persisted yet.
 - POIs, cargo, advanced vehicle physics, and LOD are outside the first demo scope.
 - The first declarative coupling selector uses a fixed edge and approach direction.
-  Its automated model/locking checks pass, but the final GUI shunting scenarios still
-  require manual release validation; POI-based ranges are deferred until after the demo.
+  Its automated checks and full GUI headshunt scenario have passed; the interaction is
+  still keyboard-heavy, and POI-based ranges are deferred until after the demo.
 
 ## License
 

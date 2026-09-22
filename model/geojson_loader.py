@@ -83,6 +83,84 @@ def load_trains(path: str | Path, network: RailNetwork, epsilon: float = 0.01):
     return deserialize_trains(records, network)
 
 
+def load_pois(path: str | Path, network: RailNetwork, epsilon: float = 0.01):
+    """还原顶层 ``pois`` 数组；旧存档无该字段时返回空 POITable。
+
+    Node 用坐标反查；Edge 用无方向的两端坐标反查。任一成员失效时跳过整条 POI，
+    避免静默改变集合语义。
+    """
+    from model.poi import POIMemberKind, POITable
+
+    with open(path, "r") as f:
+        data = json.load(f)
+    table = POITable()
+    for rec in data.get("pois", []):
+        try:
+            member_kind = POIMemberKind(rec["member_kind"])
+            member_ids: list[int] = []
+            valid = True
+            for member in rec.get("members", []):
+                if member_kind == POIMemberKind.NODE:
+                    pos = Vec3(*_pad_coord(member["node"]))
+                    node_id = network.node_id_at(pos, epsilon)
+                    if node_id is None:
+                        valid = False
+                        break
+                    member_ids.append(node_id)
+                else:
+                    edge_rec = member["edge"]
+                    a_id = network.node_id_at(Vec3(*_pad_coord(edge_rec["a"])), epsilon)
+                    b_id = network.node_id_at(Vec3(*_pad_coord(edge_rec["b"])), epsilon)
+                    if a_id is None or b_id is None:
+                        valid = False
+                        break
+                    edge_id = _edge_between(network, a_id, b_id)
+                    if edge_id is None:
+                        valid = False
+                        break
+                    member_ids.append(edge_id)
+            if not valid:
+                continue
+            table.create(
+                member_kind,
+                member_ids,
+                name=rec.get("name"),
+                poi_id=rec.get("poi_id"),
+                network=network,
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    return table
+
+
+def load_stations(path: str | Path, platforms):
+    from model.poi import StationTable
+
+    with open(path, "r") as f:
+        data = json.load(f)
+    table = StationTable()
+    for rec in data.get("stations", []):
+        try:
+            table.create(
+                rec["platform_ids"], name=rec.get("name"),
+                station_id=rec.get("station_id"), platforms=platforms,
+            )
+        except (KeyError, TypeError, ValueError):
+            continue
+    return table
+
+
+def _edge_between(network: RailNetwork, node_a_id: int, node_b_id: int) -> int | None:
+    node = network.nodes.get(node_a_id)
+    if node is None:
+        return None
+    for edge_id in node.incident_edge_ids:
+        edge = network.edges.get(edge_id)
+        if edge is not None and {edge.node_a_id, edge.node_b_id} == {node_a_id, node_b_id}:
+            return edge_id
+    return None
+
+
 def _validate_linestring(coords: list[tuple[float, float, float]]) -> bool:
     n = len(coords)
     if n < 2:

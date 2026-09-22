@@ -156,6 +156,16 @@ assert edge_selector is not None and edge_selector.edge_id == e1
 assert edge_selector.direction in (1, -1)
 print("✅ ⑥c 直接选择 edge 创建 selector，支持目标仍在本编组时的 headshunt")
 
+# P10：POI selector 保存声明式意图，不要求编辑期冻结唯一 edge/path。
+wagon.plan = None
+ok, message = editor.append_goto_couple_poi("platform-1")
+assert ok, message
+poi_item = wagon.plan.items[-1]
+assert poi_item.couple_selector is not None
+assert poi_item.couple_selector.poi_id == "platform-1"
+assert poi_item.fixed_route is None
+print("✅ ⑥d POI 连挂 selector 保存声明式意图，不冻结唯一路径")
+
 # ⑦ 最小管理能力：编辑态可删除当前条目或清空计划；不在数据层隐式重算路线。
 wagon.plan = Plan([PlanItem.wait_couple(), PlanItem.wait_couple()], repeat=False)
 ok, message = editor.remove_current()

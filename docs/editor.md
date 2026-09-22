@@ -205,7 +205,7 @@ Provider，取第一个命中结果直接返回，不再检查低优先级。全
 视觉距离随缩放稳定。Parallel 用固定 `SNAP_THRESHOLD_PX = 12`。
 
 **互斥约定**（键盘层，`controller/game_loop.py`）：G（格点）/ L（长度）/
-A（角度）三者互斥，开一个自动关其余两个；P（平行）、LSHIFT（强制直线）、
+A（角度）三者互斥，开一个自动关其余两个；Ctrl+P（平行）、LSHIFT（强制直线）、
 LALT（Case 2T）独立切换。
 
 ### 3.2 PointSnapProvider（点吸附，优先级 1）
@@ -583,7 +583,7 @@ class PreviewGeometry:
 | ✅ §12.1 公制约定 / 网格背景 / 建造 HUD / Ballast 占位 | §12.1 |
 | ✅ 格点吸附（`GridSnapProvider`，G 键） | §3.3 |
 | ✅ 长度吸附（L 键，仅直线）/ 角度吸附（A 键，仅单弧），G/L/A 互斥 | §3.6 |
-| ✅ 平行吸附 Simple + Complex Case（`ParallelSnapProvider`，P 键） | §3.4 |
+| ✅ 平行吸附 Simple + Complex Case（`ParallelSnapProvider`，Ctrl+P） | §3.4 |
 | ✅ 空间索引（uniform grid，`TILE_SIZE=50m`，340× 加速，I 键可视化） | §11 |
 
 吸附功能的完整规格与分类见 §3。**唯一明确未实现**的是平行吸附 Simple Case
@@ -716,6 +716,21 @@ class PreviewGeometry:
 笨拙曲率分布。尤其垂直/斜向接入。
 
 ---
+
+### 10.6 POI 编辑模式（J）✅ 基础增删查已实现
+
+- `J` 进入/退出 POI 模式；`Esc` 取消草稿并退出。
+- 左键依次选择成员。一个 POI 只能包含 node 或 edge 其中一类；再次点击已选成员会取消。
+- `Enter` 正式创建：edge 集合默认为 `platform`，node 集合默认为 `waypoint`；当前不提供
+  属性编辑。
+- `T` 进入/退出 Station 草稿；此时左键选择已有 Platform，`Enter` 从所选 Platform
+  集合创建 Station，`Backspace` 撤销最后一个 Platform。
+- `Backspace` 撤销最后一个草稿成员；悬停既有 POI 显示名称、类型和成员数，`Delete`
+  删除悬停对象。删除 Platform 时同步清理所有 Station 引用；失去全部 Platform 的空
+  Station 一并删除。
+- POI 用带 12px padding 的半透明矩形包络显示，绘制在轨道和道床之下。
+- POI 是独立的无方向 node/edge 集合；声明式计划在激活/刷新时把 POI/Station 解析为
+  具体车钩、目标和路径快照，见 ADR-001。
 
 ## 11. 当前阶段与近期方向
 

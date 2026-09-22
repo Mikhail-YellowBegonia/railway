@@ -61,6 +61,16 @@ class PlanCommand(Enum):
     REVERSE = "reverse"          # 折返：在同一 simple_segment 内切换逻辑方向
 
 
+class PathPolicy(Enum):
+    """命令级路径生产策略。
+
+    动态寻路是计划的默认行为；固定路线是玩家显式选择的高级工具。
+    """
+
+    DYNAMIC = "dynamic"
+    FIXED = "fixed"
+
+
 #: 命令的中文名（GUI 展示 / 失效提示用；Q23-3 要求失效条目"可见 + 带原因"）。
 COMMAND_LABELS: dict[PlanCommand, str] = {
     PlanCommand.GOTO: "前往",
@@ -191,24 +201,45 @@ class TrainRef:
 
 @dataclass(frozen=True)
 class CoupleSelector:
-    """声明式连挂目标（P7c 首版：固定 edge + 执行列车驶入方向）。"""
+    """声明式连挂范围。
 
-    edge_id: int
-    direction: int
+    ``edge_id + direction`` 保留 P7c 的确定性兼容形式；``poi_id`` / ``station_id``
+    表示可在运行期解析和刷新的声明式范围。POI 范围的 direction 可以为空，表示
+    使用默认策略尝试两个进入方向；固定 edge 仍必须显式指定方向。
+    """
+
+    edge_id: int | None = None
+    direction: int | None = None
+    poi_id: str | None = None
+    station_id: str | None = None
+
+    @property
+    def is_declarative(self) -> bool:
+        return self.poi_id is not None or self.station_id is not None
 
     def validate(self, network: RailNetwork | None = None) -> list[str]:
-        if self.direction not in (1, -1):
-            return [f"固定连挂 edge direction 非法：{self.direction}（应为 ±1）"]
-        if self.edge_id < 0:
-            return [f"固定连挂边 id 非法：{self.edge_id}"]
-        if network is not None and self.edge_id not in network.edges:
-            return [f"固定连挂边 {self.edge_id} 不存在（引用永久失效）"]
+        scopes = sum(value is not None for value in (self.edge_id, self.poi_id, self.station_id))
+        if scopes != 1:
+            return ["连挂 selector 必须且只能指定 edge、POI 或 Station 之一"]
+        if self.edge_id is not None:
+            if self.direction not in (1, -1):
+                return [f"固定连挂 edge direction 非法：{self.direction}（应为 ±1）"]
+            if self.edge_id < 0:
+                return [f"固定连挂边 id 非法：{self.edge_id}"]
+            if network is not None and self.edge_id not in network.edges:
+                return [f"固定连挂边 {self.edge_id} 不存在（引用永久失效）"]
+        elif self.direction not in (None, 1, -1):
+            return [f"声明式连挂 direction 非法：{self.direction}（应为 ±1 或 None）"]
+        if self.poi_id is not None and not self.poi_id:
+            return ["POI selector 缺少 poi_id"]
+        if self.station_id is not None and not self.station_id:
+            return ["Station selector 缺少 station_id"]
         return []
 
 
 @dataclass(frozen=True)
 class PlanItem:
-    """计划里的一条条目：命令、编辑元数据与确认后的固定路线。"""
+    """计划里的一条条目：命令、目标意图与命令级路径策略。"""
 
     command: PlanCommand
     goal: Goal | None = None
@@ -217,6 +248,14 @@ class PlanItem:
     decouple_after: int | None = None
     anchors: tuple[Anchor, ...] = ()
     fixed_route: FixedRoute | None = None
+    path_policy: PathPolicy = PathPolicy.DYNAMIC
+
+    @property
+    def effective_path_policy(self) -> PathPolicy:
+        """兼容旧存档：带 fixed_route 的旧条目继续按固定路线执行。"""
+        if self.fixed_route is not None and self.path_policy is PathPolicy.DYNAMIC:
+            return PathPolicy.FIXED
+        return self.path_policy
 
     # ── 构造捷径（让调用点自解释）───────────────────────────────────────
     @classmethod
@@ -225,12 +264,14 @@ class PlanItem:
         goal: Goal,
         anchors: tuple[Anchor, ...] = (),
         fixed_route: FixedRoute | None = None,
+        path_policy: PathPolicy = PathPolicy.DYNAMIC,
     ) -> PlanItem:
         return cls(
             command=PlanCommand.GOTO,
             goal=goal,
             anchors=anchors,
             fixed_route=fixed_route,
+            path_policy=path_policy,
         )
 
     @classmethod
@@ -239,19 +280,26 @@ class PlanItem:
         train_ref: TrainRef | None = None,
         anchors: tuple[Anchor, ...] = (),
         fixed_route: FixedRoute | None = None,
+        path_policy: PathPolicy = PathPolicy.DYNAMIC,
         *,
         edge_id: int | None = None,
         direction: int | None = None,
+        poi_id: str | None = None,
+        station_id: str | None = None,
     ) -> PlanItem:
         return cls(
             command=PlanCommand.GOTO_COUPLE,
             train_ref=train_ref,
             couple_selector=(
-                CoupleSelector(edge_id, direction if direction is not None else 0)
-                if edge_id is not None else None
+                CoupleSelector(
+                    edge_id=edge_id, direction=direction,
+                    poi_id=poi_id, station_id=station_id,
+                )
+                if any(value is not None for value in (edge_id, poi_id, station_id)) else None
             ),
             anchors=anchors,
             fixed_route=fixed_route,
+            path_policy=path_policy,
         )
 
     @classmethod
@@ -275,7 +323,11 @@ class PlanItem:
         """面向玩家的简短描述；selector 必须显式展示 edge 与方向。"""
         if self.command is PlanCommand.GOTO_COUPLE and self.couple_selector is not None:
             selector = self.couple_selector
-            return f"{self.label} edge {selector.edge_id} dir {selector.direction:+d}"
+            if selector.edge_id is not None:
+                return f"{self.label} edge {selector.edge_id} dir {selector.direction:+d}"
+            scope = f"POI {selector.poi_id}" if selector.poi_id is not None else f"Station {selector.station_id}"
+            direction = "默认方向" if selector.direction is None else f"dir {selector.direction:+d}"
+            return f"{self.label} {scope} {direction}"
         return self.label
 
     def validate(
@@ -291,6 +343,15 @@ class PlanItem:
         """
         problems: list[str] = []
         label = self.label
+
+        if self.path_policy is PathPolicy.FIXED and self.command not in (
+            PlanCommand.GOTO, PlanCommand.GOTO_COUPLE,
+        ):
+            problems.append(f"{label}：只有前往/前往连挂命令支持路径固定")
+        if self.path_policy is PathPolicy.FIXED and self.fixed_route is None and self.command in (
+            PlanCommand.GOTO, PlanCommand.GOTO_COUPLE,
+        ):
+            problems.append(f"{label}：路径固定策略缺少 FixedRoute")
 
         # ① 命令与载荷必须匹配（三种命令各有确定的载荷形态）
         if self.command is PlanCommand.GOTO:
@@ -328,9 +389,14 @@ class PlanItem:
                     or self.anchors or self.fixed_route is not None):
                 problems.append(f"{label}：不应带其它载荷")
 
+        declarative_couple = (
+            self.command is PlanCommand.GOTO_COUPLE
+            and self.couple_selector is not None
+            and self.couple_selector.is_declarative
+        )
         if require_fixed_route and self.command in (
             PlanCommand.GOTO, PlanCommand.GOTO_COUPLE,
-        ) and self.fixed_route is None:
+        ) and self.fixed_route is None and not declarative_couple:
             problems.append(f"{label}：尚未冻结固定路径")
 
         # ② 终点三元组自洽
@@ -360,6 +426,7 @@ class PlanItem:
             )
             if (self.command is PlanCommand.GOTO_COUPLE
                     and self.couple_selector is not None
+                    and self.couple_selector.edge_id is not None
                     and self.fixed_route.edges
                     and self.fixed_route.edges[-1] != (
                         self.couple_selector.edge_id, self.couple_selector.direction

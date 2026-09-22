@@ -7,9 +7,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Python railway sandbox game inspired by Transport Fever 2 + AutoCAD. MVC architecture.
 
 **编辑器已稳固**（Steps 0–6 + 吸附 + 空间索引全部完成，权威规格 `docs/editor.md`）。
-当前重心不在编辑器，而在**补齐 demo 缺口并发布**：计划式自动驾驶的 P0~P7b 已完成
-并人工验收；P7c 声明式连挂候选层的 C1/C2 代码与自动回归已完成，当前等待 C3/C4
-人工验收；selector 固定为 `edge_id + direction`，POI 暂不做，最后完成 P9 发布验收。
+UI/UX 总体方针见 `project.md`，交互状态、输入路由与提示的权威规格见 `docs/ui_ux.md`；
+`pygame_gui` 已获准按需用于屏幕空间控件，不得接管世界空间绘制与拾取。
+当前重心是**完成 demo 发布收口**：计划式自动驾驶的 P0~P7c 已完成并人工验收，
+P7c 的 C3/C4 与完整 headshunt 场景已经通过；selector 固定为
+`edge_id + direction`。当前只剩 P9 整理、干净目录验收与发布。UI/UX 重做、POI、
+2D→3D 架构审查和文档治理已进入总 roadmap，按其明确顺序在 demo 后推进。
 **实施路线看 `docs/plan_layer_roadmap.md`（P0~P9，已封口；§3.1 = 各阶段实现要点与验收标准，§3.2 = 已完成记录）**；**总账看 `docs/roadmap.md`**
 （含「计划式自动驾驶」专项章节与「当前重心」）。
 ⚡ **上下文吃紧 / 换新会话时，先读 `docs/progress_snapshot.md`**——进度快照与研讨
@@ -17,9 +20,9 @@ Python railway sandbox game inspired by Transport Fever 2 + AutoCAD. MVC archite
 
 ## 计划层定案（2026-09-10；Q21/Q22/Q23 共 17 项全部拍板 ⇒ **规划已封口，可进入实现**）
 
-- **形态**：计划 = **有序条目 + 指令指针**（指针在控制车/车厢上）；编辑期用锚点和
-  控制点构造候选路线，确认后冻结为完整 `FixedRoute`。运行期只消费 `FixedRoute`，
-  **禁止以锚点重新寻路**。
+- **形态**：计划 = **有序条目 + 指令指针**（指针在控制车/车厢上）；每条命令默认
+  `PathPolicy.DYNAMIC`，运行时按现状解析；玩家显式标记“路径固定”后才冻结并消费
+  `FixedRoute`。底层 route/预约/授权/物理管线不变。
 - **粒度**：**锚点级 + 部分控制点**；锚点 = **图上已有的节点**（道岔/二度节点），
   控制点 = **"在道岔 N 走哪条出边"**（≈ 现实进路/道岔定反位）；
   **锚点是硬约束**（必须按序经过；解析不出按失效语义处理，**绝不自动绕行**）。
@@ -34,25 +37,24 @@ Python railway sandbox game inspired by Transport Fever 2 + AutoCAD. MVC archite
 - **编辑**：**仅停放（`is_parked()`）列车可编辑，确认即生效**；交互 = **点几下**
   （选中列车 → 依次点击要素追加锚点 / 道岔再点出边 / 退一步 / 确认），**不做面板 GUI**。
 - **demo 不做**：计划落盘（Q23-6）、`Wagon.tick` 接线（Q23-9）、显式跳转/标签
-  （Q23-8）、**POI 的 O1~O9**（Q22-1 移出关键路径）以及车型/复杂编组高级筛选。
+  （Q23-8）以及车型/复杂编组高级筛选。POI 基础层已重新立项，独立于计划实现；车站
+  和 selector 的高级 POI 消费属于后续阶段。
   但固定 edge 范围的声明式连挂 selector 已列为 P7c，必须在 demo 发布前完成。
-- **不变的底层**：执行层**零改动**——`route: list[DirectedEdge]` → 进路预约 → 授权 →
-  物理 → 位移 照旧（今天已是"下单时算一次、之后照 route 走"；全仓唯一跑 Dijkstra 的
-  只有 `GameLoop._find_route`，被右键与 K 连挂调用）。普通右键/K 调车是非计划临时
-  指令，仍可寻路；**计划执行**不得寻路。
+- **不变的底层**：`route: list[DirectedEdge]` → 进路预约 → 授权 → 物理 → 位移照旧。
+  动态计划和固定计划都只向这条管线提交当前 route；固定路径是少数场景的试验性高级
+  补丁，不得成为默认依赖。见 ADR-001。
 
 ## demo 范围拍板（2026-09-10，用户）
 
 - **demo 要做（最大缺口）**：**计划式自动驾驶**——创建计划并跟随计划。现状是
   "去哪里"仍由玩家逐次人工下达（右键设 goal / 车钩连挂指令 / `↑` 设巡航），
   没有"计划"这一层。**✅ 设计已研讨完毕、规划已封口（2026-09-10）**——见上一节
-  「计划层定案」；**实施路线 = `docs/plan_layer_roadmap.md`——P0~P7b 已完成，当前
-  P9 整理，之后 P7c selector 与 P9 发布验收**；
+  「计划层定案」；**实施路线 = `docs/plan_layer_roadmap.md`——P0~P7c 已完成，当前只剩
+  P9 整理与发布验收**；
   提案全文与代码核对见 `docs/path_level_plan.md`。**不得照抄任何一个同类游戏**
   （外部调研结论见 `docs/research_pxpatch.md`：可借鉴 3 条 / 陷阱 3 条）。
-  ⚠ **POI 已降级为非前置**（Q22-1：锚点先用现成图要素），`docs/poi.md` 的
-  O1~O9 **不阻塞实现**；原"落地顺序 POI → 计划数据类型 → 接入列车逻辑"
-  **已被 `plan_layer_roadmap.md` 的 P0~P9 取代**。
+  计划层当前仍以现成图要素冻结路径；`docs/poi.md` 已重新立项为独立基础设施层，
+  后续由车站、Waypoint 和 selector 消费，不改变已验收的固定路径执行链。
 - **demo 要做（与上一条绑定）**：**编组元数据交割复核**（roadmap #9）——本项目
   主张**以车厢为最小单位**（同类游戏多以编组为原子单位），G 阶段原本就是为
   "拆分/拼合时元数据与调度计划交割不当"这一风险准备的。因顺序倒置（连挂/解挂
@@ -108,7 +110,7 @@ model/       Pure data + geometry, no view/controller deps
   pathfinding.py     Edge-based Dijkstra, Path dataclass, turn_allowed integration
   segments.py        simple_segment 全图分区（计划层 P0；切分点 = 度数≠2 或过境转向不许可）
   plan.py            调度计划数据类型（计划层 P1；条目+指针+锚点/控制点，纯数据无消费点）
-  plan_path.py       锚点解析器（计划层 P2；锚点/控制点 → route，无消费点）
+  plan_path.py       路径解析器（确定性条目编辑期冻结；声明式条目运行期生成快照）
   spatial_index.py   Tile-based spatial index (340× speedup, 60fps保障)
 
 view/        pygame-ce rendering only
@@ -185,7 +187,7 @@ track**, not cursor.
 1. **PointSnapProvider** (threshold 0.3) — snaps to nearest Node, returns all
    incident-edge tangent candidates (endpoint=1, switch=N, isolated=0)
 2. **GridSnapProvider**（格点吸附，`G` 键）— 公制格点
-3. **ParallelSnapProvider**（平行吸附，`P` 键，spacing 5.0）— Simple / Complex Case
+3. **ParallelSnapProvider**（平行吸附，`Ctrl+P`，spacing 5.0）— Simple / Complex Case
 4. **PathSnapProvider** (threshold 0.3) — snaps to closest Edge, returns
    `[forward, reverse]` tangent candidates
 
@@ -479,7 +481,7 @@ R9 因"计划不落盘"延后、R10 已定并写进语义表、R11 押到 P3 与
   **指针推进不靠 tick**，而是"到达事件直接调用控制车方法"（Q14）。
 - **T3 仍未做**：~~只读冻结~~（**Q3 已撤销——"只读"是设计准则、不做强制**）、
   载货、~~**计划/命令类型**~~（**✅ 已定稿，见上「计划层定案」**）、
-  ~~POI~~（**已移出关键路径**）、`route`/`goal` 投影重构（属 **P3**）。
+  ~~POI~~（**基础定义已重新立项，进入 P10 实现**）、`route`/`goal` 投影重构（属 **P3**）。
   ✅ **2026-09-10：规划已封口**，计划层可进入实现（`docs/plan_layer_roadmap.md` P0~P9）。
   已在代码里但**不要提前接消费点**的东西：
   `have_control` / `priority` / `Consist.control_cars()` / `Wagon.tick()` /

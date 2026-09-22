@@ -38,12 +38,13 @@ MAX_ARC_RADIUS = 500.0  # 弧半径超过此值时退化为沿 T1 的直线（Q3
 
 
 class EditMode(Enum):
-    """EditMode 顶层模式 = IDLE / BUILD / DELETE / PLAY / SIGNAL."""
+    """编辑器顶层模式。"""
     IDLE = auto()     # 空闲：仅视图操作
     BUILD = auto()    # 建造轨道
     DELETE = auto()   # 删除轨道（边为单位）
     PLAY = auto()     # 游玩：列车放置、选择、指令
     SIGNAL = auto()   # 信号机放置/切换（Step 2：纯手动）
+    POI = auto()      # POI 集合创建/查询/删除
 
 
 class BuildState(Enum):
@@ -101,7 +102,7 @@ class Editor:
         self.grid_snap_enabled: bool = False  # G 键切换格点吸附
         self.length_snap_enabled: bool = False  # L 键切换长度吸附(仅直线建造)
         self.angle_snap_enabled: bool = False  # A 键切换角度吸附(仅单弧建造)
-        self.parallel_snap_enabled: bool = False  # P 键切换平行吸附
+        self.parallel_snap_enabled: bool = False  # Ctrl+P 切换平行吸附
 
     def update_hover(self, world_pos: Vec3) -> None:
         """每帧更新：处理鼠标悬停 + 预览 + 警告"""
@@ -110,7 +111,7 @@ class Editor:
 
         # 更新悬停状态（用于 DELETE 模式和高亮）
         self.hovered_node_id = snap.snapped_node_id
-        if self.mode == EditMode.DELETE:
+        if self.mode in (EditMode.DELETE, EditMode.POI):
             # DELETE 模式：操作单位是边。点吸附到节点时不算 hover edge，
             # 否则用路径吸附结果作为 hover edge。
             if snap.snapped_node_id is not None:

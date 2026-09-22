@@ -10,6 +10,7 @@ from model.dispatch import TrainDispatcher
 from model.occupancy import OccupancyState
 from model.plan import END_FRONT, END_REAR, FixedRoute, Plan, PlanItem, TrainRef
 from model.plan_dispatch import PLAN_CRUISE_SPEED, PlanDispatcher
+from model.poi import POIMemberKind, POITable, StationTable
 from model.rail_network import RailNetwork
 from model.signal import SignalTable
 from model.train_entity import TrainEntity, TrainState
@@ -737,6 +738,55 @@ assert edge_train.plan_execution is None
 assert edge_train.couple_approach_partner is None
 assert "计划跳过" in edge_train.plan_status and "锁定" in edge_train.plan_status
 print("✅ ⑳e 锁定目标失效时明确报错并跳过，不静默换到其它候选")
+
+# ⑳f 声明式 POI selector：计划不带 FixedRoute，激活时解析当前车钩与路径快照。
+scope_net = RailNetwork()
+s0 = scope_net.add_node(Vec3(0.0, 0.0, 0.0))
+s1 = scope_net.add_node(Vec3(100.0, 0.0, 0.0))
+s2 = scope_net.add_node(Vec3(200.0, 0.0, 0.0))
+se0 = scope_net.add_edge(s0, s1).edge_id
+se1 = scope_net.add_edge(s1, s2).edge_id
+scope_pois = POITable()
+platform = scope_pois.create(POIMemberKind.EDGE, [se1], network=scope_net)
+scope_stations = StationTable()
+station = scope_stations.create([platform.poi_id], platforms=scope_pois)
+scope_driver = create_simple_car(
+    length=10.0, mass=30.0, P_rated=1000.0, have_control=True,
+)
+scope_driver.plan = Plan([PlanItem.goto_couple(station_id=station.station_id)])
+scope_train = TrainEntity(
+    TrainState(OccupancyState([(se0, 1)], 0.0, 10.0, []), 0.0, 0.0,
+               Consist([scope_driver])), scope_net, SimplePhysics(),
+)
+scope_target_wagon = create_simple_car(length=10.0, mass=30.0)
+scope_target = TrainEntity(
+    TrainState(OccupancyState([(se1, 1)], 40.0, 10.0, []), 0.0, 0.0,
+               Consist([scope_target_wagon])), scope_net, SimplePhysics(),
+)
+scope_plans = PlanDispatcher(scope_net, scope_pois, scope_stations)
+scope_plans.tick(scope_train, [scope_train, scope_target])
+assert scope_train.plan_execution is not None
+assert scope_train.plan_execution.resolved_route is not None
+assert scope_train.plan_execution.target_wagon_id == scope_target_wagon.wagon_id
+assert scope_train.state.goal is not None and scope_train.state.goal[0] == se1
+assert scope_driver.plan.items[0].fixed_route is None, "运行期解析不得写回计划意图"
+print("✅ ⑳f Station selector 激活时生成路径快照，计划意图保持无 FixedRoute")
+
+# 当前租约目标失效后不跳过声明式条目；停车并在下一激活周期刷新到新候选。
+replacement_wagon = create_simple_car(length=10.0, mass=30.0)
+replacement = TrainEntity(
+    TrainState(OccupancyState([(se1, 1)], 90.0, 10.0, []), 0.0, 0.0,
+               Consist([replacement_wagon])), scope_net, SimplePhysics(),
+)
+scope_plans.tick(scope_train, [scope_train, replacement])
+assert scope_train.plan_execution is None
+assert scope_driver.plan.pointer == 0
+assert "计划等待" in scope_train.plan_status
+scope_plans.tick(scope_train, [scope_train, replacement])
+assert scope_train.plan_execution is not None
+assert scope_train.plan_execution.target_wagon_id == replacement_wagon.wagon_id
+assert scope_driver.plan.pointer == 0
+print("✅ ⑳g 声明式目标失效后保留条目，并刷新到新的 Station 候选")
 
 # ㉑ 动作条目：折返立即步进；解挂排入延迟动作，成功后循环回绕。
 action_wagons = [

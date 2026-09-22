@@ -57,6 +57,10 @@ COLOR_TILE_BOUNDARY = (60, 60, 60)    # 瓦片边界（淡灰）
 COLOR_TILE_QUERY = (120, 120, 60)     # 查询邻域高亮（黄灰）
 COLOR_SIGNAL_GREEN = (60, 220, 90)    # 信号灯：绿（放行）
 COLOR_SIGNAL_RED = (230, 50, 50)      # 信号灯：红（禁止）
+COLOR_POI_STATION = (50, 150, 230, 55)
+COLOR_POI_WAYPOINT = (80, 210, 140, 55)
+COLOR_POI_DRAFT = (255, 210, 70, 65)
+POI_PADDING_PX = 12
 # 信号图标以屏幕像素为基准（与 COUPLER_RADIUS_PX 同一约定），不随 camera.scale
 # 缩放——Layout 模式（见本文件顶部说明）的图形元素本来就跟世界尺度脱钩，
 # 缩小地图看全局时图标不能跟着缩到看不见。
@@ -87,6 +91,7 @@ MODE_NAMES: dict[EditMode, str] = {
     EditMode.DELETE: "DELETE (D)",
     EditMode.PLAY: "PLAY (P)",
     EditMode.SIGNAL: "SIGNAL (H)",
+    EditMode.POI: "POI (J)",
 }
 
 
@@ -102,6 +107,50 @@ class Renderer:
     def draw_grid(self) -> None:
         """绘制自适应档位网格背景（在 clear 之后、draw_network 之前）。"""
         draw_grid(self.surface, self.camera)
+
+    def draw_pois(self, network, pois, poi_editor=None) -> None:
+        """在轨道之下绘制半透明、带屏幕 padding 的矩形包络。"""
+        from model.poi import POIKind, POIMemberKind, poi_world_bounds
+
+        w = self.surface.get_width()
+        h = self.surface.get_height()
+        layer = pygame.Surface((w, h), pygame.SRCALPHA)
+
+        def draw_bounds(bounds, color, width=1):
+            if bounds is None:
+                return
+            min_x, min_y, max_x, max_y = bounds
+            sx1, sy1 = self.camera.world_to_screen(min_x, min_y, w, h)
+            sx2, sy2 = self.camera.world_to_screen(max_x, max_y, w, h)
+            left = min(sx1, sx2) - POI_PADDING_PX
+            top = min(sy1, sy2) - POI_PADDING_PX
+            rect = pygame.Rect(
+                int(left), int(top),
+                max(2, int(abs(sx2 - sx1) + 2 * POI_PADDING_PX)),
+                max(2, int(abs(sy2 - sy1) + 2 * POI_PADDING_PX)),
+            )
+            pygame.draw.rect(layer, color, rect)
+            border = (*color[:3], min(180, color[3] + 90))
+            pygame.draw.rect(layer, border, rect, width)
+
+        for poi in pois.all():
+            color = COLOR_POI_STATION if poi.kind == POIKind.PLATFORM else COLOR_POI_WAYPOINT
+            draw_bounds(poi_world_bounds(poi, network), color)
+
+        if poi_editor is not None and poi_editor.member_kind is not None:
+            from model.poi import POI, POIKind
+            draft_kind = (
+                POIKind.PLATFORM
+                if poi_editor.member_kind == POIMemberKind.EDGE
+                else POIKind.WAYPOINT
+            )
+            draft = POI(
+                "draft", "draft", draft_kind,
+                poi_editor.member_kind, tuple(poi_editor.member_ids),
+            )
+            draw_bounds(poi_world_bounds(draft, network), COLOR_POI_DRAFT, 2)
+
+        self.surface.blit(layer, (0, 0))
 
     def _draw_ballast(self, network: RailNetwork, cam: Camera, w: int, h: int) -> None:
         """绘制 Ballast 道床带（4 m 宽填充多边形）。道岔处允许重叠。"""
@@ -752,7 +801,8 @@ def draw_plan_editor_overlay(
         surface.blit(label, (int(x) + 7, int(y) - 14))
     message = draft.failure or "左键节点=锚点 · 道岔后点出边=控制点 · 左键轨道=终点"
     text = font.render(message[:90], True, color)
-    surface.blit(text, (18, surface.get_height() - 30))
+    # 底部 30px 由统一上下文操作栏占用。
+    surface.blit(text, (18, surface.get_height() - 58))
 
 
 def draw_plan_hud(

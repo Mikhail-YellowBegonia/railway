@@ -118,6 +118,17 @@ assert TrainRef("w", END_FRONT).validate() == []
 assert CoupleSelector(EDGE_MA, 1).validate(net) == []
 assert any("不存在" in p for p in CoupleSelector(99999, 1).validate(net))
 assert any("direction" in p for p in CoupleSelector(EDGE_MA, 0).validate(net))
+poi_selector = CoupleSelector(poi_id="platform-1")
+station_selector = CoupleSelector(station_id="station-1", direction=1)
+assert poi_selector.is_declarative and poi_selector.validate(net) == []
+assert station_selector.is_declarative and station_selector.validate(net) == []
+assert PlanItem.goto_couple(poi_id="platform-1").validate(
+    net, require_fixed_route=True,
+) == []
+assert any(
+    "只能指定" in p
+    for p in CoupleSelector(EDGE_MA, 1, poi_id="platform-1").validate(net)
+)
 assert item_selector.display_label.endswith(f"edge {EDGE_MA} dir +1")
 print("✅ ④ TrainRef 与 CoupleSelector 自洽校验通过")
 

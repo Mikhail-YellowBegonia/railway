@@ -6,7 +6,10 @@ from pathlib import Path
 from model.rail_network import RailNetwork
 
 
-def write_geojson(network: RailNetwork, path: str | Path, signals=None, trains=None) -> None:
+def write_geojson(
+    network: RailNetwork, path: str | Path, signals=None, trains=None, pois=None,
+    stations=None,
+) -> None:
     """写出网络（+ 可选信号数据 + 可选列车状态）。
 
     signals: model.signal.SignalTable | None。Step 2 阶段的最简持久化：
@@ -74,5 +77,57 @@ def write_geojson(network: RailNetwork, path: str | Path, signals=None, trains=N
         from model.session import serialize_trains
         data["trains"] = serialize_trains(trains)
 
+    if pois is not None:
+        data["pois"] = _serialize_pois(network, pois)
+    if stations is not None:
+        data["stations"] = [
+            {
+                "station_id": station.station_id,
+                "name": station.name,
+                "platform_ids": list(station.platform_ids),
+            }
+            for station in stations.all()
+            if not station.validate(pois)
+        ]
+
     with open(path, "w") as f:
         json.dump(data, f, indent=2)
+
+
+def _serialize_pois(network: RailNetwork, pois) -> list[dict]:
+    records: list[dict] = []
+    for poi in pois.all():
+        # 轨道编辑后的 POI 拓扑改写策略尚未定义。当前宁可跳过整条失效 POI，
+        # 也不能只写剩余成员而静默改变集合语义。
+        if poi.validate(network):
+            continue
+        members = []
+        if poi.member_kind.value == "node":
+            for node_id in sorted(poi.member_ids):
+                node = network.nodes.get(node_id)
+                if node is None:
+                    continue
+                p = node.position
+                members.append({"node": [p.x, p.y, p.z]})
+        else:
+            for edge_id in sorted(poi.member_ids):
+                edge = network.edges.get(edge_id)
+                if edge is None:
+                    continue
+                a = network.nodes[edge.node_a_id].position
+                b = network.nodes[edge.node_b_id].position
+                members.append({
+                    "edge": {
+                        "a": [a.x, a.y, a.z],
+                        "b": [b.x, b.y, b.z],
+                    }
+                })
+        if members:
+            records.append({
+                "poi_id": poi.poi_id,
+                "name": poi.name,
+                "kind": poi.kind.value,
+                "member_kind": poi.member_kind.value,
+                "members": members,
+            })
+    return records

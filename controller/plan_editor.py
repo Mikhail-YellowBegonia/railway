@@ -273,6 +273,30 @@ class PlanEditor:
             f"并追加为第 {len(self.owner.plan)} 条"
         )
 
+    def append_goto_couple_poi(
+        self, poi_id: str, *, direction: int | None = None,
+    ) -> tuple[bool, str]:
+        """Append declarative POI intent without freezing a unique edge/path."""
+        if self.owner is None or self.train is None:
+            return False, "计划编辑错误：编辑态未开启"
+        item = PlanItem.goto_couple(
+            anchors=self.draft.anchors,
+            poi_id=poi_id,
+            direction=direction,
+        )
+        problems = item.validate(self.network, require_fixed_route=True)
+        if problems:
+            return False, f"计划编辑错误：{'；'.join(problems)}"
+        if self.owner.plan is None:
+            self.owner.plan = Plan(requires_closed_cycle=True)
+        self.owner.plan.requires_closed_cycle = False
+        self.owner.plan.append(item)
+        self.draft = PlanDraft()
+        return True, (
+            f"计划已追加声明式 POI 连挂 selector {poi_id[:8]}，"
+            "将在激活或目标失效时解析当前车钩与路径"
+        )
+
     def append_decouple(self, after: int) -> tuple[bool, str]:
         if self.owner is None or self.train is None:
             return False, "计划编辑错误：编辑态未开启"

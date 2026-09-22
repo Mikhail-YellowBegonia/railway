@@ -6,11 +6,18 @@ import os
 import pygame
 
 from model.rail_network import RailNetwork
-from model.geojson_loader import load_geojson, load_signals
+from model.geojson_loader import load_geojson, load_pois, load_signals, load_stations
 from model.vec3 import Vec3
 from view.camera import Camera
+from view.gui_layer import GameGUI
 from view.renderer import Renderer
 from controller.editor import Editor, EditMode, BuildState
+from controller.ui_state import (
+    FeedbackCenter,
+    FeedbackLevel,
+    UIContext,
+    action_hints,
+)
 
 WINDOW_W = 1024
 WINDOW_H = 768
@@ -28,15 +35,23 @@ class GameLoop:
         self.clock = pygame.time.Clock()
         self.camera = Camera()
         self.renderer = Renderer(self.surface, self.camera)
+        self.gui = GameGUI(self.surface.get_size())
+        self.feedback = FeedbackCenter()
         # 优先加载固定存档，不存在则加载传入的默认地图
         if os.path.exists(SAVE_PATH):
             self.network = load_geojson(SAVE_PATH)
             print(f"已加载存档 {SAVE_PATH}（{len(self.network.edges)} 条边）")
             self.signals = load_signals(SAVE_PATH, self.network)
+            self.pois = load_pois(SAVE_PATH, self.network)
+            self.stations = load_stations(SAVE_PATH, self.pois)
         else:
             self.network = load_geojson(geo_path)
             from model.signal import SignalTable
             self.signals = SignalTable()
+            from model.poi import POITable
+            self.pois = POITable()
+            from model.poi import StationTable
+            self.stations = StationTable()
         self.editor = Editor(
             self.network,
             self._split_edge_with_guard,
@@ -58,11 +73,16 @@ class GameLoop:
         from model.dispatch import TrainDispatcher
         self.dispatcher = TrainDispatcher(self.network, self.signals, self.block_manager)
         from model.plan_dispatch import PlanDispatcher
-        self.plan_dispatcher = PlanDispatcher(self.network)
+        self.plan_dispatcher = PlanDispatcher(
+            self.network, pois=self.pois, stations=self.stations,
+            passable_fn=self.signals.passable_topology_only,
+        )
         from controller.plan_editor import PlanEditor
         self.plan_editor = PlanEditor(
             self.network, self.signals.passable_topology_only,
         )
+        from controller.poi_editor import POIEditor
+        self.poi_editor = POIEditor(self.network, self.pois, self.stations)
 
         # 平移状态（受模式影响触发集）
         self._pan_button: int | None = None  # 当前正在按的平移按钮（None 表示未平移）
@@ -193,6 +213,10 @@ class GameLoop:
                     cursor_world_pos=mouse_world,
                     query_radius=30.0,  # 可调整，匹配吸附阈值
                 )
+            self.renderer.draw_pois(
+                self.network, self.pois,
+                self.poi_editor if self.editor.mode == EditMode.POI else None,
+            )
             self.renderer.draw_network(self.network, self.editor)
             self.renderer.draw_overlay(
                 self.network, self.editor, mouse_world, self.signals, signal_colors,
@@ -307,6 +331,21 @@ class GameLoop:
             from view.renderer import (draw_train_tooltip, draw_consist_panel,
                                        draw_coupler_highlight,
                                        draw_end_coupler_highlight, draw_text_tooltip)
+            if self.editor.mode == EditMode.POI or self.plan_editor.active:
+                self._update_hovered_poi(mouse_world)
+                hovered_poi = self.pois.get(self.poi_editor.hovered_poi_id or "")
+                if hovered_poi is not None:
+                    mx, my = pygame.mouse.get_pos()
+                    action = (
+                        "K 创建声明式连挂 selector"
+                        if self.plan_editor.active and hovered_poi.member_kind.value == "edge"
+                        else "Delete 删除"
+                    )
+                    draw_text_tooltip(
+                        self.renderer.surface, self.renderer._font, (mx, my),
+                        f"{hovered_poi.name} · {hovered_poi.kind.value} · "
+                        f"{len(hovered_poi.member_ids)} {hovered_poi.member_kind.value}(s) · {action}",
+                    )
             # PLAY 模式：车钩悬停检测 + 高亮 + tooltip（docs/consist_ui.md §4/§5）
             if self.editor.mode == EditMode.PLAY:
                 self._hovered_coupler = self._hit_test_coupler(mouse_world)
@@ -382,6 +421,21 @@ class GameLoop:
                     self.renderer.surface, self.renderer._font,
                     self.trains.index(self.active_train) + 1, self.active_train,
                 )
+            from view.ui_overlay import draw_context_bar, draw_feedback
+            now_ms = pygame.time.get_ticks()
+            draw_context_bar(
+                self.renderer.surface,
+                self.renderer._font,
+                action_hints(self._ui_context()),
+            )
+            draw_feedback(
+                self.renderer.surface,
+                self.renderer._font,
+                self.feedback.current(now_ms),
+            )
+            self.gui.set_active_mode(self.editor.mode)
+            self.gui.update(dt)
+            self.gui.draw(self.renderer.surface)
             pygame.display.flip()
             self.clock.tick(60)
 
@@ -390,9 +444,106 @@ class GameLoop:
 
     # ===== 输入事件分发 =====
 
+    def _ui_context(self) -> UIContext:
+        """Return the single context that owns help and focused input."""
+        if self.plan_menu_open:
+            return UIContext.SCHEDULE_MENU
+        if self.inspect_train is not None and self.editor.mode == EditMode.PLAY:
+            return UIContext.CONSIST_PANEL
+        if self.plan_editor.active:
+            return UIContext.PLAN_EDIT
+        if self.editor.mode == EditMode.BUILD:
+            return (
+                UIContext.BUILD_ACTIVE
+                if self.editor.build_state == BuildState.ACTIVE
+                else UIContext.BUILD_READY
+            )
+        return {
+            EditMode.IDLE: UIContext.IDLE,
+            EditMode.DELETE: UIContext.DELETE,
+            EditMode.SIGNAL: UIContext.SIGNAL,
+            EditMode.POI: UIContext.POI,
+            EditMode.PLAY: UIContext.PLAY,
+        }.get(self.editor.mode, UIContext.IDLE)
+
+    def _notify(
+        self,
+        message: str,
+        level: FeedbackLevel = FeedbackLevel.INFO,
+    ) -> None:
+        """Keep terminal output and add a concise player-facing message."""
+        print(message)
+        self.feedback.post(message, pygame.time.get_ticks(), level)
+
+    def _notify_result(self, ok: bool, message: str) -> None:
+        self._notify(
+            message,
+            FeedbackLevel.SUCCESS if ok else FeedbackLevel.WARNING,
+        )
+
+    def _change_mode(self, mode: EditMode) -> bool:
+        """Central workspace transition with cleanup for mode-owned UI state."""
+        if self.plan_editor.active and mode != EditMode.PLAY:
+            self._notify(
+                "请先用 P 或 Esc 完成计划编辑，再切换工作模式",
+                FeedbackLevel.WARNING,
+            )
+            return False
+        if self.editor.mode == EditMode.POI and mode != EditMode.POI:
+            self.poi_editor.reset_draft()
+        if mode != EditMode.PLAY:
+            self.plan_menu_open = False
+            self.inspect_train = None
+        self.editor.set_mode(mode)
+        return True
+
+    def _handle_ui_action(self, action_id: str) -> None:
+        mode_by_action = {
+            "mode.idle": EditMode.IDLE,
+            "mode.build": EditMode.BUILD,
+            "mode.delete": EditMode.DELETE,
+            "mode.signal": EditMode.SIGNAL,
+            "mode.poi": EditMode.POI,
+            "mode.play": EditMode.PLAY,
+        }
+        mode = mode_by_action.get(action_id)
+        if mode is None or mode == self.editor.mode:
+            return
+        if mode == EditMode.POI:
+            self.poi_editor.reset_draft()
+        if self._change_mode(mode):
+            labels = {
+                EditMode.IDLE: "选择模式",
+                EditMode.BUILD: "BUILD 模式",
+                EditMode.DELETE: "DELETE 模式",
+                EditMode.SIGNAL: "SIGNAL 模式",
+                EditMode.POI: "POI 模式",
+                EditMode.PLAY: "PLAY 模式",
+            }
+            self._notify(f"已切换到{labels[mode]}")
+
     def _handle_event(self, event: pygame.event.Event) -> None:
         if event.type == pygame.QUIT:
             self.running = False
+            return
+
+        resize_events = {pygame.VIDEORESIZE}
+        if hasattr(pygame, "WINDOWRESIZED"):
+            resize_events.add(pygame.WINDOWRESIZED)
+        if event.type in resize_events:
+            if hasattr(event, "size"):
+                resolution = tuple(event.size)
+            elif hasattr(event, "x") and hasattr(event, "y"):
+                resolution = (int(event.x), int(event.y))
+            else:
+                resolution = self.surface.get_size()
+            self.gui.set_resolution(resolution)
+
+        action_id, consumed = self.gui.process_event(event)
+        if action_id is not None:
+            self._handle_ui_action(action_id)
+            return
+        if consumed:
             return
 
         if event.type == pygame.KEYDOWN:
@@ -424,32 +575,50 @@ class GameLoop:
             requested = selection_keys.index(event.key)
             if requested < len(train.state.consist.wagons):
                 self.inspect_wagon_index = requested
-                print(f"编组面板：已选择第 {requested + 1} 节车厢")
+                self._notify(f"编组面板：已选择第 {requested + 1} 节车厢")
             else:
-                print(f"编组面板：本编组没有第 {requested + 1} 节车厢")
+                self._notify(
+                    f"编组面板：本编组没有第 {requested + 1} 节车厢",
+                    FeedbackLevel.WARNING,
+                )
             return True
         if event.key not in (pygame.K_LEFTBRACKET, pygame.K_RIGHTBRACKET, pygame.K_c):
             return False
         if self.plan_editor.active or not train.is_parked():
-            print("编组配置拒绝：请先退出计划编辑并让列车完全停放")
+            self._notify(
+                "编组配置拒绝：请先退出计划编辑并让列车完全停放",
+                FeedbackLevel.WARNING,
+            )
             return True
         wagons = train.state.consist.wagons
         self.inspect_wagon_index = min(max(self.inspect_wagon_index, 0), len(wagons) - 1)
         wagon = wagons[self.inspect_wagon_index]
         if event.key == pygame.K_LEFTBRACKET:
             wagon.set_control_config(priority=wagon.priority - 1)
-            print(f"编组配置：第 {self.inspect_wagon_index + 1} 节优先级 = {wagon.priority}")
+            self._notify(
+                f"编组配置：第 {self.inspect_wagon_index + 1} 节优先级 = {wagon.priority}"
+            )
         elif event.key == pygame.K_RIGHTBRACKET:
             wagon.set_control_config(priority=wagon.priority + 1)
-            print(f"编组配置：第 {self.inspect_wagon_index + 1} 节优先级 = {wagon.priority}")
+            self._notify(
+                f"编组配置：第 {self.inspect_wagon_index + 1} 节优先级 = {wagon.priority}"
+            )
         else:
             wagon.set_control_config(have_control=not wagon.have_control)
             status = "控制车" if wagon.have_control else "非控制车"
-            print(f"编组配置：第 {self.inspect_wagon_index + 1} 节设为{status}")
+            self._notify(f"编组配置：第 {self.inspect_wagon_index + 1} 节设为{status}")
         return True
 
     def _handle_keydown(self, event: pygame.event.Event) -> None:
         if self._handle_inspect_control_key(event):
+            return
+        if event.key == pygame.K_p and event.mod & pygame.KMOD_CTRL:
+            if self.editor.mode != EditMode.BUILD:
+                self._notify("平行吸附只在 BUILD 模式可用", FeedbackLevel.WARNING)
+            else:
+                self.editor.parallel_snap_enabled = not self.editor.parallel_snap_enabled
+                status = "开启" if self.editor.parallel_snap_enabled else "关闭"
+                self._notify(f"平行吸附：{status}")
             return
         if event.key == pygame.K_ESCAPE:
             if self.plan_menu_open:
@@ -457,7 +626,7 @@ class GameLoop:
                 return
             if self.plan_editor.active:
                 ok, message = self.plan_editor.finalize_cycle()
-                print(message)
+                self._notify_result(ok, message)
                 if ok:
                     self.plan_editor.cancel()
                 return
@@ -470,57 +639,81 @@ class GameLoop:
                     self.train_path = None
                 else:
                     # 再按一次退出 PLAY
-                    self.editor.set_mode(EditMode.IDLE)
+                    self._change_mode(EditMode.IDLE)
             else:
-                self.editor.handle_cancel()
+                if self.editor.mode == EditMode.BUILD and self.editor.build_state == BuildState.ACTIVE:
+                    self.editor.handle_cancel()
+                else:
+                    self._change_mode(EditMode.IDLE)
         elif event.key == pygame.K_p and self.editor.mode == EditMode.PLAY:
             if self.plan_editor.active:
                 ok, message = self.plan_editor.finalize_cycle()
-                print(message)
+                self._notify_result(ok, message)
                 if ok:
                     self.plan_editor.cancel()
             elif self.active_train is None:
-                print("计划编辑拒绝：请先选中列车")
+                self._notify("计划编辑拒绝：请先选中列车", FeedbackLevel.WARNING)
             else:
-                _ok, message = self.plan_editor.enter(self.active_train)
-                print(message)
+                self.plan_menu_open = False
+                self.inspect_train = None
+                ok, message = self.plan_editor.enter(self.active_train)
+                self._notify_result(ok, message)
         elif event.key == pygame.K_o:
             if self.editor.mode != EditMode.PLAY:
-                print("调度计划选单只在 PLAY 模式可用")
+                self._notify("调度计划选单只在 PLAY 模式可用", FeedbackLevel.WARNING)
             elif self.active_train is None:
-                print("调度计划选单：请先选中列车")
+                self._notify("调度计划选单：请先选中列车", FeedbackLevel.WARNING)
             else:
                 self.plan_menu_open = not self.plan_menu_open
+                if self.plan_menu_open:
+                    self.inspect_train = None
         elif event.key == pygame.K_BACKSPACE and self.plan_editor.active:
-            print(self.plan_editor.backspace())
+            self._notify(self.plan_editor.backspace())
+        elif event.key == pygame.K_BACKSPACE and self.editor.mode == EditMode.POI:
+            self._notify(self.poi_editor.backspace())
         elif event.key == pygame.K_DELETE and self.plan_editor.active:
             if event.mod & pygame.KMOD_CTRL:
                 _ok, message = self.plan_editor.clear_plan()
             else:
                 _ok, message = self.plan_editor.remove_current()
-            print(message)
+            self._notify_result(_ok, message)
+        elif event.key == pygame.K_DELETE and self.editor.mode == EditMode.POI:
+            poi, message = self.poi_editor.delete_hovered()
+            self._notify_result(poi is not None, message)
         elif event.key == pygame.K_w and self.plan_editor.active:
-            _ok, message = self.plan_editor.append_wait_couple()
-            print(message)
+            ok, message = self.plan_editor.append_wait_couple()
+            self._notify_result(ok, message)
         elif event.key == pygame.K_k and self.plan_editor.active:
             if self._hovered_coupler is None:
                 # P7c 的声明式入口不要求当前已经存在外部目标：在轨道 edge
                 # 上按 K 即可预建 selector，供 headshunt 在解挂后重新解析。
-                snap = self.editor._snap(self._mouse_world_pos())
+                mouse_world = self._mouse_world_pos()
+                self._update_hovered_poi(mouse_world)
+                hovered_poi = self.pois.get(self.poi_editor.hovered_poi_id or "")
+                if hovered_poi is not None and hovered_poi.member_kind.value == "edge":
+                    ok, message = self.plan_editor.append_goto_couple_poi(
+                        hovered_poi.poi_id,
+                    )
+                    self._notify_result(ok, message)
+                    return
+                snap = self.editor._snap(mouse_world)
                 if snap.snapped_edge_id is None:
-                    print("计划编辑错误：请悬停端头或轨道 edge 后按 K")
+                    self._notify(
+                        "计划编辑错误：请悬停端头或轨道 edge 后按 K",
+                        FeedbackLevel.WARNING,
+                    )
                 else:
-                    _ok, message = self.plan_editor.append_goto_couple_edge(
+                    ok, message = self.plan_editor.append_goto_couple_edge(
                         snap.snapped_edge_id,
                         target_t=(snap.snapped_edge_t
                                   if snap.snapped_edge_t is not None else 0.5),
                     )
-                    print(message)
+                    self._notify_result(ok, message)
             else:
                 target, kind, end = self._hovered_coupler
                 if kind == "internal":
-                    _ok, message = self.plan_editor.append_decouple(int(end) + 1)
-                    print(message)
+                    ok, message = self.plan_editor.append_decouple(int(end) + 1)
+                    self._notify_result(ok, message)
                 elif target is self.active_train:
                     # PLAY 手动连挂仍保护本车端头；计划编辑中则只取它所在
                     # edge（以及编辑器推导出的进入方向），不绑定当前车厢。
@@ -528,40 +721,61 @@ class GameLoop:
                     _position, edge_id, target_t = end_coupler_pos(
                         target, "head" if end == "head" else "tail",
                     )
-                    _ok, message = self.plan_editor.append_goto_couple_edge(
+                    ok, message = self.plan_editor.append_goto_couple_edge(
                         edge_id, target_t=target_t,
                     )
-                    print(message)
+                    self._notify_result(ok, message)
                 else:
-                    _ok, message = self.plan_editor.append_goto_couple(target, str(end))
-                    print(message)
+                    ok, message = self.plan_editor.append_goto_couple(target, str(end))
+                    self._notify_result(ok, message)
         elif event.key == pygame.K_r and self.plan_editor.active:
-            _ok, message = self.plan_editor.append_reverse()
-            print(message)
+            ok, message = self.plan_editor.append_reverse()
+            self._notify_result(ok, message)
         elif event.key in (pygame.K_RETURN, pygame.K_KP_ENTER) and self.plan_editor.active:
-            _ok, message = self.plan_editor.confirm()
-            print(message)
+            ok, message = self.plan_editor.confirm()
+            self._notify_result(ok, message)
+        elif (event.key in (pygame.K_RETURN, pygame.K_KP_ENTER)
+              and self.editor.mode == EditMode.POI):
+            if self.poi_editor.station_mode:
+                station, message = self.poi_editor.confirm_station()
+                self._notify_result(station is not None, message)
+            else:
+                poi, message = self.poi_editor.confirm()
+                self._notify_result(poi is not None, message)
         elif event.key == pygame.K_p or event.key == pygame.K_f:
             # P（正式）/ F（兼容旧习惯）切换 PLAY 模式
             if self.editor.mode == EditMode.PLAY:
-                self.editor.set_mode(EditMode.IDLE)
-                self.train_path = None
-                print("PLAY 模式：关闭")
+                if self._change_mode(EditMode.IDLE):
+                    self.train_path = None
+                    self._notify("PLAY 模式：关闭")
             else:
-                self.editor.set_mode(EditMode.PLAY)
-                print("PLAY 模式：开启（左键选中列车/放置，右键下达指令）")
+                if self._change_mode(EditMode.PLAY):
+                    self._notify("PLAY 模式：开启（左键选中列车/放置，右键下达指令）")
         elif event.key == pygame.K_b:
-            self.editor.set_mode(EditMode.BUILD)
+            self._change_mode(EditMode.BUILD)
         elif event.key == pygame.K_d:
-            self.editor.set_mode(EditMode.DELETE)
+            self._change_mode(EditMode.DELETE)
         elif event.key == pygame.K_h:
             # H 键：SIGNAL 模式（信号机放置/切换，纯手动，Step 2）
             if self.editor.mode == EditMode.SIGNAL:
-                self.editor.set_mode(EditMode.IDLE)
-                print("SIGNAL 模式：关闭")
+                self._change_mode(EditMode.IDLE)
+                self._notify("SIGNAL 模式：关闭")
             else:
-                self.editor.set_mode(EditMode.SIGNAL)
-                print("SIGNAL 模式：开启（左键点节点附近某条边的方向放置/切换信号）")
+                if self._change_mode(EditMode.SIGNAL):
+                    self._notify("SIGNAL 模式：开启（左键点节点附近某条边的方向放置/切换信号）")
+        elif event.key == pygame.K_j:
+            if self.editor.mode == EditMode.POI:
+                self._change_mode(EditMode.IDLE)
+                self._notify("POI 模式：关闭")
+            else:
+                self.poi_editor.reset_draft()
+                if self._change_mode(EditMode.POI):
+                    self._notify("POI 模式：开启（左键选择同类 node/edge，Enter 创建，Delete 删除悬停 POI）")
+        elif event.key == pygame.K_t and self.editor.mode == EditMode.POI:
+            if self.poi_editor.station_mode:
+                self._notify(self.poi_editor.cancel_station())
+            else:
+                self._notify(self.poi_editor.begin_station())
         elif event.key == pygame.K_q:
             self.running = False
         elif event.key == pygame.K_g:
@@ -583,19 +797,18 @@ class GameLoop:
             if self.editor.angle_snap_enabled:
                 self.editor.length_snap_enabled = False
                 self.editor.grid_snap_enabled = False
-        elif event.key == pygame.K_p:
-            # P 键切换平行吸附(Simple/Complex Case)；独立开关
-            self.editor.parallel_snap_enabled = not self.editor.parallel_snap_enabled
         elif event.key == pygame.K_s:
             # S 键保存当前路网 + 信号 + 列车到固定存档（启动时会优先加载它）。
             # roadmap #2 会话持久化：列车状态（位置/速度/编组/route/goal/v_target）
             # 一并落盘，见 docs/session_persistence.md。
             from model.geojson_writer import write_geojson
             write_geojson(self.editor.network, SAVE_PATH,
-                          signals=self.signals, trains=self.trains)
+                          signals=self.signals, trains=self.trains,
+                          pois=self.pois, stations=self.stations)
             print(f"已保存 {len(self.editor.network.edges)} 条边 + "
                   f"{len(self.signals.all_signals())} 个信号 + "
-                  f"{len(self.trains)} 列列车到 {SAVE_PATH}")
+                  f"{len(self.trains)} 列列车 + {len(self.pois)} 个 POI + "
+                  f"{len(self.stations)} 个车站到 {SAVE_PATH}")
         elif event.key == pygame.K_i:
             if self.editor.mode == EditMode.PLAY:
                 # PLAY 模式：I 键切换焦点列车编组面板
@@ -603,6 +816,7 @@ class GameLoop:
                     if self.inspect_train is self.active_train:
                         self.inspect_train = None
                     else:
+                        self.plan_menu_open = False
                         self.inspect_train = self.active_train
                         self.inspect_wagon_index = 0
             else:
@@ -708,6 +922,10 @@ class GameLoop:
                 self._signal_left_click(self._mouse_world_pos())
                 return
 
+        if self.editor.mode == EditMode.POI and event.button == 1:
+            self._poi_left_click(self._mouse_world_pos())
+            return
+
         # DELETE 模式：左键优先删除命中的列车（2026-09 用户要求，测试需要清理
         # 错放的列车）；未命中列车才交编辑器删轨道。不触发平移。
         if self.editor.mode == EditMode.DELETE and event.button == 1:
@@ -765,6 +983,40 @@ class GameLoop:
             return PAN_BUTTONS_IDLE
         return PAN_BUTTONS_OTHER
 
+    def _poi_left_click(self, world_pos: Vec3) -> None:
+        from model.poi import POIMemberKind
+
+        if self.poi_editor.station_mode:
+            self._update_hovered_poi(world_pos)
+            self._notify(
+                self.poi_editor.toggle_station_platform(self.poi_editor.hovered_poi_id)
+            )
+            return
+        snap = self.editor._snap(world_pos)
+        if snap.snapped_node_id is not None:
+            self._notify(self.poi_editor.toggle_member(POIMemberKind.NODE, snap.snapped_node_id))
+        elif snap.snapped_edge_id is not None:
+            self._notify(self.poi_editor.toggle_member(POIMemberKind.EDGE, snap.snapped_edge_id))
+        else:
+            self._notify("POI：请点击 node 或 edge", FeedbackLevel.WARNING)
+
+    def _update_hovered_poi(self, world_pos: Vec3) -> None:
+        from model.poi import poi_world_bounds
+
+        padding = 12.0 / max(self.camera.scale, 1e-6)
+        candidates = []
+        for poi in self.pois.all():
+            bounds = poi_world_bounds(poi, self.network)
+            if bounds is None:
+                continue
+            min_x, min_y, max_x, max_y = bounds
+            if (min_x - padding <= world_pos.x <= max_x + padding
+                    and min_y - padding <= world_pos.y <= max_y + padding):
+                area = max(max_x - min_x, 0.0) * max(max_y - min_y, 0.0)
+                candidates.append((area, poi.poi_id))
+        candidates.sort()
+        self.poi_editor.hovered_poi_id = candidates[0][1] if candidates else None
+
     def _sync_modifiers(self) -> None:
         """每帧把键盘修饰状态同步到 Editor。"""
         keys = pygame.key.get_pressed()
@@ -790,12 +1042,12 @@ class GameLoop:
     def _plan_editor_click(self, world_pos: Vec3) -> None:
         snap = self.editor._snap(world_pos)
         if snap.snapped_node_id is not None:
-            print(self.plan_editor.click_node(snap.snapped_node_id))
+            self._notify(self.plan_editor.click_node(snap.snapped_node_id))
             return
         if snap.snapped_edge_id is not None and snap.snapped_edge_t is not None:
-            print(self.plan_editor.click_edge(snap.snapped_edge_id, snap.snapped_edge_t))
+            self._notify(self.plan_editor.click_edge(snap.snapped_edge_id, snap.snapped_edge_t))
             return
-        print("计划编辑错误：请点击节点或轨道")
+        self._notify("计划编辑错误：请点击节点或轨道", FeedbackLevel.WARNING)
 
     def _execute_plan_decouples(self) -> None:
         """在列车 tick 遍历结束后原子执行计划解挂，避免迭代中修改列表。"""
