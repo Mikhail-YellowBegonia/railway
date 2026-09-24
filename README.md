@@ -1,34 +1,88 @@
 # Railway
 
-Railway is a 2D railway sandbox built with Python and pygame-ce. It combines CAD-like
-track construction with train consists, one-way path-based signalling, fixed-route
-schedule plans, coupling, decoupling, and shunting operations.
+Railway is an early-stage railway sandbox game: a modern, 3D-oriented project
+inspired by OpenTTD and other transport simulations. The current prototype uses
+Python and pygame-ce as a small, testable foundation for a much larger game.
 
-The project is approaching its first usable demo. The core editor, signalling,
-session persistence, schedule execution, and fixed-scenario shunting loop have been
-implemented and manually tested.
+<!-- A gameplay GIF will be added here after the first recording session. -->
 
-## Current capabilities
+> The project is still in very early development. The current demo is playable,
+> but it is not yet a complete game.
 
-- Build straight, curved, biarc, and composite track geometry with snapping.
-- Place directional signals and run trains through reserved path blocks.
-- Create, couple, decouple, reverse, save, and restore multi-wagon consists.
-- Attach plans to control cars and freeze complete directed routes at edit time.
-- Execute looping plans without runtime pathfinding.
-- Add fixed-edge coupling, logical-position decoupling, waiting, and strict
-  `simple_segment` reversal commands to a plan.
-- Pause and resume plan autopilot without advancing its instruction pointer.
+## What is here now
 
-## Requirements
+The prototype currently supports:
 
-- Python 3.11 or newer
-- [uv](https://docs.astral.sh/uv/)
-- A platform supported by pygame-ce
+- CAD-like construction of straight, curved, biarc, and composite tracks;
+- directional signals, path reservation, and signal-aware train movement;
+- Platform and Depot POIs with custom names;
+- a consist builder with powered control cars and ordinary coaches;
+- multi-wagon consists that can be coupled, decoupled, reversed, saved, and restored;
+- wagon-owned control state and dispatch plans;
+- fixed-route plan execution, waiting, coupling, decoupling, and shunting operations;
+- a keyboard-first interaction model with pygame-based screen-space controls.
 
-The in-game screen-space controls use `pygame_gui`; `uv sync` installs the compatible
-pygame-ce GUI stack automatically.
+The current demo is intentionally focused on the simulation core and basic railway
+operations. Cargo logistics, economy, multiplayer, terrain, and a complete 3D
+presentation are not implemented yet.
 
-## Run
+## Why this project exists
+
+OpenTTD provides an excellent model for a playable railway sandbox. Railway aims to
+build toward that breadth while exploring a more explicit and robust consist model.
+Coupling, decoupling, shunting, control-car selection, and changing train makeup
+are treated as first-class simulation problems rather than exceptional cases.
+
+The long-term vision is:
+
+1. a complete railway sandbox with construction, operations, and cargo transport;
+2. reliable and expressive consist operations;
+3. multiplayer support;
+4. a modding system designed as part of the architecture;
+5. a renderer fully separated from the simulation core, allowing a useful 3D
+   presentation without making visual fidelity the project's primary goal.
+
+## Core design principles
+
+- **Wagons are domain objects.** Plans, control state, and other wagon-level data
+  remain attached to the wagon so consists can change without losing ownership.
+- **The world model is renderer-independent.** The project uses GeoJSON-inspired
+  data structures, preserving 3D-capable coordinates while the current frontend
+  remains a 2D implementation.
+- **Simulation layers stay separate.** Planning, path reservation, movement,
+  coupling, persistence, and rendering are developed as distinct layers.
+- **Reliability comes before spectacle.** The current goal is a dependable and
+  understandable simulation, not a polished AAA visual presentation.
+
+## Development roadmap
+
+### Early prototype
+
+Python simulation core, pygame-based 2D tools, track construction, signalling,
+train movement, flexible consists, and basic dispatch plans.
+
+### Feature expansion
+
+CargoDist-style logistics, economy, terrain and scenarios, additional vehicle types,
+multiplayer foundations, and experiments with OpenStreetMap/OpenRailwayMap data.
+
+### Playable version
+
+An improved 3D presentation, richer onboarding, and—if needed—a new implementation
+language or runtime for the game core.
+
+### Long-term direction
+
+A lightweight, open-source game framework or engine with a replaceable renderer,
+mod support, and multiplayer capabilities.
+
+The roadmap is exploratory. Later stages may change as the prototype reveals which
+architectural decisions are worth keeping.
+
+## Run the prototype
+
+Requirements: Python 3.11+, [uv](https://docs.astral.sh/uv/), and a platform
+supported by [pygame-ce](https://pyga.me/).
 
 ```bash
 uv sync
@@ -36,93 +90,49 @@ uv run python main.py
 ```
 
 The game starts from `test_track.geojson`. If `manual_track.geojson` exists, it is
-loaded as the current saved session instead.
+loaded as the local development session instead. Press `S` to save that session;
+the file is intentionally ignored by Git.
 
-`manual_track.geojson` is intentionally ignored by Git: it is the local development
-save for each checkout. Pressing `S` creates or updates it without changing tracked
-project files.
-
-## Essential controls
-
-| Input | Action |
-|---|---|
-| `P` | Enter PLAY mode; with a parked train selected, enter or leave plan editing |
-| Left click | Select a train, place a train, or add plan anchors while editing |
-| Right click | Issue a manual destination order in PLAY mode |
-| `B` / `D` / `H` | Track build / delete / signal mode |
-| `J` | Enter or leave POI mode |
-| `T` in POI mode | Create a Station from selected Platform POIs |
-| `S` | Save the network, signals, and trains to `manual_track.geojson` |
-| `I` | Open the selected train's consist panel in PLAY mode |
-| `K` | Couple or decouple at the highlighted coupler; while editing, add decouple at an internal coupler or fixed-edge coupling over a hovered track edge/end coupler |
-| `R` | Reverse a parked train; add a reversal command while editing |
-| `W` | Add a wait-for-coupling command while editing |
-| `Enter` | Freeze the current plan route candidate |
-| `Enter` in POI mode | Create the POI from the selected nodes or edges |
-| `Backspace` | Undo the current plan destination or last anchor |
-| `Backspace` in POI mode | Remove the last selected POI member |
-| `Delete` / `Ctrl+Delete` | Delete the current plan item / clear the plan while editing |
-| `Delete` in POI mode | Delete the POI under the pointer |
-| `Space` | Pause or resume plan autopilot; emergency-stop a train without a plan |
-| `O` | Open the read-only schedule menu |
-| `Esc` | Close the active overlay or cancel the current operation |
-
-The interaction architecture and editor reference are in
+For the current controls and interaction rules, see
 [docs/ui_ux.md](docs/ui_ux.md) and [docs/editor.md](docs/editor.md).
 
-## Suggested demo flow
+## Verification
 
-1. Enter PLAY mode and place or select a train.
-2. Use the consist panel to choose the active control car if needed.
-3. Enter plan editing and click track nodes or edges to build and freeze route items.
-4. Add coupling, decoupling, waiting, or reversal commands where required.
-5. Leave plan editing and watch the train consume only the frozen routes.
-6. Press `Space` to pause the plan completely and press it again to continue.
-
-Plans currently live only in the running session; saving plan data is intentionally
-outside the first demo scope.
-
-## Tests
-
-The repository uses executable regression scripts rather than a test runner:
+The repository uses executable regression scripts:
 
 ```bash
-for test_file in tests/test_*.py; do
-  PYTHONPATH=. SDL_VIDEODRIVER=dummy uv run python "$test_file" || exit 1
-done
+./tools/run_tests.sh
 ```
 
-## Documentation
+The test suite is useful but not complete. Because this is an interactive simulation,
+important changes should also be checked manually in the running game.
 
-- [Project roadmap](docs/roadmap.md)
-- [Schedule-plan implementation roadmap](docs/plan_layer_roadmap.md)
-- [Current progress snapshot](docs/progress_snapshot.md)
-- [UI/UX and interaction state specification](docs/ui_ux.md)
-- [Editor specification](docs/editor.md)
-- [Train control and signalling](docs/train_control.md)
-- [Coupling and consist interaction](docs/consist_ui.md)
-- [Session persistence](docs/session_persistence.md)
+## Acknowledgements
 
-## Known limitations
+- OpenTTD and other railway and transport simulation games are the project's main
+  sources of inspiration. Many basic gameplay ideas and implementation approaches
+  are intentionally studied and adapted from them.
+- The OpenTTD PX-Patch developers provided important technical inspiration for
+  coupling and decoupling design. Railway uses a different data and execution model,
+  but that work has been an invaluable reference.
+- The world representation is informed by GeoJSON and lightweight WebGIS conventions,
+  extended toward a 3D-capable railway simulation.
 
-- No collision simulation; trains may visually pass through one another outside the
-  controlled coupling path.
-- No physical reverse-driving primitive. Logical reversal changes the train's travel
-  direction while preserving each wagon's physical orientation.
-- Plans are not persisted yet.
-- POIs, cargo, advanced vehicle physics, and LOD are outside the first demo scope.
-- The first declarative coupling selector uses a fixed edge and approach direction.
-  Its automated checks and full GUI headshunt scenario have passed; the interaction is
-  still keyboard-heavy, and POI-based ranges are deferred until after the demo.
+## AI-assisted development
+
+AI has been used extensively in this project for planning discussions, code
+implementation, testing assistance, documentation, and review. Core design choices,
+acceptance decisions, and reliability requirements remain under human responsibility.
+
+## Get involved
+
+Contributions and participation are very welcome—and genuinely needed. Whether you
+want to report a bug, test a scenario, discuss simulation rules, improve the UI,
+work on documentation, or contribute code, your help can make a real difference.
+
+Contribution guidelines will be collected in `CONTRIBUTING.md`.
 
 ## License
 
-Copyright (C) 2026 Mikhail.
-
-Current and future versions are licensed under the GNU General Public License,
-version 3 or (at your option) any later version (`GPL-3.0-or-later`). See
-[LICENSE](LICENSE) for the complete terms.
-
-The repository was previously published under the MIT License through commit
-`d10c23e`. Rights already granted for those historical versions remain valid; the
-GPL applies from the relicensing commit onward.
+Railway is licensed under the
+[GNU General Public License v3.0 or later](LICENSE) (`GPL-3.0-or-later`).

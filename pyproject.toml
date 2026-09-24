@@ -1,7 +1,7 @@
 [project]
 name = "railway"
 version = "0.1.0"
-description = "A 2D railway sandbox focused on track construction, signalling, consists, and reproducible schedule operations"
+description = "A 3D-oriented railway sandbox focused on track construction, signalling, flexible consists, and dispatch operations"
 readme = "README.md"
 authors = [
     { name = "Mikhail" },
