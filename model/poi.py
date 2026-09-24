@@ -8,6 +8,7 @@ from uuid import uuid4
 
 class POIKind(str, Enum):
     PLATFORM = "platform"
+    DEPOT = "depot"
     WAYPOINT = "waypoint"
 
 
@@ -34,14 +35,14 @@ class POI:
             problems.append("POI 至少需要一个成员")
         if len(set(self.member_ids)) != len(self.member_ids):
             problems.append("POI 成员不能重复")
-        expected = (
-            POIKind.PLATFORM
+        valid_kinds = (
+            {POIKind.PLATFORM, POIKind.DEPOT}
             if self.member_kind == POIMemberKind.EDGE
-            else POIKind.WAYPOINT
+            else {POIKind.WAYPOINT}
         )
-        if self.kind != expected:
+        if self.kind not in valid_kinds:
             problems.append(
-                f"{self.member_kind.value} POI 默认类型必须是 {expected.value}"
+                f"{self.member_kind.value} POI 类型不匹配：{self.kind.value}"
             )
         if network is not None:
             source = (
@@ -52,10 +53,11 @@ class POI:
             missing = sorted(member_id for member_id in self.member_ids if member_id not in source)
             if missing:
                 problems.append(f"POI 成员不存在：{missing}")
-            if (self.member_kind == POIMemberKind.EDGE
-                    and not missing
-                    and not _edge_sequence_is_continuous(self.member_ids, source)):
-                problems.append("platform 的 edge 必须组成一条按顺序连续、无分叉的路径")
+            if self.member_kind == POIMemberKind.EDGE and not missing:
+                if not _edge_sequence_is_continuous(self.member_ids, source):
+                    problems.append("edge POI 必须组成一条按顺序连续、无分叉的路径")
+                elif _edge_members_form_closed_loop(self.member_ids, source):
+                    problems.append("Platform/Depot 的 edge 集合不能闭合")
         return problems
 
 
@@ -70,18 +72,24 @@ class POITable:
         member_kind: POIMemberKind,
         member_ids,
         *,
+        kind: POIKind | None = None,
         name: str | None = None,
         poi_id: str | None = None,
         network=None,
     ) -> POI:
         members = tuple(int(member_id) for member_id in member_ids)
-        kind = (
-            POIKind.PLATFORM
-            if member_kind == POIMemberKind.EDGE
-            else POIKind.WAYPOINT
-        )
+        if kind is None:
+            kind = (
+                POIKind.PLATFORM
+                if member_kind == POIMemberKind.EDGE
+                else POIKind.WAYPOINT
+            )
         if name is None:
-            prefix = "Platform" if kind == POIKind.PLATFORM else "Waypoint"
+            prefix = {
+                POIKind.PLATFORM: "Platform",
+                POIKind.DEPOT: "Depot",
+                POIKind.WAYPOINT: "Waypoint",
+            }[kind]
             name = self._next_default_name(prefix)
         poi = POI(
             poi_id=poi_id or str(uuid4()),
@@ -267,3 +275,17 @@ def _edge_sequence_is_continuous(member_ids: tuple[int, ...], edges) -> bool:
             return False
         possible_ends = next_ends
     return True
+
+
+def _edge_members_form_closed_loop(member_ids: tuple[int, ...], edges) -> bool:
+    """Return whether the selected edge subgraph has no endpoint.
+
+    Platform and Depot are finite, traversable facilities. A closed edge set has
+    no unambiguous spawn/arrival endpoint, so it is rejected for both kinds.
+    """
+    degrees: dict[int, int] = {}
+    for edge_id in member_ids:
+        edge = edges[edge_id]
+        degrees[edge.node_a_id] = degrees.get(edge.node_a_id, 0) + 1
+        degrees[edge.node_b_id] = degrees.get(edge.node_b_id, 0) + 1
+    return bool(degrees) and all(degree == 2 for degree in degrees.values())

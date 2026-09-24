@@ -17,6 +17,7 @@ class UIContext(Enum):
     PLAN_EDIT = auto()
     CONSIST_PANEL = auto()
     SCHEDULE_MENU = auto()
+    CONSIST_BUILDER = auto()
 
 
 class FeedbackLevel(Enum):
@@ -68,17 +69,20 @@ _CONTEXT_HINTS: dict[UIContext, tuple[ActionHint, ...]] = {
     UIContext.POI: (
         ActionHint("poi.toggle_member", "左键", "选择成员"),
         ActionHint("poi.create", "Enter", "创建"),
+        ActionHint("poi.depot", "V", "Depot 类型"),
+        ActionHint("poi.name", "N", "编辑名称"),
         ActionHint("station.create", "T", "创建 Station"),
         ActionHint("poi.undo_member", "Backspace", "撤销成员"),
-        ActionHint("poi.delete_hovered", "Delete", "删除悬停 POI"),
+        ActionHint("poi.delete_hovered", "X", "删除悬停 POI"),
         ActionHint("mode.cancel", "J/Esc", "退出"),
     ),
     UIContext.PLAY: (
-        ActionHint("play.select", "左键", "选择/放置"),
-        ActionHint("play.issue_order", "右键", "下达目的地"),
-        ActionHint("plan.edit", "P", "编辑计划"), ActionHint("consist.open", "I", "编组"),
-        ActionHint("schedule.open", "O", "计划菜单"),
-        ActionHint("train.stop_or_pause", "Space", "停车/暂停"),
+        ActionHint("play.select", "Left click", "Select/place"),
+        ActionHint("play.issue_order", "Right click", "Issue destination"),
+        ActionHint("play.depot_builder", "L/C/R/Enter", "Build train at Depot"),
+        ActionHint("plan.edit", "P", "Schedule"), ActionHint("consist.open", "I", "Train info"),
+        ActionHint("schedule.open", "O", "Schedule"),
+        ActionHint("train.stop_or_pause", "Space", "Stop/pause"),
     ),
     UIContext.PLAN_EDIT: (
         ActionHint("plan.add_anchor", "左键", "锚点/目标"),
@@ -88,15 +92,23 @@ _CONTEXT_HINTS: dict[UIContext, tuple[ActionHint, ...]] = {
         ActionHint("plan.finish", "P/Esc", "完成编辑"),
     ),
     UIContext.CONSIST_PANEL: (
-        ActionHint("consist.select_wagon", "1-9", "选择车厢"),
-        ActionHint("consist.priority", "[/]", "优先级"),
-        ActionHint("consist.toggle_control", "C", "控制车"),
-        ActionHint("consist.close", "I", "关闭"),
+        ActionHint("consist.select_wagon", "1-9", "Select car"),
+        ActionHint("consist.priority", "[/]", "Priority"),
+        ActionHint("consist.toggle_control", "C", "Toggle control"),
+        ActionHint("consist.close", "I", "Close"),
     ),
     UIContext.SCHEDULE_MENU: (
-        ActionHint("plan.pause", "Space", "暂停/继续"),
-        ActionHint("plan.edit", "P", "编辑计划"),
-        ActionHint("schedule.close", "O/Esc", "关闭"),
+        ActionHint("plan.pause", "Space", "Pause/resume"),
+        ActionHint("plan.edit", "P", "Edit plan"),
+        ActionHint("schedule.close", "O/Esc", "Close"),
+    ),
+    UIContext.CONSIST_BUILDER: (
+        ActionHint("consist.add", "Button/L/C", "Add car"),
+        ActionHint("consist.delete", "Button/Backspace", "Delete car"),
+        ActionHint("consist.move", "←/→", "Move car"),
+        ActionHint("consist.reverse", "Button/R", "Reverse consist"),
+        ActionHint("consist.cancel", "Button/Esc", "Cancel"),
+        ActionHint("consist.complete", "Button/Enter", "Complete"),
     ),
 }
 

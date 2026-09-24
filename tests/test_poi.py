@@ -42,6 +42,13 @@ assert len(table.all()) == 2
 assert table.remove(waypoint.poi_id) is waypoint and table.get(waypoint.poi_id) is None
 print("✅ ① POI 增删查与 edge→platform / node→waypoint 默认属性正确")
 
+depot = table.create(
+    POIMemberKind.EDGE, [e0.edge_id], kind=POIKind.DEPOT,
+    name="North Depot", network=net,
+)
+assert depot.name == "North Depot"
+print("✅ ①d Depot 类型与自定义名称创建正确")
+
 stations = StationTable()
 station = stations.create([platform.poi_id], platforms=table)
 assert station.name == "Station 1" and station.platform_ids == (platform.poi_id,)
@@ -125,14 +132,19 @@ with tempfile.TemporaryDirectory() as tmp:
     assert "direction" not in json.dumps(raw["pois"])
     loaded_net = load_geojson(save)
     loaded = load_pois(save, loaded_net)
-    assert len(loaded) == 1
-    got = loaded.all()[0]
+    assert len(loaded) == 2
+    got = loaded.get(platform.poi_id)
+    assert got is not None
     assert got.poi_id == platform.poi_id and got.name == platform.name
     assert got.kind == POIKind.PLATFORM and len(got.member_ids) == 2
     from model.geojson_loader import load_stations
     loaded_stations = load_stations(save, loaded)
     assert len(loaded_stations) == 1
     assert loaded_stations.all()[0].platform_ids == (platform.poi_id,)
+    loaded_depot = loaded.get(depot.poi_id)
+    assert loaded_depot is not None
+    assert loaded_depot.kind == POIKind.DEPOT
+    assert loaded_depot.name == "North Depot"
 
     old = os.path.join(tmp, "old.geojson")
     write_geojson(net, old)

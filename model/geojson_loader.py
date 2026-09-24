@@ -89,7 +89,7 @@ def load_pois(path: str | Path, network: RailNetwork, epsilon: float = 0.01):
     Node 用坐标反查；Edge 用无方向的两端坐标反查。任一成员失效时跳过整条 POI，
     避免静默改变集合语义。
     """
-    from model.poi import POIMemberKind, POITable
+    from model.poi import POIKind, POIMemberKind, POITable
 
     with open(path, "r") as f:
         data = json.load(f)
@@ -124,6 +124,10 @@ def load_pois(path: str | Path, network: RailNetwork, epsilon: float = 0.01):
             table.create(
                 member_kind,
                 member_ids,
+                kind=POIKind(rec.get(
+                    "kind",
+                    "waypoint" if member_kind == POIMemberKind.NODE else "platform",
+                )),
                 name=rec.get("name"),
                 poi_id=rec.get("poi_id"),
                 network=network,

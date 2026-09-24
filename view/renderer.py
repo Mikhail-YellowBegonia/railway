@@ -58,6 +58,7 @@ COLOR_TILE_QUERY = (120, 120, 60)     # 查询邻域高亮（黄灰）
 COLOR_SIGNAL_GREEN = (60, 220, 90)    # 信号灯：绿（放行）
 COLOR_SIGNAL_RED = (230, 50, 50)      # 信号灯：红（禁止）
 COLOR_POI_STATION = (50, 150, 230, 55)
+COLOR_POI_DEPOT = (220, 150, 55, 65)
 COLOR_POI_WAYPOINT = (80, 210, 140, 55)
 COLOR_POI_DRAFT = (255, 210, 70, 65)
 POI_PADDING_PX = 12
@@ -108,47 +109,89 @@ class Renderer:
         """绘制自适应档位网格背景（在 clear 之后、draw_network 之前）。"""
         draw_grid(self.surface, self.camera)
 
-    def draw_pois(self, network, pois, poi_editor=None) -> None:
-        """在轨道之下绘制半透明、带屏幕 padding 的矩形包络。"""
-        from model.poi import POIKind, POIMemberKind, poi_world_bounds
+    def draw_pois(self, network, pois, poi_editor=None, stations=None) -> None:
+        """Draw POI geometry outlines below the track layer.
+
+        The outline follows sampled rails instead of using an axis-aligned
+        rectangle, so diagonal, curved and multi-platform POIs remain legible.
+        """
+        from model.poi import POIKind, POIMemberKind, POI
 
         w = self.surface.get_width()
         h = self.surface.get_height()
         layer = pygame.Surface((w, h), pygame.SRCALPHA)
 
-        def draw_bounds(bounds, color, width=1):
-            if bounds is None:
-                return
-            min_x, min_y, max_x, max_y = bounds
-            sx1, sy1 = self.camera.world_to_screen(min_x, min_y, w, h)
-            sx2, sy2 = self.camera.world_to_screen(max_x, max_y, w, h)
-            left = min(sx1, sx2) - POI_PADDING_PX
-            top = min(sy1, sy2) - POI_PADDING_PX
-            rect = pygame.Rect(
-                int(left), int(top),
-                max(2, int(abs(sx2 - sx1) + 2 * POI_PADDING_PX)),
-                max(2, int(abs(sy2 - sy1) + 2 * POI_PADDING_PX)),
-            )
-            pygame.draw.rect(layer, color, rect)
-            border = (*color[:3], min(180, color[3] + 90))
-            pygame.draw.rect(layer, border, rect, width)
+        def draw_geometry(poi, color, width=18):
+            screen_paths = []
+            if poi.member_kind == POIMemberKind.NODE:
+                for node_id in poi.member_ids:
+                    node = network.nodes.get(node_id)
+                    if node is None:
+                        continue
+                    screen_paths.append([
+                        self.camera.world_to_screen(
+                            node.position.x, node.position.y, w, h,
+                        ),
+                    ])
+            else:
+                for edge_id in poi.member_ids:
+                    edge = network.edges.get(edge_id)
+                    if edge is None:
+                        continue
+                    if edge.is_arc:
+                        points = edge.sample_arc_points(30)
+                    else:
+                        a = network.nodes.get(edge.node_a_id)
+                        b = network.nodes.get(edge.node_b_id)
+                        points = [point for point in (a.position if a else None,
+                                                      b.position if b else None)
+                                  if point is not None]
+                    if len(points) >= 2:
+                        screen_paths.append([
+                            self.camera.world_to_screen(p.x, p.y, w, h)
+                            for p in points
+                        ])
+            border = (*color[:3], min(210, color[3] + 100))
+            for points in screen_paths:
+                if len(points) == 1:
+                    pygame.draw.circle(layer, color, points[0], width // 2)
+                    pygame.draw.circle(layer, border, points[0], width // 2, 2)
+                else:
+                    pygame.draw.lines(layer, color, False, points, width)
+                    pygame.draw.lines(layer, border, False, points, 2)
 
         for poi in pois.all():
-            color = COLOR_POI_STATION if poi.kind == POIKind.PLATFORM else COLOR_POI_WAYPOINT
-            draw_bounds(poi_world_bounds(poi, network), color)
+            if poi.kind == POIKind.DEPOT:
+                color = COLOR_POI_DEPOT
+            elif poi.kind == POIKind.PLATFORM:
+                color = COLOR_POI_STATION
+            else:
+                color = COLOR_POI_WAYPOINT
+            draw_geometry(poi, color)
+
+        # A Station is a named composition of platforms.  Draw a wider,
+        # translucent outline over all member platform paths without inventing
+        # a rectangular envelope around the whole station.
+        if stations is not None:
+            for station in stations.all():
+                for platform_id in station.platform_ids:
+                    platform = pois.get(platform_id)
+                    if platform is not None:
+                        draw_geometry(platform, (80, 170, 255, 32), 26)
 
         if poi_editor is not None and poi_editor.member_kind is not None:
             from model.poi import POI, POIKind
             draft_kind = (
-                POIKind.PLATFORM
+                poi_editor.poi_kind
                 if poi_editor.member_kind == POIMemberKind.EDGE
+                and poi_editor.poi_kind in (POIKind.PLATFORM, POIKind.DEPOT)
                 else POIKind.WAYPOINT
             )
             draft = POI(
                 "draft", "draft", draft_kind,
                 poi_editor.member_kind, tuple(poi_editor.member_ids),
             )
-            draw_bounds(poi_world_bounds(draft, network), COLOR_POI_DRAFT, 2)
+            draw_geometry(draft, COLOR_POI_DRAFT, 20)
 
         self.surface.blit(layer, (0, 0))
 
@@ -1018,7 +1061,7 @@ def draw_train_hud(
     phase = "【制动】" if braking else "巡航"
     lines = [
         f"速度:    {v_kmh:6.1f} km/h  {phase}",
-        f"目标:    {v_target_kmh:6.1f} km/h  (↑/↓ 调节)",
+        f"目标:    {v_target_kmh:6.1f} km/h  (automatic)",
         f"弧长: {s:7.1f} / {total_length:.1f} m",
         f"加速度: {a:+5.2f} m/s²",
     ]
@@ -1135,7 +1178,7 @@ def draw_consist_panel(
     elif winner is not None:
         lines.append("--- Plan: none ---")
     lines.append("1-9 select  [/] priority  C control")
-    lines.append("Plan edit: Del remove current, Ctrl+Del clear")
+    lines.append("Plan edit: X remove current, Ctrl+X clear")
     lines.append("Only while parked; plan editing locks control config")
 
     line_h = font.get_linesize()

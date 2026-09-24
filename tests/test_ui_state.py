@@ -19,6 +19,7 @@ from controller.ui_state import (
 )
 from view.ui_overlay import draw_context_bar, draw_feedback
 from view.gui_layer import GameGUI
+from controller.consist_builder import ConsistBuilder, WagonPreset
 
 
 # ① 动作提示按上下文集中管理；BUILD 不再与 PLAY 共用裸 P。
@@ -26,7 +27,7 @@ build_bindings = {hint.binding: hint.label for hint in action_hints(UIContext.BU
 play_bindings = {hint.binding: hint.label for hint in action_hints(UIContext.PLAY)}
 assert build_bindings["Ctrl+P"] == "平行吸附"
 assert "P" not in build_bindings
-assert play_bindings["P"] == "编辑计划"
+assert play_bindings["P"] == "Schedule"
 for context in UIContext:
     ids = [hint.action_id for hint in action_hints(context)]
     assert all(ids) and len(ids) == len(set(ids))
@@ -95,3 +96,34 @@ gui.draw(surface)
 assert surface.get_bounding_rect().width > 0
 pygame.quit()
 print("✅ ⑤ pygame_gui 模式工具栏事件、选中态、缩放与绘制通过")
+
+
+# ⑥ 三窗格编组 UI 使用稳定 action id，容量不足时禁用完成。
+pygame.init()
+surface = pygame.display.set_mode((1000, 700), pygame.RESIZABLE)
+gui = GameGUI(surface.get_size())
+builder = ConsistBuilder.start("depot", "Test Depot", 100.0)
+gui.show_consist_builder(builder)
+assert gui._builder_visible
+catalog_button = gui._catalog_buttons[WagonPreset.COACH]
+event = pygame.event.Event(
+    pygame_gui.UI_BUTTON_PRESSED,
+    ui_element=catalog_button,
+    ui_object_id="#consist_catalog_coach",
+)
+action_id, consumed = gui.process_event(event)
+assert consumed and action_id == "consist.catalog.coach"
+add_event = pygame.event.Event(
+    pygame_gui.UI_BUTTON_PRESSED,
+    ui_element=gui._add_button,
+    ui_object_id="#consist_add",
+)
+action_id, consumed = gui.process_event(add_event)
+assert consumed and action_id == "consist.add"
+builder.depot_length = 10.0
+gui.refresh_consist_builder(builder)
+assert not gui._complete_button.is_enabled
+gui.hide_consist_builder()
+assert not gui._builder_visible
+pygame.quit()
+print("✅ ⑥ 三窗格编组 UI action id、刷新、容量门禁与显隐通过")

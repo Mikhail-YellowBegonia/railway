@@ -16,6 +16,8 @@ class POIEditor:
         self.stations = stations
         self.member_kind: POIMemberKind | None = None
         self.member_ids: list[int] = []
+        self.poi_kind: POIKind | None = None
+        self.poi_name: str | None = None
         self.hovered_poi_id: str | None = None
         self.station_mode: bool = False
         self.station_platform_ids: list[str] = []
@@ -23,6 +25,8 @@ class POIEditor:
     def reset_draft(self) -> None:
         self.member_kind = None
         self.member_ids.clear()
+        self.poi_kind = None
+        self.poi_name = None
         self.station_mode = False
         self.station_platform_ids.clear()
 
@@ -32,6 +36,36 @@ class POIEditor:
         self.station_mode = True
         self.station_platform_ids.clear()
         return "Station：请选择一个或多个 Platform，Enter 创建"
+
+    def begin_depot(self) -> str:
+        """Switch the current edge draft to Depot semantics."""
+        if self.station_mode:
+            return "Depot：请先退出 Station 创建状态"
+        if self.member_kind == POIMemberKind.NODE:
+            return "Depot：只能选择 edge，当前 node 草稿已保留"
+        self.poi_kind = POIKind.DEPOT
+        return "Depot：请选择连续 edge，Enter 创建；V 可切回 Platform"
+
+    def begin_platform(self) -> str:
+        if self.station_mode:
+            return "Platform：请先退出 Station 创建状态"
+        if self.member_kind == POIMemberKind.NODE:
+            return "Platform：只能选择 edge，当前 node 草稿已保留"
+        self.poi_kind = POIKind.PLATFORM
+        return "Platform：请选择连续 edge，Enter 创建"
+
+    def set_name(self, name: str | None) -> str:
+        cleaned = (name or "").strip()
+        self.poi_name = cleaned or None
+        return f"POI 名称：{self.poi_name or '使用自动名称'}"
+
+    def append_name_text(self, text: str) -> str:
+        self.poi_name = (self.poi_name or "") + text
+        return f"POI 名称：{self.poi_name or '使用自动名称'}"
+
+    def backspace_name(self) -> str:
+        self.poi_name = (self.poi_name or "")[:-1] or None
+        return f"POI 名称：{self.poi_name or '使用自动名称'}"
 
     def cancel_station(self) -> str:
         self.station_mode = False
@@ -57,6 +91,10 @@ class POIEditor:
         if self.member_kind is not None and self.member_kind != member_kind:
             return "POI：一个对象只能由 edge 或 node 其中一类组成"
         self.member_kind = member_kind
+        if member_kind == POIMemberKind.NODE:
+            self.poi_kind = POIKind.WAYPOINT
+        elif self.poi_kind not in (POIKind.PLATFORM, POIKind.DEPOT):
+            self.poi_kind = POIKind.PLATFORM
         if member_id in self.member_ids:
             self.member_ids.remove(member_id)
             if not self.member_ids:
@@ -86,12 +124,13 @@ class POIEditor:
             return None, "POI 创建失败：请先选择 node 或 edge"
         try:
             poi = self.pois.create(
-                self.member_kind, self.member_ids, network=self.network,
+                self.member_kind, self.member_ids, kind=self.poi_kind,
+                name=self.poi_name, network=self.network,
             )
         except ValueError as exc:
             return None, f"POI 创建失败：{exc}"
         self.reset_draft()
-        label = "platform" if poi.kind.value == "platform" else "waypoint"
+        label = poi.kind.value
         return poi, f"POI 已创建：{poi.name}（{len(poi.member_ids)} 个 {label} edge/node）"
 
     def confirm_station(self):
