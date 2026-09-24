@@ -43,8 +43,7 @@ Application
 │       └── EDIT_PLAN
 ├── Selection / hover context
 └── Overlay stack
-    ├── consist panel
-    ├── schedule menu
+    ├── consist builder / train info / schedule（同一时刻最多一个）
     └── future modal dialog
 ```
 
@@ -55,6 +54,10 @@ Application
 3. selection/hover 是瞬时上下文，不与模式混为一谈。
 4. overlay 必须有明确焦点和关闭语义；离开 PLAY 时关闭 PLAY 专属 overlay。
 5. 计划编辑未正常确认或取消前，不允许通过其它模式快捷键绕过退出流程。
+
+P9-B 进一步约束：应用不使用窗口化或嵌套窗口；所有子面板统一注册到单一 overlay owner，
+同一时刻最多显示一个。每个状态通过白名单声明可用按键，未列出的按键直接消费并丢弃，
+不得落入全局快捷键或世界拾取。
 
 ## 3. 输入路由
 
@@ -99,6 +102,51 @@ Application
 `pygame_gui` 的首个接入切片是顶部模式工具栏：按钮使用与键盘相同的稳定 action id，
 GUI 消费的鼠标事件不会继续传到世界画布；窗口改变大小时工具栏重新定位。底部上下文栏
 和短时消息暂时保留轻量绘制，待主题、中文字体和布局方案稳定后再决定是否迁移。
+
+### 4.1 P9-A3 正式编组构造器
+
+点击可用且未占用的 Depot 后，PLAY 进入模态编组构造状态。界面参考 Transport Fever 2
+的功能分区，但本阶段只对流程完整和易于理解负责，不承担美观性或高阶 UX：
+
+- 左上“车厢列表”只提供两种预设：带动力的控制车、无动力的普通车厢；选择预设后可增加。
+- 右上“车厢元数据”显示当前目录项的类型、长度、质量、额定功率和控制能力。
+- 底部“编组预览和信息”按实际顺序列出车厢，并显示节数、总长、Depot 可用长度及生成方向。
+
+功能层定义六类操作，GUI 与键盘只能通过稳定 action id 调用它们：
+
+| 操作 | action id | 当前入口 |
+|---|---|---|
+| 增加车厢 | `consist.add` | Add 按钮；`L` 增加动力控制车，`C` 增加普通车厢 |
+| 删除车厢 | `consist.delete` | Delete 按钮 / `Backspace` |
+| 移动车厢 | `consist.move.left` / `consist.move.right` | 左右箭头按钮；不支持拖动 |
+| 反转编组方向 | `consist.reverse` | Reverse 按钮 / `R` |
+| 放弃 | `consist.cancel` | Cancel 按钮 / `Esc` |
+| 完成 | `consist.complete` | Complete 按钮 / `Enter` |
+
+目录选择使用 `consist.catalog.<preset>`，预览选择使用 `consist.select.<index>`。反转同时反转
+车厢顺序、每节车厢相对朝向和 Depot 生成方向。编组为空或总长超过 Depot 时不得完成；当前
+实现至少保留一节车厢，并在超长时禁用 Complete。构造器打开时优先消费输入：按钮事件由
+`pygame_gui` 处理，键盘只接受 `L/C/Backspace/R/Enter` 对应的编组动作，其他全局键位（模式
+切换、保存、相机、计划编辑、暂停等）均被模态层隔离；面板外的鼠标事件也不得穿透到世界
+拾取。取消不得创建列车，完成则调用 P9-A2 已验收的 Depot 生成服务。
+
+### 4.2 P9-B 调度计划列表（过渡实现）
+
+调度计划面板曾采用 OpenTTD 风格的可见命令列表：每条计划命令都有独立行，可先选中再调整，
+重排只使用 Up/Down 按钮，不支持拖动。面板提供 `schedule.*` 稳定 action id，GUI 与键盘
+共用同一 controller 逻辑。已移除含义不清的 Toggle Control。实测表明，这种列表不足以表达
+复杂调车时的列车位置、朝向和编组状态，因此不再继续扩展；后续高优先级 backlog 是预览式
+调度计划编辑器。本节只记录当前兼容入口，不代表最终 UI 方向。
+
+- `schedule.select.<index>`：选择命令，并显示当前执行指针。
+- `schedule.move.up` / `schedule.move.down`：调整命令顺序；仅停放列车可用。
+- `schedule.delete.item`（键盘 `X`）：删除所选命令。
+- `schedule.toggle.repeat`：在 Loop 与 One-shot 间切换。
+- `schedule.delete.plan`：删除整份计划；仅停放列车可用。
+- `schedule.edit`：进入既有计划编辑器，作为 direction/selector 微调的后续入口。
+
+PLAY 中 `Up/Down` 不再直接设置目标速度。目标速度后续按“路网限制 → 列车属性 → 计划额外
+限制”取最小值自动计算；本切片只移除旧的实时调速入口，暂不扩大限速模型范围。
 
 ## 5. 视觉与布局
 
