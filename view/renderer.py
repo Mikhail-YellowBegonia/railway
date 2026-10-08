@@ -806,7 +806,7 @@ def draw_plan_editor_overlay(
                 continue
             confirmed_color = (
                 (255, 70, 70) if (
-                    item.validate(network, require_fixed_route=True)
+                    item.validate(network)
                     if item is not None else fixed_route.validate(
                         network, goal=owner.plan.items[0].goal if owner.plan.items else None,
                     )
@@ -878,7 +878,7 @@ def draw_plan_hud(
         current = winner.plan.current()
         if not problems and current is not None:
             problems = current.validate(
-                train.network, require_fixed_route=True,
+                train.network,
             )
         if problems:
             validation = "计划错误: " + problems[0]

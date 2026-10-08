@@ -1,25 +1,27 @@
 """将控制车计划解析/投影为既有列车运行指令。
 
-确定性条目直接消费编辑期 ``FixedRoute``；声明式 POI/Station selector 在激活或
-当前租约失效时调用路径解析器生成运行期快照。两者最终都只向列车下达一次
-``assign_route``，之后仍由既有闭塞调度器推进、等待和恢复。
+计划条目保存长期意图；每次激活或运行租约失效时，调度器都从当前车头和当前
+目标重新调用路径解析器，生成只存在于运行期的解析快照。快照最终只向列车
+下达一次 ``assign_route``，之后仍由既有闭塞调度器推进、等待和恢复。
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from model.plan import END_FRONT, END_REAR, FixedRoute, Goal, PathPolicy, Plan, PlanCommand, PlanItem
+from model.plan import (
+    END_FRONT, END_REAR, FixedRoute, Goal, PathPolicy, Plan, PlanCommand, PlanItem,
+)
 from model.plan_path import PathStart, resolve_plan_item
 from model.rail_network import RailNetwork
 from model.train_controller import BrakingController
 from model.train_entity import TrainEntity
+from model.train_control import TrainControlAuthority
 from model.wagon import Wagon
 
 
 PLAN_CRUISE_SPEED = 12.0
 POSITION_EPSILON_M = 0.1
-COUPLE_TARGET_DRIFT_M = 5.0
 
 
 @dataclass
@@ -74,8 +76,10 @@ class PlanDispatcher:
         self._clear_execution(train)
         if paused:
             train.emergency_stop()
+            train.control_authority = TrainControlAuthority.PLAN_PAUSED
             train.plan_status = "计划已暂停（空格继续）"
         else:
+            train.control_authority = TrainControlAuthority.NONE
             train.plan_status = ""
 
     def tick(self, train: TrainEntity, trains: list[TrainEntity] | None = None) -> None:
@@ -95,6 +99,7 @@ class PlanDispatcher:
             if not train.is_parked():
                 train.emergency_stop()
             self._clear_execution(train)
+            train.control_authority = TrainControlAuthority.PLAN_PAUSED
             self._report_once(train, "计划已暂停（空格继续）")
             return
         winner = self._winner(train)
@@ -149,6 +154,33 @@ class PlanDispatcher:
                     reason = outcome[1] or "锁定连挂目标失效"
                     self._report_once(train, f"计划跳过：{reason}")
                     return
+                if self._pending_resolved_route is not None:
+                    refreshed = self._pending_resolved_route
+                    refreshed_signature = self._route_signature(refreshed, expected_goal)
+                    if refreshed_signature != execution.route_signature:
+                        from controller.coupling import head_hook_offset
+                        goal_edge_id, goal_t, goal_direction = expected_goal
+                        goal_edge_length = self.network.edges[goal_edge_id].length
+                        runtime_end_offset = goal_edge_length * (
+                            (1.0 - goal_t) if goal_direction > 0 else goal_t
+                        )
+                        projection = self._project_route_start(
+                            train, refreshed,
+                            end_offset=runtime_end_offset + head_hook_offset(train),
+                        )
+                        if projection is None:
+                            self._clear_execution(train)
+                            self._report_once(
+                                train, "计划等待：当前车头无法投影到动态连挂路径",
+                            )
+                            return
+                        route, remaining = projection
+                        train._stop_before_m = head_hook_offset(train)
+                        train.assign_route(route, remaining, expected_goal)
+                        train.couple_approach_partner = outcome[2]
+                        execution.resolved_route = refreshed
+                        execution.projected_goal = expected_goal
+                        execution.route_signature = refreshed_signature
             # 普通右键/K 调车允许覆盖计划投影出的运行指令。目标一旦不同，旧令牌
             # 立即失效；不在行驶中抢回 route，待人工指令结束后再按起点契约判定。
             if train.state.goal != execution.projected_goal:
@@ -172,30 +204,7 @@ class PlanDispatcher:
                 # 的起点契约明确报告，不能继续保持无原因的 parked 状态。
                 self._activate(train, winner, plan, trains)
                 return
-            # P4 可机械改写 FixedRoute；已有运行 route 已在同一事务中被改写。
-            # 动态条目在这里刷新当前路径快照；固定条目只同步令牌。
-            if (item.command is PlanCommand.GOTO
-                    and item.effective_path_policy is PathPolicy.DYNAMIC):
-                refreshed = self._resolve_dynamic_goto(train, item)
-                if refreshed is not None:
-                    current_signature = self._route_signature(
-                        execution.resolved_route, item.goal,
-                    )
-                    refreshed_signature = self._route_signature(refreshed, item.goal)
-                    if refreshed_signature != current_signature:
-                        projection = self._project_route_start(train, refreshed)
-                        if projection is not None:
-                            route, remaining = projection
-                            train.assign_route(route, remaining, item.goal)
-                            execution.resolved_route = refreshed
-                            execution.projected_goal = item.goal
-            active_route = (
-                (item.fixed_route or execution.resolved_route)
-                if item.command is PlanCommand.GOTO_COUPLE
-                else (execution.resolved_route
-                      if item.effective_path_policy is PathPolicy.DYNAMIC
-                      else self._active_route(plan, item))
-            )
+            active_route = execution.resolved_route
             execution.route_signature = self._route_signature(
                 active_route, execution.projected_goal,
             )
@@ -280,7 +289,7 @@ class PlanDispatcher:
             item = plan.current()
             if item is None:
                 return
-            # 动态是默认策略；只有显式 FIXED（或旧条目的兼容 fixed_route）才要求冻结路线。
+            # 新计划默认动态解析；旧条目若携带 FixedRoute 仍走兼容分支。
             problems = item.validate(self.network)
             if problems:
                 self._report_once(train, f"计划跳过：{'；'.join(problems)}")
@@ -296,7 +305,8 @@ class PlanDispatcher:
                 if not train.is_parked():
                     self._report_once(train, "计划等待当前运行指令结束")
                     return
-                if not train.reverse_in_place():
+                reverse_ok = train.reverse_in_place()
+                if not reverse_ok:
                     self._report_once(train, "计划等待：当前车身不能在同一 simple_segment 内折返")
                     return
                 plan.advance()
@@ -344,9 +354,13 @@ class PlanDispatcher:
                 if not train.is_parked():
                     self._report_once(train, "计划等待当前运行指令结束")
                     return
-                active_route = item.fixed_route or self._pending_resolved_route
+                active_route = (
+                    item.fixed_route or self._pending_resolved_route
+                    if item.effective_path_policy is PathPolicy.FIXED
+                    else self._pending_resolved_route
+                )
                 if active_route is None:
-                    self._report_once(train, "计划错误：前往连挂缺少固定路径")
+                    self._report_once(train, "计划错误：当前连挂无法生成动态路径")
                     return
                 from controller.coupling import head_hook_offset
                 stop_before = head_hook_offset(train)
@@ -377,7 +391,7 @@ class PlanDispatcher:
                     projected_goal=goal,
                     target_wagon_id=target_id,
                     target_end=target_end,
-                    resolved_route=(active_route if item.fixed_route is None else None),
+                    resolved_route=(active_route if item.effective_path_policy is PathPolicy.DYNAMIC else None),
                 )
                 train.plan_status = ""
                 return
@@ -390,7 +404,10 @@ class PlanDispatcher:
             active_route = (
                 self._active_route(plan, item)
                 if item.effective_path_policy is PathPolicy.FIXED
-                else self._resolve_dynamic_goto(train, item)
+                else self._resolve_dynamic_goto(
+                    train, item,
+                    allow_reversal=not self._previous_item_is_reverse(plan),
+                )
             )
             if active_route is None:
                 self._report_once(
@@ -421,6 +438,7 @@ class PlanDispatcher:
                 projected_goal=item.goal,
                 resolved_route=(active_route if item.effective_path_policy is PathPolicy.DYNAMIC else None),
             )
+            train.control_authority = TrainControlAuthority.PLAN
             train.plan_status = ""
             return
         self._clear_execution(train)
@@ -428,7 +446,13 @@ class PlanDispatcher:
         suffix = f"；最后错误：{last_error}" if last_error else ""
         self._report_once(train, f"计划整圈均执行失败，列车停车等待{suffix}")
 
-    def _resolve_dynamic_goto(self, train: TrainEntity, item: PlanItem) -> FixedRoute | None:
+    def _resolve_dynamic_goto(
+        self,
+        train: TrainEntity,
+        item: PlanItem,
+        *,
+        allow_reversal: bool = True,
+    ) -> FixedRoute | None:
         """按当前车头位置生成一次动态路径快照，不写回计划。"""
         if item.goal is None:
             return None
@@ -438,10 +462,28 @@ class PlanDispatcher:
             PathStart(start_edge, start_t, start_direction),
             item,
             passable_fn=self.passable_fn,
-            allow_reversal=False,
+            # A scheduled reverse is an explicit plan item.  In that case do
+            # not let the pathfinder silently add an ``edge,+/-`` reversal
+            # marker: the physical layer consumes it by reversing the whole
+            # consist, so a second implicit marker can make the same edge
+            # appear to be traversed twice.  Keep legacy implicit reversal for
+            # goto items without an explicit preceding reverse.
+            allow_reversal=allow_reversal,
             consist_length=train.state.consist.total_length,
         )
         return resolution.path.freeze() if resolution.path is not None else None
+
+    @staticmethod
+    def _previous_item_is_reverse(plan: Plan) -> bool:
+        """Whether the current item follows an explicit plan reversal."""
+        if not plan.items:
+            return False
+        index = plan.pointer - 1
+        if index < 0:
+            if not plan.repeat:
+                return False
+            index = len(plan.items) - 1
+        return plan.items[index].command is PlanCommand.REVERSE
 
     def _couple_goal(
         self,
@@ -483,29 +525,21 @@ class PlanDispatcher:
         from controller.coupling import end_coupler_pos
         _position, edge_id, t = end_coupler_pos(target_train, "tail")
         direction = target_train.current_direction()
-        if item.effective_path_policy is PathPolicy.DYNAMIC:
-            start_edge, start_t, start_direction = train.current_directed_edge_and_t()
-            resolution = resolve_plan_item(
-                self.network,
-                PathStart(start_edge, start_t, start_direction),
-                item,
-                passable_fn=self.passable_fn,
-                allow_reversal=False,
-                consist_length=train.state.consist.total_length,
-                couple_target=(edge_id, t, direction),
-            )
-            if resolution.path is None:
-                return "temporary", f"动态连挂路径不可达：{resolution.failure}", None, None, None, None
-            self._pending_resolved_route = resolution.path.freeze()
-        elif item.fixed_route is None:
-            return "permanent", "固定连挂缺少 FixedRoute", None, None, None, None
-        elif item.fixed_route.edges[-1] != (edge_id, direction):
-            return "temporary", "目标后钩已离开固定路线末边或改变方向", None, None, None, None
+        start_edge, start_t, start_direction = train.current_directed_edge_and_t()
+        resolution = resolve_plan_item(
+            self.network,
+            PathStart(start_edge, start_t, start_direction),
+            item,
+            passable_fn=self.passable_fn,
+            allow_reversal=False,
+            consist_length=train.state.consist.total_length,
+            couple_target=(edge_id, t, direction),
+        )
+        if resolution.path is None:
+            return "temporary", f"动态连挂路径不可达：{resolution.failure}", None, None, None, None
+        self._pending_resolved_route = resolution.path.freeze()
         edge_length = self.network.edges[edge_id].length
         runtime_end_offset = edge_length * ((1.0 - t) if direction > 0 else t)
-        if (item.effective_path_policy is PathPolicy.FIXED
-                and abs(runtime_end_offset - item.fixed_route.end_offset) > COUPLE_TARGET_DRIFT_M):
-            return "temporary", "目标后钩偏离冻结位置超过 5 米", None, None, None, None
         return "ready", "", target_train, (edge_id, t, direction), ref.wagon_id, ref.end
 
     def _selector_edge_ids(self, item: PlanItem) -> tuple[int, ...]:
@@ -616,17 +650,13 @@ class PlanDispatcher:
             )
             return "temporary", f"声明式 selector {scope} 尚未生成当前解析快照", None, None, None, None
         edge_id = selector.edge_id if selector is not None else None
-        route = item.fixed_route
-        if edge_id is None or route is None:
-            return "permanent", "固定 edge 连挂缺少冻结路线", None, None, None, None
+        if edge_id is None:
+            return "permanent", "连挂 selector 缺少 edge", None, None, None, None
         edge = self.network.edges.get(edge_id)
         if edge is None:
-            return "permanent", f"固定连挂边 {edge_id} 不存在", None, None, None, None
-        direction = selector.direction
-        if route.edges[-1] != (edge_id, direction):
-            return "permanent", "selector direction 与冻结路线末段不一致", None, None, None, None
+            return "permanent", f"连挂 selector edge {edge_id} 不存在", None, None, None, None
         from controller.coupling import end_coupler_pos, head_hook_offset
-        candidates: list[tuple[float, str, int, TrainEntity, str, float]] = []
+        candidates: list[tuple[float, str, int, TrainEntity, str, float, FixedRoute]] = []
         own_ids = {wagon.wagon_id for wagon in train.state.consist.wagons}
         claimed = self._claimed_couplers(trains, exclude_train=train)
         for target in trains:
@@ -641,24 +671,60 @@ class PlanDispatcher:
                 if (candidate_edge_id != edge_id or wagon.wagon_id in own_ids
                         or claim in claimed):
                     continue
-                progress = t if direction > 0 else 1.0 - t
-                runtime_end_offset = edge.length * (1.0 - progress)
-                if self._project_route_start(
-                    train, route,
-                    end_offset=runtime_end_offset + head_hook_offset(train),
-                ) is None:
-                    continue
-                candidates.append((progress, wagon.wagon_id, end_rank, target, end, t))
+                directions = (
+                    (selector.direction,) if selector.direction in (1, -1)
+                    else (1, -1)
+                )
+                for direction in directions:
+                    route = self._resolve_dynamic_couple_route(
+                        train, item, edge_id, t, direction,
+                    )
+                    if route is None:
+                        continue
+                    progress = t if direction > 0 else 1.0 - t
+                    candidates.append((
+                        route.remaining_to_goal(self.network),
+                        wagon.wagon_id, end_rank, target, end, t, route,
+                    ))
         if not candidates:
             return (
-                "temporary", f"edge {edge_id} 上没有未被认领且从进入方向可达的停放端头",
+                "temporary", f"edge {edge_id} 上没有未被认领且可动态到达的停放端头",
                 None, None, None, None,
             )
-        _progress, wagon_id, end_rank, target, _end, t = min(
+        _distance, wagon_id, end_rank, target, _end, t, route = min(
             candidates, key=lambda value: (value[0], value[1], value[2]),
         )
+        self._pending_resolved_route = route
+        direction = route.edges[-1][1]
         target_end = END_FRONT if end_rank == 0 else END_REAR
         return "ready", "", target, (edge_id, t, direction), wagon_id, target_end
+
+    def _resolve_dynamic_couple_route(
+        self, train: TrainEntity, item: PlanItem, edge_id: int,
+        target_t: float, direction: int,
+    ) -> FixedRoute | None:
+        """Resolve a coupling approach from the train's current live head.
+
+        The returned ``FixedRoute`` is only a runtime resolution snapshot.  It
+        is intentionally stored on ``PlanExecution``/``_pending_resolved_route``
+        and never on the plan item.
+        """
+        start_edge, start_t, start_direction = train.current_directed_edge_and_t()
+        draft = PlanItem.goto_couple(
+            anchors=item.anchors,
+            edge_id=edge_id,
+            direction=direction,
+        )
+        resolution = resolve_plan_item(
+            self.network,
+            PathStart(start_edge, start_t, start_direction),
+            draft,
+            passable_fn=self.passable_fn,
+            allow_reversal=False,
+            consist_length=train.state.consist.total_length,
+            couple_target=(edge_id, target_t, direction),
+        )
+        return resolution.path.freeze() if resolution.path is not None else None
 
     def _locked_couple_goal(
         self,
@@ -668,10 +734,10 @@ class PlanDispatcher:
         execution: PlanExecution,
     ) -> tuple[str, str, TrainEntity | None, Goal | None, str | None, int | None]:
         """只验证已认领端头；不得重新运行 selector 或偷换候选。"""
-        selector = item.couple_selector
         wagon_id = execution.target_wagon_id
         target_end = execution.target_end
-        if selector is None or wagon_id is None or target_end not in (END_FRONT, END_REAR):
+        selector = item.couple_selector
+        if wagon_id is None or target_end not in (END_FRONT, END_REAR):
             return "permanent", "连挂执行令牌缺少锁定端头", None, None, None, None
         target = next(
             (candidate for candidate in trains
@@ -694,23 +760,23 @@ class PlanDispatcher:
         end = "head" if target_end == END_FRONT else "tail"
         _pos, edge_id, t = end_coupler_pos(target, end)
         allowed_edges = self._selector_edge_ids(item)
-        if edge_id not in allowed_edges:
+        if selector is not None and edge_id not in allowed_edges:
             return "temporary", "锁定连挂端头已离开 selector 范围", None, None, None, None
-        route = item.fixed_route or execution.resolved_route
+        directions = (
+            (selector.direction,) if selector is not None and selector.direction in (1, -1)
+            else ((target.current_direction(),) if selector is None else (1, -1))
+        )
+        route = None
+        for direction_candidate in directions:
+            route = self._resolve_dynamic_couple_route(
+                train, item, edge_id, t, direction_candidate,
+            )
+            if route is not None:
+                break
         if route is None:
-            return "temporary", "声明式连挂解析快照已丢失", None, None, None, None
+            return "temporary", "锁定连挂端头当前不可动态到达", None, None, None, None
+        self._pending_resolved_route = route
         direction = route.edges[-1][1]
-        if route.edges[-1][0] != edge_id:
-            return "temporary", "锁定连挂端头已离开解析路径末段", None, None, None, None
-        if selector.direction in (1, -1) and direction != selector.direction:
-            return "permanent", "selector direction 与解析路径末段不一致", None, None, None, None
-        edge = self.network.edges[edge_id]
-        progress = t if direction > 0 else 1.0 - t
-        runtime_end_offset = edge.length * (1.0 - progress)
-        if self._project_route_start(
-            train, route, end_offset=runtime_end_offset + head_hook_offset(train),
-        ) is None:
-            return "temporary", "锁定连挂端头已无法从冻结路线到达", None, None, None, None
         return "ready", "", target, (edge_id, t, direction), wagon_id, target_end
 
     @staticmethod
@@ -814,11 +880,18 @@ class PlanDispatcher:
         actual_offset = t * actual_length if direction > 0 else (1.0 - t) * actual_length
         expected_edge, expected_direction = route.edges[0]
         return (
-            "计划等待：车头不在固定路线可消费位置，拒绝重新寻路"
+            "计划等待：动态路径无法从当前车头投影（固定路线可消费位置检查已移除）"
             f"（实际 edge {edge_id} dir {direction:+d} offset {actual_offset:.2f}m；"
             f"路线首项 edge {expected_edge} dir {expected_direction:+d} "
             f"建表 offset {route.start_offset:.2f}m）"
         )
+
+    @staticmethod
+    def _active_route(plan: Plan, item: PlanItem) -> FixedRoute | None:
+        """Legacy fixed-route compatibility only; new plans never use it."""
+        if plan.pointer == 0 and plan.has_wrapped and plan.loop_route is not None:
+            return plan.loop_route
+        return item.fixed_route
 
     def _at_goal(self, train: TrainEntity, item: PlanItem) -> bool:
         if item.goal is None:
@@ -830,12 +903,6 @@ class PlanDispatcher:
             and direction == goal_direction
             and abs(t - goal_t) * self.network.edges[edge_id].length <= POSITION_EPSILON_M
         )
-
-    @staticmethod
-    def _active_route(plan: Plan, item: PlanItem) -> FixedRoute | None:
-        if plan.pointer == 0 and plan.has_wrapped and plan.loop_route is not None:
-            return plan.loop_route
-        return item.fixed_route
 
     @staticmethod
     def _route_signature(route: FixedRoute | None, goal: Goal | None) -> tuple:

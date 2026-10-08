@@ -48,27 +48,24 @@ ok, message = editor.confirm()
 assert not ok and "计划确认失败" in message and wagon.plan is None
 print("✅ ② 不可达草稿标红所需原因完整，确认被拒绝")
 
-# ③ 设置可达终点后冻结；第二条以上一条终点为构造起点。
+# ③ 设置可达终点；第二条以上一条终点为编辑预览起点，但计划本身保持动态。
 assert "计划终点" in editor.click_edge(e1, 1.0)
 ok, message = editor.confirm()
 assert ok and wagon.plan is not None and len(wagon.plan) == 1
 assert wagon.plan.requires_closed_cycle
-assert "缺少末条→第一条" in wagon.plan.validate_cycle(network)[0]
+assert wagon.plan.validate_cycle(network) == []
 first = wagon.plan.items[0]
-assert first.fixed_route is not None and first.fixed_route.edges == ((e0, 1), (e1, 1))
+assert first.fixed_route is None
 assert "计划终点" in editor.click_edge(e0, 0.0)
 ok, message = editor.confirm()
 assert ok and len(wagon.plan) == 2
 second = wagon.plan.items[1]
-assert second.fixed_route is not None
-assert second.fixed_route.edges[0] == (e1, 1)
-assert second.fixed_route.edges[-1] == (e0, -1)
+assert second.fixed_route is None
 ok, message = editor.finalize_cycle()
 assert ok, message
-assert wagon.plan.loop_route is not None
-assert wagon.plan.loop_route.edges[0] == (e0, -1)
-assert wagon.plan.loop_route.edges[-1] == (e1, 1)
-print("✅ ③ 连续确认两条冻结路线，并冻结末目标返回首目标的循环接缝")
+assert wagon.plan.loop_route is None
+assert not wagon.plan.requires_closed_cycle
+print("✅ ③ 连续确认两条动态计划，不冻结路线或循环接缝")
 
 # ④ 回退顺序先终点、后锚点；取消清空草稿但保留已确认计划。
 assert "锚点" in editor.click_node(b.node_id)
@@ -80,7 +77,7 @@ editor.cancel()
 assert not editor.active and len(wagon.plan) == 2
 print("✅ ④ Backspace 分层回退，Esc 语义只丢草稿")
 
-# ⑤ 退出门禁：各条目本身可达但 n→1 不可达时，闭环确认必须失败。
+# ⑤ 动态计划不再要求编辑期可证明 n→1 固定接缝；运行时从实际车头解析。
 one_way_wagon = create_simple_car(
     length=5.0, mass=30.0, P_rated=1000.0, have_control=True,
 )
@@ -97,9 +94,9 @@ assert one_way_editor.confirm()[0]
 assert "计划终点" in one_way_editor.click_edge(e1, 1.0)
 assert one_way_editor.confirm()[0]
 ok, message = one_way_editor.finalize_cycle()
-assert not ok and "计划闭环失败" in message
+assert ok and "动态计划" in message
 assert one_way_editor.active and one_way_wagon.plan.loop_route is None
-print("✅ ⑤ n→1 不可达时拒绝退出，计划不会以开放链开始执行")
+print("✅ ⑤ 动态计划不冻结 n→1 接缝，折返时从实际车头重新寻路")
 
 # ⑥ P7 最小入口：K 冻结驶向目标后钩，W 直接追加零速等待。
 wagon.plan = None
@@ -119,19 +116,19 @@ assert couple_item.command is PlanCommand.GOTO_COUPLE
 assert couple_item.train_ref is None
 assert couple_item.couple_selector is not None
 assert couple_item.couple_selector.edge_id == e1
-assert couple_item.fixed_route is not None
-assert couple_item.couple_selector.direction == couple_item.fixed_route.edges[-1][1]
+assert couple_item.fixed_route is None
+assert couple_item.couple_selector.direction is None
 ok, message = editor.append_wait_couple()
 assert ok and len(wagon.plan) == 2
 assert wagon.plan.items[1].command is PlanCommand.WAIT_COUPLE
 ok, message = editor.finalize_cycle()
-assert ok and "循环执行" in message
+assert ok and "动态计划" in message
 assert wagon.plan.repeat and not wagon.plan.requires_closed_cycle
 assert wagon.plan.loop_route is None
 wagon.plan.advance()
 wagon.plan.advance()
 assert not wagon.plan.is_complete and wagon.plan.current() is couple_item
-print("✅ ⑥ 编辑态 K/W 创建固定-edge连挂链，计划可回绕")
+print("✅ ⑥ 编辑态 K/W 创建动态 edge 连挂链，计划可回绕")
 
 # P7c：允许用本编组暴露端头所在 edge 预建未来 selector，不绑定本车厢。
 wagon.plan = None
@@ -144,7 +141,7 @@ assert wagon.plan is not None and len(wagon.plan) == 1
 own_selector = wagon.plan.items[0].couple_selector
 assert own_selector is not None
 assert wagon.plan.items[0].train_ref is None
-assert own_selector.direction in (1, -1)
+assert own_selector.direction is None
 print("✅ ⑥b 本编组暴露端可用于预建 selector，计划不绑定当前车厢")
 
 # P7c UX：不依赖受保护的本车端头，直接在目标 edge 上按 K 预建 selector。
@@ -153,7 +150,7 @@ ok, message = editor.append_goto_couple_edge(e1, target_t=0.5)
 assert ok, message
 edge_selector = wagon.plan.items[0].couple_selector
 assert edge_selector is not None and edge_selector.edge_id == e1
-assert edge_selector.direction in (1, -1)
+assert edge_selector.direction is None
 print("✅ ⑥c 直接选择 edge 创建 selector，支持目标仍在本编组时的 headshunt")
 
 # P10：POI selector 保存声明式意图，不要求编辑期冻结唯一 edge/path。

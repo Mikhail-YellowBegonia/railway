@@ -35,12 +35,14 @@ Accepted — 2026-09-22
 
 ## Decision
 
-每个 `PlanItem` 拥有命令级 `PathPolicy`：
+当前所有玩家可创建的计划条目统一采用 `DYNAMIC`：激活和刷新时使用现有寻路器
+从实时车头生成运行期快照，不写回计划意图。`FixedRoute` 仅作为旧数据读取和
+拓扑迁移的兼容字段保留；当前 GUI 不再生成固定条目，因此连挂/折返后的新计划
+不会因车头位置变化而触发固定路线起点拒绝。
 
-1. `DYNAMIC` 是默认策略。激活和刷新时使用现有寻路器生成运行期快照，不写回计划意图。
-2. `FIXED` 仅在玩家显式添加“路径固定”标签后使用，并携带 `FixedRoute`。
-3. 带 `fixed_route` 但没有策略字段的旧条目按 `FIXED` 兼容处理。
-4. Station、Platform 和非确定性 selector 不得被强制冻结成唯一编辑期路线。
+`PathPolicy` 字段保留用于数据兼容和未来重新设计显式高级模式；当前 GUI 不提供
+固定路线入口。带 `PathPolicy.FIXED` 的历史/测试条目仍由兼容执行分支读取，属于
+明确的非默认高级模式，不是当前玩家创建的计划语义。
 
 运行期分三层：
 
@@ -57,11 +59,11 @@ Plan intent → Resolution snapshot → Execution lease
 
 ## Consequences
 
-- `FixedRoute` 不再是所有条目的默认字段；动态条目只把解析结果作为运行期快照。
+- `FixedRoute` 不再是当前 GUI 计划的执行字段；动态条目只把解析结果作为运行期快照。
 - POI/Station 解析发生在计划调度器，而不是 POI 基础模型中。
 - 暂时的信号/闭塞等待不自动触发换目标；只有目标或路径快照失效时才刷新。
 - 不使用固定路径时，游戏行为保持实时寻路，接近 OpenTTD/Transport Fever 2 的常规运行模型。
-- 固定路径是试验阶段的高级补丁，不应成为计划默认模式或底层方法依赖。
+- 固定路径是历史兼容数据，不应成为当前计划默认模式或底层方法依赖。
 - 动态实现应区分暂时阻塞与解析快照失效，避免信号等待造成无意义换目标。
 - 现有 `edge_id + direction` selector 继续兼容，作为确定范围 selector。
 
@@ -73,7 +75,7 @@ Plan intent → Resolution snapshot → Execution lease
 
 ## Implementation Boundary
 
-- `model.plan.PathPolicy` 与 `PlanItem.effective_path_policy` 表达策略。
+- `model.plan.PathPolicy` 与 `PlanItem.effective_path_policy` 表达当前动态策略兼容边界。
 - `PlanDispatcher` 选择动态解析或固定路线，然后复用现有 `assign_route`、预约、授权
   和物理执行。
 - `resolve_plan_item()` 继续作为唯一路径解析入口；动态结果不得写回 `fixed_route`。

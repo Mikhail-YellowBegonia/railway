@@ -28,6 +28,7 @@ from model.occupancy import (
 from model.rigid_kinematics import RigidWagonKinematics
 from model.train_physics import TrainPhysics
 from model.train_controller import BrakingController
+from model.train_control import TrainControlAuthority
 from model.rail_network import RailNetwork
 
 
@@ -108,6 +109,9 @@ class TrainEntity:
         # 玩家显式暂停计划自动驾驶。暂停只属于当前列车实体的运行期状态，
         # 不移动控制车计划指针，也不修改冻结路线。
         self.plan_paused = False
+        # A0.4: explicit owner of the current runtime movement command.  This
+        # is derived state and is never persisted as world data.
+        self.control_authority = TrainControlAuthority.NONE
 
         # 编组作业信号豁免（docs/consist_ui.md §5.5，2026-09）：连挂驶向/解挂
         # 分离时，本车与"配对列车"之间的物理占用检查需要放开——见

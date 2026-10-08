@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
-from model.plan import Anchor, Plan, PlanCommand, PlanItem
+from model.plan import Anchor, Plan, PlanCommand, PlanItem, PathPolicy
 from model.plan_path import PathStart, PlanResolution, resolve_plan_item
 from model.rail_network import RailNetwork
 from model.train_entity import TrainEntity
@@ -23,7 +23,7 @@ class PlanDraft:
 
 
 class PlanEditor:
-    """把点击序列转换成冻结 ``goto`` 条目；不接触运行期调度器。"""
+    """把点击序列转换成动态计划意图；不把编辑期路径写入计划。"""
 
     def __init__(self, network: RailNetwork, passable_fn=None) -> None:
         self.network = network
@@ -54,41 +54,20 @@ class PlanEditor:
         self.draft = PlanDraft()
 
     def finalize_cycle(self) -> tuple[bool, str]:
-        """确认纯行车计划闭环，或启用可重复的固定场景调车计划。"""
+        """结束编辑；动态计划不再预先冻结 n→1 接缝。"""
         if self.owner is None or self.train is None:
             return False, "计划闭环失败：编辑态未开启"
         plan = self.owner.plan
         if plan is None or not plan.items:
             return True, "计划编辑关闭：空计划"
-        # 重新确认前先使旧接缝失效；失败时不得继续保留可能已过期的路线。
+        # Dynamic plans resolve every leg from the live head after the previous
+        # command completes.  A precomputed loop_route would reintroduce the
+        # exact stale-position contract this editor is meant to avoid.
         plan.loop_route = None
         plan.has_wrapped = False
-        if any(item.command is not PlanCommand.GOTO for item in plan.items):
-            plan.requires_closed_cycle = False
-            plan.repeat = True
-            return True, "固定场景调车计划已确认为循环执行"
-        plan.requires_closed_cycle = True
+        plan.requires_closed_cycle = False
         plan.repeat = True
-        first = plan.items[0]
-        last = plan.items[-1]
-        if first.goal is None or last.goal is None:
-            return False, "计划闭环失败：首条或末条缺少固定终点"
-        result = resolve_plan_item(
-            self.network,
-            PathStart(*last.goal),
-            PlanItem.goto(first.goal, anchors=first.anchors),
-            passable_fn=self.passable_fn,
-            allow_reversal=True,
-            consist_length=self.train.state.consist.total_length,
-        )
-        if result.path is None:
-            return False, f"计划闭环失败：{result.failure}"
-        plan.loop_route = result.path.freeze()
-        problems = plan.validate_cycle(self.network)
-        if problems:
-            plan.loop_route = None
-            return False, f"计划闭环失败：{'；'.join(problems)}"
-        return True, "计划闭环已冻结：末目标将沿固定路线返回第一目标"
+        return True, "动态计划已确认：每条命令完成后从当前车头重新寻路"
 
     def click_node(self, node_id: int) -> str:
         if not self.active or node_id not in self.network.nodes:
@@ -123,6 +102,9 @@ class PlanEditor:
                 start,
                 item,
                 passable_fn=self.passable_fn,
+                # The editor preview may show an automatic dead-end turn for
+                # an ordinary goto; runtime suppresses that only when the
+                # plan explicitly contains the preceding REVERSE item.
                 allow_reversal=True,
                 consist_length=self.train.state.consist.total_length,
             )
@@ -169,17 +151,20 @@ class PlanEditor:
         if self.owner is None or self.draft.goal is None or result is None or result.path is None:
             reason = self.draft.failure or "尚未设置可达终点"
             return False, f"计划确认失败：{reason}"
+        # The editor may resolve a preview so it can give immediate feedback,
+        # but the preview is not a runtime contract.  Coupling, reversing and
+        # consist changes can move the logical head before this item activates.
         item = PlanItem.goto(
             self.draft.goal,
             anchors=self.draft.anchors,
-            fixed_route=result.path.freeze(),
+            path_policy=PathPolicy.DYNAMIC,
         )
         if self.owner.plan is None:
             self.owner.plan = Plan(requires_closed_cycle=True)
         self.owner.plan.append(item)
         count = len(self.owner.plan)
         self.draft = PlanDraft()
-        return True, f"计划已冻结并追加为第 {count} 条"
+        return True, f"动态前往计划已追加为第 {count} 条"
 
     def append_wait_couple(self) -> tuple[bool, str]:
         if self.owner is None:
@@ -214,8 +199,8 @@ class PlanEditor:
         headshunt 可以在目标仍属于本编组、端头仍受 PLAY 手动连挂保护时，
         预先写下未来的 ``CoupleSelector(edge, direction)``。
 
-        ``target_t`` 只用于编辑期冻结接近路线；运行期候选端头会在同一 edge
-        上重新解析。未指定 direction 时尝试两个方向并选择可达且代价较低者。
+        ``target_t`` 只用于编辑期预览；运行期候选端头会在同一 edge 上从实时
+        车头重新解析。未指定 direction 时仅保存“默认方向”意图。
         """
         if self.owner is None or self.train is None:
             return False, "计划编辑错误：编辑态未开启"
@@ -225,7 +210,7 @@ class PlanEditor:
         target_t = max(0.0, min(1.0, float(target_t)))
         directions = (direction,) if direction in (1, -1) else (1, -1)
         result = None
-        selected_direction = None
+        requested_direction = direction if direction in (1, -1) else None
         for target_direction in directions:
             item = PlanItem.goto_couple(
                 anchors=self.draft.anchors,
@@ -247,29 +232,30 @@ class PlanEditor:
                     and (result is None or result.path is None
                          or candidate.path.remaining_to_goal < result.path.remaining_to_goal)):
                 result = candidate
-                selected_direction = target_direction
             elif result is None:
                 result = candidate
         assert result is not None
         if result.path is None:
             self.draft = PlanDraft(self.draft.anchors, resolution=result)
             return False, f"计划解析失败：{result.failure}"
-        frozen = PlanItem.goto_couple(
+        # Direction is an intent constraint; the path itself is deliberately
+        # not retained.  The dispatcher resolves it again from the live head
+        # and live target hook when the command activates.
+        dynamic_item = PlanItem.goto_couple(
             anchors=self.draft.anchors,
-            fixed_route=result.path.freeze(),
+            path_policy=PathPolicy.DYNAMIC,
             edge_id=edge_id,
-            direction=(selected_direction
-                       if selected_direction in (1, -1)
-                       else result.path.edges[-1][1]),
+            direction=requested_direction,
         )
         if self.owner.plan is None:
             self.owner.plan = Plan(requires_closed_cycle=True)
         self.owner.plan.requires_closed_cycle = False
-        self.owner.plan.append(frozen)
+        self.owner.plan.append(dynamic_item)
         self.draft = PlanDraft()
         return True, (
-            f"计划已冻结驶入 edge {edge_id} dir {frozen.couple_selector.direction:+d} 的"
-            "声明式连挂 selector，"
+            f"动态连挂计划已追加：edge {edge_id} "
+            f"{('dir ' + format(requested_direction, '+d')) if requested_direction else '默认方向'}，"
+            "运行时将从当前车头重新寻路，"
             f"并追加为第 {len(self.owner.plan)} 条"
         )
 
@@ -284,7 +270,10 @@ class PlanEditor:
             poi_id=poi_id,
             direction=direction,
         )
-        problems = item.validate(self.network, require_fixed_route=True)
+        # POI selectors are dynamic intent, not frozen routes.  This check is
+        # only structural/reference validation; requiring a FixedRoute here
+        # would surface the obsolete "尚未冻结固定路径" warning.
+        problems = item.validate(self.network)
         if problems:
             return False, f"计划编辑错误：{'；'.join(problems)}"
         if self.owner.plan is None:
