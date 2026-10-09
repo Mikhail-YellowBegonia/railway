@@ -822,6 +822,28 @@ def draw_plan_editor_overlay(
                 )
                 if len(points) >= 2:
                     pygame.draw.lines(surface, confirmed_color, False, points, 3)
+                # Direction chevrons make the otherwise green route directional.
+                for p0, p1 in zip(points[::max(1, len(points) // 4)],
+                                  points[1::max(1, len(points) // 4)]):
+                    dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+                    length = max(1.0, (dx * dx + dy * dy) ** 0.5)
+                    ux, uy = dx / length, dy / length
+                    cx, cy = (p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2
+                    tip = (cx + ux * 9, cy + uy * 9)
+                    left = (cx - ux * 5 - uy * 5, cy - uy * 5 + ux * 5)
+                    right = (cx - ux * 5 + uy * 5, cy - uy * 5 - ux * 5)
+                    pygame.draw.polygon(surface, confirmed_color, [tip, left, right])
+            if item is not None and item.command.value == "reverse":
+                edge_id, _direction = fixed_route.edges[0]
+                edge = network.edges.get(edge_id)
+                if edge is not None:
+                    points = _edge_screen_points(edge, network, camera,
+                                                 surface.get_width(), surface.get_height())
+                    if points:
+                        cx, cy = points[0]
+                        pygame.draw.circle(surface, (255, 190, 70), (int(cx), int(cy)), 13, 2)
+                        mark = font.render("R", True, (255, 220, 100))
+                        surface.blit(mark, (int(cx) - 6, int(cy) - 10))
     if resolution is not None and resolution.path is not None:
         for edge_id, _direction in resolution.path.edges:
             edge = network.edges.get(edge_id)
@@ -832,6 +854,17 @@ def draw_plan_editor_overlay(
             )
             if len(points) >= 2:
                 pygame.draw.lines(surface, color, False, points, 5)
+                for p0, p1 in zip(points[::max(1, len(points) // 4)],
+                                  points[1::max(1, len(points) // 4)]):
+                    dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+                    length = max(1.0, (dx * dx + dy * dy) ** 0.5)
+                    ux, uy = dx / length, dy / length
+                    cx, cy = (p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2
+                    pygame.draw.polygon(surface, color, [
+                        (cx + ux * 9, cy + uy * 9),
+                        (cx - ux * 5 - uy * 5, cy - uy * 5 + ux * 5),
+                        (cx - ux * 5 + uy * 5, cy - uy * 5 - ux * 5),
+                    ])
     for order, anchor in enumerate(draft.anchors, start=1):
         node = network.nodes.get(anchor.node_id)
         if node is None:
@@ -842,10 +875,126 @@ def draw_plan_editor_overlay(
         pygame.draw.circle(surface, (255, 220, 60), (int(x), int(y)), 10, 2)
         label = font.render(str(order), True, (255, 255, 255))
         surface.blit(label, (int(x) + 7, int(y) - 14))
+    # Preview the train's point-model position after the selected command.
+    # This is intentionally geometric, not a physics simulation: it exposes
+    # direction mistakes (especially around reverse/couple commands) cheaply.
+    if owner is not None and owner.plan is not None and owner.plan.items:
+        index = min(owner.plan.pointer, len(owner.plan.items) - 1)
+        selected = owner.plan.items[index]
+        goal = selected.goal
+        if goal is not None:
+            edge = network.edges.get(goal[0])
+            if edge is not None:
+                a = network.nodes[edge.node_a_id].position
+                b = network.nodes[edge.node_b_id].position
+                pos = a + (b - a) * goal[1]
+                sx, sy = camera.world_to_screen(pos.x, pos.y,
+                                                surface.get_width(), surface.get_height())
+                direction = (b - a).normalize() * (1 if goal[2] > 0 else -1)
+                ux, uy = direction.x, -direction.y
+                tip = (sx + ux * 18, sy + uy * 18)
+                left = (sx - ux * 8 - uy * 8, sy - uy * 8 + ux * 8)
+                right = (sx - ux * 8 + uy * 8, sy - uy * 8 - ux * 8)
+                pygame.draw.polygon(surface, (255, 245, 90), [tip, left, right])
+                pygame.draw.polygon(surface, (30, 30, 30), [tip, left, right], 2)
     message = draft.failure or "左键节点=锚点 · 道岔后点出边=控制点 · 左键轨道=终点"
     text = font.render(message[:90], True, color)
     # 底部 30px 由统一上下文操作栏占用。
     surface.blit(text, (18, surface.get_height() - 58))
+
+
+def draw_plan_schedule_preview(surface, camera, network, font, train, selected_index: int = 0) -> None:
+    """Map preview for the selected schedule row while the schedule panel is open."""
+    winner = train.state.consist.control_winner()
+    if winner is None or winner.plan is None or not winner.plan.items:
+        return
+    plan = winner.plan
+    index = max(0, min(selected_index, len(plan.items) - 1))
+    item = plan.items[index]
+    route = item.fixed_route
+    if route is not None:
+        for edge_id, direction in route.edges:
+            edge = network.edges.get(edge_id)
+            if edge is None:
+                continue
+            points = _edge_screen_points(edge, network, camera,
+                                         surface.get_width(), surface.get_height())
+            if direction < 0:
+                points = list(reversed(points))
+            if len(points) >= 2:
+                pygame.draw.lines(surface, (80, 220, 130), False, points, 4)
+                for p0, p1 in zip(points[::max(1, len(points) // 4)],
+                                  points[1::max(1, len(points) // 4)]):
+                    dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+                    length = max(1.0, (dx * dx + dy * dy) ** 0.5)
+                    ux, uy = dx / length, dy / length
+                    cx, cy = (p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2
+                    pygame.draw.polygon(surface, (110, 245, 150), [
+                        (cx + ux * 9, cy + uy * 9),
+                        (cx - ux * 5 - uy * 5, cy - uy * 5 + ux * 5),
+                        (cx - ux * 5 + uy * 5, cy - uy * 5 - ux * 5),
+                    ])
+    if item.command.value == "reverse" and route is not None and route.edges:
+        edge = network.edges.get(route.edges[0][0])
+        if edge is not None:
+            p = _edge_screen_points(edge, network, camera,
+                                    surface.get_width(), surface.get_height())[0]
+            pygame.draw.circle(surface, (255, 190, 70), (int(p[0]), int(p[1])), 14, 2)
+            surface.blit(font.render("R", True, (255, 220, 100)), (int(p[0]) - 6, int(p[1]) - 10))
+    if item.goal is not None:
+        edge = network.edges.get(item.goal[0])
+        if edge is not None:
+            a = network.nodes[edge.node_a_id].position
+            b = network.nodes[edge.node_b_id].position
+            pos = a + (b - a) * item.goal[1]
+            direction = (b - a).normalize() * (1 if item.goal[2] > 0 else -1)
+            sx, sy = camera.world_to_screen(pos.x, pos.y, surface.get_width(), surface.get_height())
+            ux, uy = direction.x, -direction.y
+            triangle = [
+                (sx + ux * 20, sy + uy * 20),
+                (sx - ux * 9 - uy * 9, sy - uy * 9 + ux * 9),
+                (sx - ux * 9 + uy * 9, sy - uy * 9 - ux * 9),
+            ]
+            pygame.draw.polygon(surface, (255, 245, 90), triangle)
+            pygame.draw.polygon(surface, (25, 25, 25), triangle, 2)
+            if item.command.value == "goto_couple":
+                surface.blit(font.render("C", True, (30, 30, 30)), (int(sx) - 6, int(sy) - 10))
+    elif item.command.value == "wait_couple":
+        poses = train.kinematics.get_all_wagon_poses(train.state.s)
+        if poses:
+            pos = poses[0].position
+            sx, sy = camera.world_to_screen(pos.x, pos.y, surface.get_width(), surface.get_height())
+            pygame.draw.circle(surface, (100, 200, 255), (int(sx), int(sy)), 14, 2)
+            surface.blit(font.render("W", True, (150, 225, 255)), (int(sx) - 7, int(sy) - 10))
+
+
+def draw_network_ids(surface, camera, network, font) -> None:
+    """Topology labels and default +1 arrows (node_a -> node_b), including arcs."""
+    w, h = surface.get_size()
+    for node_id, node in network.nodes.items():
+        x, y = camera.world_to_screen(node.position.x, node.position.y, w, h)
+        surface.blit(font.render(f"N{node_id}", True, (255, 230, 80)), (int(x) + 5, int(y) - 15))
+    for edge_id, edge in network.edges.items():
+        points = _edge_screen_points(edge, network, camera, w, h)
+        index = (len(points) - 1) // 2
+        p0, p1 = points[index], points[index + 1]
+        x, y = (p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2
+        if not (-80 <= x <= w + 80 and -40 <= y <= h + 40):
+            continue
+        dx, dy = p1[0] - p0[0], p1[1] - p0[1]
+        length = (dx * dx + dy * dy) ** 0.5
+        color = (150, 220, 255)
+        if length > 1e-6:
+            ux, uy = dx / length, dy / length
+            triangle = [(x + ux * 10, y + uy * 10),
+                        (x - ux * 6 - uy * 5, y - uy * 6 + ux * 5),
+                        (x - ux * 6 + uy * 5, y - uy * 6 - ux * 5)]
+            pygame.draw.polygon(surface, (20, 30, 40), triangle)
+            pygame.draw.polygon(surface, color, triangle, 2)
+        label = font.render(f"E{edge_id} +", True, color)
+        rect = label.get_rect(topleft=(int(x) + 8, int(y) + 8))
+        pygame.draw.rect(surface, (20, 30, 40), rect.inflate(4, 2))
+        surface.blit(label, rect)
 
 
 def draw_plan_hud(

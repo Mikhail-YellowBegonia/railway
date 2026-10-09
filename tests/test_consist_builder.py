@@ -41,6 +41,16 @@ assert len(builder.consist.wagons) == 1
 assert not builder.delete_selected()
 print("✅ 删除车厢保留至少一节的编组下限")
 
+builder.select_wagon(0)
+assert builder.flip_selected()
+assert builder.consist.wagons[0].orientation == 1
+builder.select_preset(WagonPreset.COACH)
+builder.insert_wagon(0)
+assert len(builder.consist.wagons) == 2
+assert not builder.consist.wagons[0].have_control
+assert builder.selected_wagon_index == 0
+print("✅ 单节朝向翻转与头部插入通过")
+
 short_depot = ConsistBuilder.start("short", "Short Depot", 19.0)
 assert not short_depot.can_complete
 print("✅ 编组超过 Depot 长度时完成条件关闭")

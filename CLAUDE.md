@@ -13,7 +13,9 @@ UI/UX 总体方针见 `project.md`，交互状态、输入路由与提示的权�
 P7c 的 C3/C4 与完整 headshunt 场景已经通过；selector 固定为
 `edge_id + direction`。当前只剩 P9 整理、干净目录验收与发布。UI/UX 重做、POI、
 2D→3D 架构审查和文档治理已进入总 roadmap，按其明确顺序在 demo 后推进。
-**实施路线看 `docs/plan_layer_roadmap.md`（P0~P9，已封口；§3.1 = 各阶段实现要点与验收标准，§3.2 = 已完成记录）**；**总账看 `docs/roadmap.md`**
+**计划层历史实施路线看 `docs/plan_layer_roadmap.md`**；原型到 demo 的总账已归档于
+`docs/archive/roadmap-prototype-to-demo.md`；当前工作以 `docs/roadmap_next.md`、
+`docs/architecture_debt.md` 和 `docs/release/demo_release.md` 为准。
 （含「计划式自动驾驶」专项章节与「当前重心」）。
 ⚡ **上下文吃紧 / 换新会话时，先读 `docs/progress_snapshot.md`**——进度快照与研讨
 台账（已拍板 Q1~Q23、代码状态、封口状态、外部参考、接手建议），新结论要回填该文。
@@ -502,6 +504,7 @@ R9 因"计划不落盘"延后、R10 已定并写进语义表、R11 押到 P3 与
 | `S` | any | Save network + signals + trains to manual_track.geojson (loaded on startup if exists) |
 | `F` | any | Toggle pathfinding test mode (debug) |
 | `I` | any | Toggle spatial index visualization (debug) |
+| `F3` | any (including modal panels) | Toggle route diagnostics and edge direction overlay (debug; default off) |
 | `C` | any | Toggle camera follow (train tracking) |
 | `K` | PLAY | 编组确认键：悬停内部车钩=解挂；悬停其它列车端头车钩=连挂（规格见 `docs/consist_ui.md`） |
 | `K` | PLAN 编辑 | 外部端头=追加固定-edge连挂；内部车钩=追加“从逻辑车头后第 n 位解挂” |

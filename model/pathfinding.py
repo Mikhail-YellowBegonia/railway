@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from model.rail_network import Edge, RailNetwork
+from model.route_debug import trace_search
 
 # 有向边：(edge_id, dir)，dir=+1 沿 node_a->node_b，dir=-1 反向。
 DirectedEdge = tuple[int, int]
@@ -116,6 +117,7 @@ def neighbors(
     return result
 
 
+@trace_search
 def find_path(
     network: RailNetwork,
     start: DirectedEdge,
@@ -222,6 +224,7 @@ def find_path(
     return Path(edges=chain, total_cost=dist[goal])
 
 
+@trace_search
 def find_path_between_nodes(
     network: RailNetwork,
     start_node_id: int,
@@ -259,6 +262,7 @@ def find_path_between_nodes(
     return best
 
 
+@trace_search
 def find_path_from_point(
     network: RailNetwork,
     start_edge_id: int,
@@ -389,4 +393,3 @@ def find_path_from_point(
         print(f"[寻路路径] {[(eid, '+' if d > 0 else '-') for eid, d in path.edges]}")
 
     return path, start_offset, end_offset
-

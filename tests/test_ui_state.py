@@ -127,3 +127,23 @@ gui.hide_consist_builder()
 assert not gui._builder_visible
 pygame.quit()
 print("✅ ⑥ 三窗格编组 UI action id、刷新、容量门禁与显隐通过")
+
+# ⑦ 自绘调度面板不再把键盘/地图点击当成 pygame_gui 模态输入吞掉。
+pygame.init()
+surface = pygame.display.set_mode((900, 600), pygame.RESIZABLE)
+gui = GameGUI(surface.get_size())
+gui.show_schedule((
+    "Train #1 Dispatch Schedule", "Control car: test", "Priority: +0",
+    "Mode: loop", "* 01. 前往", "  02. 折返",
+))
+outside = pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=(40, 120))
+assert gui.schedule_pointer_action(outside, ("title",)) is None
+wheel_outside = pygame.event.Event(pygame.MOUSEWHEEL, y=1, pos=(40, 120))
+assert gui.schedule_pointer_action(wheel_outside, ("title",)) is None
+inside = pygame.event.Event(pygame.MOUSEBUTTONDOWN, button=1, pos=(500, 120))
+assert gui.schedule_pointer_action(inside, (
+    "title", "control", "priority", "mode", "* 01. 前往", "  02. 折返",
+)) == "schedule.select.4"
+gui.hide_overlays()
+pygame.quit()
+print("✅ 调度面板：面板外点击/滚轮可落回地图，面板内文本行可选中")

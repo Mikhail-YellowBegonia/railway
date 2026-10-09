@@ -18,7 +18,9 @@ architecture, open a discussion first when practical.
 
 The project roadmap and current design constraints are documented in:
 
-- [the roadmap](docs/roadmap.md);
+- [the archived prototype-to-demo roadmap](docs/archive/roadmap-prototype-to-demo.md);
+- [the current roadmap](docs/roadmap_next.md);
+- [the architecture debt register](docs/architecture_debt.md);
 - [the current progress snapshot](docs/progress_snapshot.md);
 - [the UI and interaction specification](docs/ui_ux.md);
 - [the plan-layer roadmap](docs/plan_layer_roadmap.md).

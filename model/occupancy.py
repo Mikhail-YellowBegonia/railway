@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from model.pathfinding import DirectedEdge, Path
 from model.rail_network import RailNetwork
+from model import route_debug
 
 
 @dataclass
@@ -12,6 +13,8 @@ class OccupancyState:
 
     occupied: 车身当前覆盖的有向边序列（tail → head 顺序），长度始终
               >= consist_length（否则说明 route 已耗尽，clamp 到终点）。
+              最后一条必须是实际车头所在的运动学段；不把车头前方的整边
+              余量当作已走轨迹，新指令的未来拓扑只由 route 提供。
     occupied_offset: 车尾（tail）在 occupied[0] 内的局部弧长偏移（米）。
     s: 车头（head）弧长，**相对 occupied_offset**（0 = 恰好在偏移点，
        与 RigidWagonKinematics.initial_offset 的语义一致）。
@@ -89,6 +92,15 @@ def advance_occupied_path(
             needs_reversal = True
             break
         next_edge = route.pop(0)
+        if route_debug.is_enabled():
+            route_debug.emit(
+                "occupancy.append", occupancy_id=id(state),
+                occupied=route_debug.sequence_details(network, occupied),
+                appended=next_edge,
+                joined=route_debug.sequence_details(network, occupied + [next_edge]),
+                abs_head=abs_head, occupied_length=total_len,
+                remaining_route=route,
+            )
         occupied.append(next_edge)
         total_len += edge_len(next_edge)
 
@@ -176,6 +188,32 @@ def occupied_as_path(state: OccupancyState, network: RailNetwork) -> Path:
     return Path(edges=list(state.occupied), total_cost=total_cost)
 
 
+def trim_occupied_ahead_of_head(
+    network: RailNetwork, state: OccupancyState,
+) -> OccupancyState:
+    """Keep history through the actual head segment, discard whole future edges.
+
+    Locate the *occurrence* by absolute arc length, never by edge id: a valid
+    loop may contain the same edge multiple times. At an internal boundary,
+    use the following segment, matching PathKinematics._locate_segment.
+    No coordinate origin changes; every bogie at/before the head keeps its pose.
+    """
+    abs_head = state.occupied_offset + state.s
+    segment_end = 0.0
+    for index, (edge_id, _direction) in enumerate(state.occupied):
+        segment_end += network.edges[edge_id].length
+        if abs_head < segment_end:
+            if index == len(state.occupied) - 1:
+                return state
+            if route_debug.is_enabled():
+                route_debug.emit("occupancy.trim_future", abs_head=abs_head,
+                                 retained=state.occupied[:index + 1],
+                                 discarded=state.occupied[index + 1:])
+            return OccupancyState(state.occupied[:index + 1], state.occupied_offset,
+                                  state.s, list(state.route))
+    return state
+
+
 def reverse_occupancy(
     network: RailNetwork,
     state: OccupancyState,
@@ -217,9 +255,9 @@ def reverse_occupancy(
     new_offset = max(0.0, new_abs_head - consist_length)
     new_s = new_abs_head - new_offset
 
-    return OccupancyState(
+    return trim_occupied_ahead_of_head(network, OccupancyState(
         occupied=new_occupied,
         occupied_offset=new_offset,
         s=new_s,
         route=[],
-    )
+    ))

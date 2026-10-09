@@ -66,6 +66,21 @@ class ConsistBuilder:
         )
         return True
 
+    def flip_selected(self) -> bool:
+        wagon = self.selected_wagon
+        if wagon is None:
+            return False
+        wagon.orientation *= -1
+        return True
+
+    def insert_wagon(self, index: int) -> Wagon:
+        """Insert the selected preset before ``index`` (including head/tail)."""
+        wagon = _create_preset(self.selected_preset)
+        index = max(0, min(index, len(self.consist.wagons)))
+        self.consist.wagons.insert(index, wagon)
+        self.selected_wagon_index = index
+        return wagon
+
     def move_selected(self, delta: int) -> bool:
         target = self.selected_wagon_index + delta
         if not (0 <= target < len(self.consist.wagons)):

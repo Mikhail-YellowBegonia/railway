@@ -2,7 +2,8 @@
 
 > 状态：**已实现**（2026-09-08，roadmap #2 完成；实现见 `model/session.py`、
 > `model/geojson_writer/loader.py`、`controller/game_loop.py`，回归 `tests/test_session.py`）。
-> 对应 `docs/roadmap.md` 待办 #2「会话持久化」。
+> 历史上对应原型路线图待办 #2「会话持久化」；原路线图已归档至
+> `docs/archive/roadmap-prototype-to-demo.md`。
 
 ## 0. 背景与范围
 

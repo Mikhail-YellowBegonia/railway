@@ -55,7 +55,11 @@ def write_geojson(
             },
         })
 
-    data = {"type": "FeatureCollection", "features": features}
+    data = {
+        "type": "FeatureCollection",
+        "format_version": 1,
+        "features": features,
+    }
 
     if signals is not None:
         signal_records = []

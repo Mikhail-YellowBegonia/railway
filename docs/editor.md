@@ -13,6 +13,7 @@
 | `B`  | BUILD | 建造轨道 |
 | `D`  | DELETE | 删除轨道（以边为单位，自动清理孤立节点） |
 | `P`  | PLAY / 计划编辑 | 非 PLAY 时进入 PLAY；PLAY 内选中停放列车后再次按 `P` 切换计划编辑叠加态 |
+| `F3` | 全局（含面板） | 开关寻路日志与地图 Node/Edge ID/默认方向标记；默认关闭，详见 `docs/route_debug.md` |
 | `Esc` | （取消 / IDLE） | BUILD_ACTIVE 时取消当前建造退回 BUILD_IDLE；其它情况切换到 IDLE |
 | `Q`  | 退出程序 | （Esc 不再用于退出） |
 

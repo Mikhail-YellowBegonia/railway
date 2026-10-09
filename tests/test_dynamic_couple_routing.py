@@ -83,9 +83,9 @@ dispatcher.tick(goto_train, [goto_train])
 assert goto_train.plan_execution.resolved_route.edges[0] == (e1, 1)
 print("✅ goto 计划只保存目标；车头跳变后从新 edge 实时寻路")
 
-# An explicit plan reverse already changed the live logical head.  The next
-# dynamic goto must not ask Dijkstra to insert a second implicit reversal
-# marker, which would make one physical edge appear twice in the route.
+# An explicit reverse changes the live logical head. This destination is
+# directly reachable from that head without any further endpoint reversal.
+# Necessary endpoint reversals remain legal (see test_route_join_contract).
 reverse_wagon = create_simple_car(length=10.0, mass=20.0, P_rated=1000.0, have_control=True)
 reverse_train = parked(e1, 20.0, reverse_wagon)
 reverse_wagon.plan = Plan([
@@ -104,4 +104,4 @@ assert all(
     for index in range(len(resolved.edges) - 1)
 ), resolved.edges
 assert reverse_train.state.occupancy.route == [(e0, -1)]
-print("✅ 显式 reverse 后动态 goto 不再隐式重复消费同一 edge")
+print("✅ 显式 reverse 后动态 goto 从实际车头直达，不产生无必要折返")

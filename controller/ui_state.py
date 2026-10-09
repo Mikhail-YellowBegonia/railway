@@ -114,7 +114,7 @@ _CONTEXT_HINTS: dict[UIContext, tuple[ActionHint, ...]] = {
 
 
 def action_hints(context: UIContext) -> tuple[ActionHint, ...]:
-    return _CONTEXT_HINTS[context]
+    return _CONTEXT_HINTS[context] + (ActionHint("debug.route.toggle", "F3", "寻路调试"),)
 
 
 class FeedbackCenter:

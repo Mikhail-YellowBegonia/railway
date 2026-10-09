@@ -24,12 +24,14 @@ from model.wagon import Consist
 from model.occupancy import (
     OccupancyState, advance_occupied_path, occupied_as_path,
     reverse_occupancy,
+    trim_occupied_ahead_of_head,
 )
 from model.rigid_kinematics import RigidWagonKinematics
 from model.train_physics import TrainPhysics
 from model.train_controller import BrakingController
 from model.train_control import TrainControlAuthority
 from model.rail_network import RailNetwork
+from model.route_debug import trace_train_change
 
 
 @dataclass
@@ -42,10 +44,8 @@ class TrainState:
     - remaining_to_goal: 距离本次指令终点的剩余弧长（米），与 occupancy 的边界无关，
       纯粹按 delta_s 递减；供 BrakingController 判断制动/停车，不依赖 occupancy 内部坐标
     - goal: 本次指令的最终目标 (edge_id, t, direction)，为空 = 无指令。
-      Step 3 part2：route 中若含中途折返点，寻路阶段按"点模型"铺设的剩余
-      路径无法直接拼接刚体列车折返后的新车头位置（折返需要额外走完"车身
-      长度"才能重新抵达折返节点，寻路结果没有算这段），所以折返触发时不
-      复用旧 route，而是从新车头位置对 goal 重新寻路。
+      中途死端折返时，按真实新车头消费点模型路线中已被车身覆盖的前缀，
+      用 goal 重新计算剩余距离；新计划命令则从实际车头重新寻路。
 
     寻路只应读取车头位置 (edge_id, t, direction)，不应引用 occupancy 或 route 本身。
     """
@@ -137,19 +137,27 @@ class TrainEntity:
     # 调度接口
     # ------------------------------------------------------------------
 
+    @trace_train_change
     def assign_route(
         self,
         route: list[DirectedEdge],
         remaining_to_goal: float,
         goal: tuple[int, float, int] | None = None,
     ) -> None:
-        """分配新的行驶指令：只设置 route，不改动 occupancy（车身位置/历史不受影响）。
+        """从真实车头接入新路线，保持车身位置和车头后方的历史轨迹。
 
         route: 从当前车头位置出发、尚待走的有向边序列（不含车头当前所在边）。
         remaining_to_goal: 从车头当前位置到指令终点的剩余弧长（米）。
         goal: 本次指令的最终目标 (edge_id, t, direction)，供中途折返时重新
               寻路使用；不提供则折返触发时直接放弃剩余 route（安全兜底）。
         """
+        # Old saves or reconstructed windows may still have whole edges ahead
+        # of the head. Those are future topology, not body history. The new
+        # route owns that future; retaining both would traverse it twice.
+        trimmed = trim_occupied_ahead_of_head(self.network, self.state.occupancy)
+        if trimmed is not self.state.occupancy:
+            self.state.occupancy = trimmed
+            self.kinematics = self._build_kinematics()
         self.state.occupancy.route = list(route)
         self.state.remaining_to_goal = remaining_to_goal
         self.state.goal = goal
@@ -227,6 +235,7 @@ class TrainEntity:
         self.controller = BrakingController(self.physics, self.state.consist)
         self.controller.reset()
 
+    @trace_train_change
     def reverse_in_place(self) -> bool:
         """原地掉头：车头车尾定义互换，车身占用的物理边集合不变。
 
@@ -297,6 +306,7 @@ class TrainEntity:
         self._apply_logical_reversal(body_occ)
         return True
 
+    @trace_train_change
     def reverse_for_coupling(self) -> bool:
         """为头头/尾尾连挂归一化逻辑首尾，不施加调度折返的区段门禁。
 
@@ -409,6 +419,7 @@ class TrainEntity:
             and self.state.remaining_to_goal > BrakingController.STOP_EPSILON
         )
 
+    @trace_train_change
     def _do_auto_reversal(self) -> None:
         """行驶到 route 中的折返点：停车、原地翻转、直接消费剩余 route 继续。
 
@@ -423,11 +434,9 @@ class TrainEntity:
         真正的修复是 Step3 阶段 C：reverse_in_place() 在反转前把 occupied
         截断到"车身所在段"（丢弃窗口里车身之前的冗余边；2026-09 起改为
         "车身链裁剪 + 车身跨道岔则拒绝"，见 reverse_in_place docstring）。
-        只要车身没有被镜像到分歧之外，折返后的新车头就必然落在同一
-        无分歧段内部，而 route 剩余部分（advance_occupied_path
-        已经弹出了折返标记边）本来就是 Dijkstra 一次性算好的、从折返点
-        出发的正确路径——不需要重算，直接接上即可，这样"重新寻路"带来的
-        振荡风险完全消失（寻路只发生一次，折返只是几何操作）。
+        新车头落在同一无分歧段内，但可能跨越多条 edge。剩余路线仍以
+        质点折返点为起点，必须消费掉已被新车身覆盖的前缀，才可从真实
+        新车头接续；按完整有向前缀匹配，不按 edge ID 去重。
 
         remaining_to_goal 保留：reverse_in_place() 作为通用原语会把它清零
         （孤立调用时旧目标已失效），但这里终点没变，要手动恢复已递减过的
@@ -446,6 +455,16 @@ class TrainEntity:
             self.state.goal = None
             print("折返失败：已放弃当前指令，请重新下达")
             return
+        # The point-model reversal marker has already been popped. The new
+        # occupied chain starts on that marker's edge and ends at the real
+        # head, which can lie several edges farther along the same segment.
+        # Those precise prefix occurrences are now history, not future route.
+        covered_prefix = self.state.occupancy.occupied[1:]
+        if remaining_route[:len(covered_prefix)] != covered_prefix:
+            self.emergency_stop()
+            print("折返失败：剩余路线不能从新车头接续，已放弃当前指令")
+            return
+        remaining_route = remaining_route[len(covered_prefix):]
         self.state.occupancy.route = remaining_route
         # 折返后 remaining 按几何重算（2026-09 bug2 现场修复，勿回退）：
         # 寻路被迫绕行、含"死端折返往返"段时（如单向信号使直路被禁），
@@ -455,7 +474,8 @@ class TrainEntity:
         # 车头前方到路径尾的弧长（当前 occupied 段内剩余 + remaining_route
         # 全长）- goal 距其所在段"路径终点"的折算(eo) - 本次指令的停车提前量。
         # 公式用折返后的几何状态直接计算，不重新寻路（不引入折返振荡）。
-        if goal is not None and remaining_route and remaining_route[-1][0] == goal[0]:
+        final_edge = remaining_route[-1] if remaining_route else self.head_directed_edge()
+        if goal is not None and final_edge == (goal[0], goal[2]):
             occ_total = sum(self.network.edges[eid].length
                             for eid, _d in self.state.occupancy.occupied)
             route_total = sum(self.network.edges[eid].length
@@ -508,8 +528,9 @@ class TrainEntity:
         return self.current_directed_edge_and_t()[2]
 
     def head_directed_edge(self) -> DirectedEdge:
-        """车头当前所在的有向边（occupied 最后一条）。"""
-        return self.state.occupancy.occupied[-1]
+        """实际车头的有向边；兼容含前方窗口余量的历史状态。"""
+        edge_id, _t, direction = self.current_directed_edge_and_t()
+        return edge_id, direction
 
     # ------------------------------------------------------------------
     # Couple / Decouple
@@ -589,6 +610,7 @@ class TrainEntity:
 
         return front_entity, rear_entity
 
+    @trace_train_change
     def couple_with(self, rear: "TrainEntity") -> "TrainEntity":
         """将 rear 连挂到本列车车尾，返回合并后的新停放实体。
 

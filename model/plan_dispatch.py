@@ -404,10 +404,7 @@ class PlanDispatcher:
             active_route = (
                 self._active_route(plan, item)
                 if item.effective_path_policy is PathPolicy.FIXED
-                else self._resolve_dynamic_goto(
-                    train, item,
-                    allow_reversal=not self._previous_item_is_reverse(plan),
-                )
+                else self._resolve_dynamic_goto(train, item)
             )
             if active_route is None:
                 self._report_once(
@@ -462,28 +459,10 @@ class PlanDispatcher:
             PathStart(start_edge, start_t, start_direction),
             item,
             passable_fn=self.passable_fn,
-            # A scheduled reverse is an explicit plan item.  In that case do
-            # not let the pathfinder silently add an ``edge,+/-`` reversal
-            # marker: the physical layer consumes it by reversing the whole
-            # consist, so a second implicit marker can make the same edge
-            # appear to be traversed twice.  Keep legacy implicit reversal for
-            # goto items without an explicit preceding reverse.
             allow_reversal=allow_reversal,
             consist_length=train.state.consist.total_length,
         )
         return resolution.path.freeze() if resolution.path is not None else None
-
-    @staticmethod
-    def _previous_item_is_reverse(plan: Plan) -> bool:
-        """Whether the current item follows an explicit plan reversal."""
-        if not plan.items:
-            return False
-        index = plan.pointer - 1
-        if index < 0:
-            if not plan.repeat:
-                return False
-            index = len(plan.items) - 1
-        return plan.items[index].command is PlanCommand.REVERSE
 
     def _couple_goal(
         self,

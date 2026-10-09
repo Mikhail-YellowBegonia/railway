@@ -8,6 +8,7 @@ import pygame
 from model.rail_network import RailNetwork
 from model.geojson_loader import load_geojson, load_pois, load_signals, load_stations
 from model.vec3 import Vec3
+from model.save_service import SaveService, SaveError
 from view.camera import Camera
 from view.gui_layer import GameGUI
 from view.renderer import Renderer
@@ -18,6 +19,8 @@ from controller.ui_state import (
     UIContext,
     action_hints,
 )
+from controller.action_router import action_for_key
+from model.train_control import TrainControlAuthority
 
 WINDOW_W = 1024
 WINDOW_H = 768
@@ -37,6 +40,11 @@ class GameLoop:
         self.renderer = Renderer(self.surface, self.camera)
         self.gui = GameGUI(self.surface.get_size())
         self.feedback = FeedbackCenter()
+        # A0.1: keep the legacy default path, but route all writes through the
+        # named-save/atomic-write boundary.  Tests may still override SAVE_PATH.
+        save_path = os.path.abspath(SAVE_PATH)
+        self.save_service = SaveService(os.path.dirname(save_path) or ".")
+        self.save_name = os.path.basename(save_path)
         # 优先加载固定存档，不存在则加载传入的默认地图
         if os.path.exists(SAVE_PATH):
             self.network = load_geojson(SAVE_PATH)
@@ -94,6 +102,7 @@ class GameLoop:
 
         # 空间索引可视化开关（I 键切换）
         self.debug_show_tiles = False
+        self.debug_show_ids = False
 
         # PLAY 模式状态
         self.train_path = None                     # 当前可视化路径（焦点列车）
@@ -144,6 +153,26 @@ class GameLoop:
         if trains:
             print(f"已还原 {len(trains)} 列列车")
         return trains
+
+    def save_session(self, name: str | None = None) -> str:
+        """Save the complete current session atomically and return its path."""
+        from model.geojson_writer import write_geojson
+
+        save_name = name or self.save_name
+        self.save_service.atomic_write(
+            save_name,
+            lambda path: write_geojson(
+                self.editor.network, path,
+                signals=self.signals, trains=self.trains,
+                pois=self.pois, stations=self.stations,
+            ),
+        )
+        self.save_name = self.save_service.path_for(save_name).name
+        return str(self.save_service.path_for(save_name))
+
+    def save_session_as(self, name: str) -> str:
+        """Save under a new named slot without changing the loaded world."""
+        return self.save_session(name)
 
     def run(self) -> None:
         while self.running:
@@ -213,6 +242,10 @@ class GameLoop:
                 self.stations,
             )
             self.renderer.draw_network(self.network, self.editor)
+            from model import route_debug
+            if self.debug_show_ids or route_debug.is_enabled():
+                from view.renderer import draw_network_ids
+                draw_network_ids(self.renderer.surface, self.camera, self.network, self.renderer._font)
             self.renderer.draw_overlay(
                 self.network, self.editor, mouse_world, self.signals, signal_colors,
             )
@@ -221,6 +254,13 @@ class GameLoop:
                 draw_plan_editor_overlay(
                     self.renderer.surface, self.camera, self.network,
                     self.renderer._font, self.plan_editor,
+                )
+            elif self.plan_menu_open and self.active_train is not None:
+                from view.renderer import draw_plan_schedule_preview
+                draw_plan_schedule_preview(
+                    self.renderer.surface, self.camera, self.network,
+                    self.renderer._font, self.active_train,
+                    self.schedule_selected_index,
                 )
             # PLAY 模式可视化：路径预览按需从 occupancy+route 现拼，不缓存
             if (self.editor.mode == EditMode.PLAY and self.active_train is not None
@@ -433,6 +473,14 @@ class GameLoop:
             self.gui.set_active_mode(self.editor.mode)
             self.gui.update(dt)
             self.gui.draw(self.renderer.surface)
+            if self.consist_builder is not None:
+                self.gui.draw_consist_preview(self.renderer.surface, self.consist_builder)
+            if self.plan_menu_open and self.active_train in self.trains:
+                self.gui.draw_schedule_overlay(
+                    self.renderer.surface, self.renderer._font,
+                    self._schedule_lines(self.active_train),
+                    self.schedule_selected_index,
+                )
             pygame.display.flip()
             self.clock.tick(60)
 
@@ -449,7 +497,7 @@ class GameLoop:
             return UIContext.SCHEDULE_MENU
         if self.inspect_train is not None and self.editor.mode == EditMode.PLAY:
             return UIContext.CONSIST_PANEL
-        if self.plan_editor.active:
+        if getattr(getattr(self, "plan_editor", None), "active", False):
             return UIContext.PLAN_EDIT
         if self.editor.mode == EditMode.BUILD:
             return (
@@ -504,6 +552,9 @@ class GameLoop:
         return True
 
     def _handle_ui_action(self, action_id: str) -> None:
+        if action_id == "debug.route.toggle":
+            self._toggle_route_debug()
+            return
         if action_id.startswith("consist."):
             self._handle_consist_builder_action(action_id)
             return
@@ -512,6 +563,9 @@ class GameLoop:
             return
         if action_id == "schedule.open":
             self._open_schedule_overlay()
+            return
+        if action_id == "schedule.close":
+            self._close_play_overlay()
             return
         if action_id == "schedule.priority.down":
             self._adjust_schedule_priority(-1)
@@ -549,6 +603,12 @@ class GameLoop:
             self._close_play_overlay()
             self._enter_plan_editor_from_active()
             return
+        if action_id.startswith("plan."):
+            self._handle_plan_edit_action(action_id)
+            return
+        if action_id.startswith("poi.") or action_id.startswith("station."):
+            self._handle_poi_action(action_id)
+            return
         if getattr(self, "consist_builder", None) is not None:
             return
         if getattr(getattr(self, "gui", None), "overlay_visible", None) is not None:
@@ -562,8 +622,12 @@ class GameLoop:
             "mode.play": EditMode.PLAY,
         }
         mode = mode_by_action.get(action_id)
-        if mode is None or mode == self.editor.mode:
+        if mode is None:
             return
+        if mode == self.editor.mode:
+            if mode not in (EditMode.PLAY, EditMode.SIGNAL, EditMode.POI):
+                return
+            mode = EditMode.IDLE
         if mode == EditMode.POI:
             self.poi_editor.reset_draft()
         if self._change_mode(mode):
@@ -576,6 +640,104 @@ class GameLoop:
                 EditMode.PLAY: "PLAY 模式",
             }
             self._notify(f"已切换到{labels[mode]}")
+
+    def _handle_plan_edit_action(self, action_id: str) -> None:
+        """Consume plan-editor keyboard actions after routing has chosen them."""
+        if not self.plan_editor.active:
+            return
+        if action_id == "plan.finish":
+            ok, message = self.plan_editor.finalize_cycle()
+            self._notify_result(ok, message)
+            if ok:
+                self.plan_editor.cancel()
+            return
+        if action_id == "plan.undo":
+            self._notify(self.plan_editor.backspace())
+            return
+        if action_id == "plan.delete.item":
+            self._notify_result(*self.plan_editor.remove_current())
+            return
+        if action_id == "plan.clear":
+            self._notify_result(*self.plan_editor.clear_plan())
+            return
+        if action_id == "plan.add.wait_couple":
+            self._notify_result(*self.plan_editor.append_wait_couple())
+            return
+        if action_id == "plan.add.reverse":
+            self._notify_result(*self.plan_editor.append_reverse())
+            return
+        if action_id == "plan.confirm":
+            self._notify_result(*self.plan_editor.confirm())
+            return
+        if action_id == "plan.add.couple":
+            self._handle_plan_couple_action()
+
+    def _handle_plan_couple_action(self) -> None:
+        """Preserve the existing hover/edge/POI couple authoring semantics."""
+        if self._hovered_coupler is None:
+            mouse_world = self._mouse_world_pos()
+            self._update_hovered_poi(mouse_world)
+            hovered_poi = self.pois.get(self.poi_editor.hovered_poi_id or "")
+            if hovered_poi is not None and hovered_poi.member_kind.value == "edge":
+                self._notify_result(*self.plan_editor.append_goto_couple_poi(hovered_poi.poi_id))
+                return
+            snap = self.editor._snap(mouse_world)
+            if snap.snapped_edge_id is None:
+                self._notify("计划编辑错误：请悬停端头或轨道 edge 后按 K", FeedbackLevel.WARNING)
+            else:
+                self._notify_result(*self.plan_editor.append_goto_couple_edge(
+                    snap.snapped_edge_id,
+                    target_t=(snap.snapped_edge_t if snap.snapped_edge_t is not None else 0.5),
+                ))
+            return
+        target, kind, end = self._hovered_coupler
+        if kind == "internal":
+            self._notify_result(*self.plan_editor.append_decouple(int(end) + 1))
+        elif target is self.active_train:
+            from controller.coupling import end_coupler_pos
+            _position, edge_id, target_t = end_coupler_pos(
+                target, "head" if end == "head" else "tail",
+            )
+            self._notify_result(*self.plan_editor.append_goto_couple_edge(
+                edge_id, target_t=target_t,
+            ))
+        else:
+            self._notify_result(*self.plan_editor.append_goto_couple(target, str(end)))
+
+    def _handle_poi_action(self, action_id: str) -> None:
+        """Apply one routed POI draft action without leaking into global keys."""
+        if self.editor.mode != EditMode.POI:
+            return
+        if action_id == "poi.undo":
+            self._notify(
+                self.poi_editor.backspace_name()
+                if self.poi_name_editing else self.poi_editor.backspace()
+            )
+        elif action_id == "poi.delete.hovered":
+            poi, message = self.poi_editor.delete_hovered()
+            self._notify_result(poi is not None, message)
+        elif action_id == "station.toggle":
+            self._notify(
+                self.poi_editor.cancel_station()
+                if self.poi_editor.station_mode else self.poi_editor.begin_station()
+            )
+        elif action_id == "poi.type.depot":
+            self._notify(self.poi_editor.begin_depot())
+        elif action_id == "poi.name.start":
+            self.poi_name_editing = True
+            pygame.key.start_text_input()
+            self._notify("POI 名称编辑：输入文字，Enter 结束")
+        elif action_id == "poi.confirm":
+            if self.poi_name_editing:
+                self.poi_name_editing = False
+                pygame.key.stop_text_input()
+                self._notify("POI 名称编辑：结束")
+            elif self.poi_editor.station_mode:
+                station, message = self.poi_editor.confirm_station()
+                self._notify_result(station is not None, message)
+            else:
+                poi, message = self.poi_editor.confirm()
+                self._notify_result(poi is not None, message)
 
     def _close_play_overlay(self) -> None:
         self.gui.hide_overlays()
@@ -642,12 +804,20 @@ class GameLoop:
         self.schedule_selected_index = min(self.schedule_selected_index, len(winner.plan.items) - 1)
         return winner, winner.plan.items[self.schedule_selected_index]
 
+    def _prepare_schedule_mutation(self, train) -> None:
+        """Pause safely before mutating the active plan from the schedule UI."""
+        if not train.is_parked() or train.plan_execution is not None:
+            self.plan_dispatcher.set_paused(train, True)
+            self.train_v_target = 0.0
+            self._notify("计划已暂停，可安全修改调度计划")
+
     def _move_schedule_item(self, delta: int) -> None:
         train = self.active_train
         winner, item = self._selected_plan()
-        if winner is None or winner.plan is None or item is None or not train.is_parked():
-            self._notify("Reordering requires a parked train with a schedule", FeedbackLevel.WARNING)
+        if winner is None or winner.plan is None or item is None:
+            self._notify("没有可重排的计划条目", FeedbackLevel.WARNING)
             return
+        self._prepare_schedule_mutation(train)
         old = self.schedule_selected_index
         new = old + delta
         if not (0 <= new < len(winner.plan.items)):
@@ -664,9 +834,10 @@ class GameLoop:
     def _delete_schedule_item(self) -> None:
         train = self.active_train
         winner, item = self._selected_plan()
-        if winner is None or winner.plan is None or item is None or not train.is_parked():
-            self._notify("Deleting a command requires a parked train", FeedbackLevel.WARNING)
+        if winner is None or winner.plan is None or item is None:
+            self._notify("没有可删除的计划条目", FeedbackLevel.WARNING)
             return
+        self._prepare_schedule_mutation(train)
         winner.plan.remove_at(self.schedule_selected_index)
         self.schedule_selected_index = max(0, self.schedule_selected_index - 1)
         self._refresh_schedule_overlay()
@@ -674,9 +845,10 @@ class GameLoop:
     def _toggle_schedule_repeat(self) -> None:
         train = self.active_train
         winner, _ = self._selected_plan()
-        if winner is None or winner.plan is None or not train.is_parked():
-            self._notify("Changing loop mode requires a parked train", FeedbackLevel.WARNING)
+        if winner is None or winner.plan is None:
+            self._notify("当前没有调度计划", FeedbackLevel.WARNING)
             return
+        self._prepare_schedule_mutation(train)
         winner.plan.repeat = not winner.plan.repeat
         winner.plan._clamped_pointer()
         self._refresh_schedule_overlay()
@@ -684,9 +856,10 @@ class GameLoop:
     def _delete_schedule(self) -> None:
         train = self.active_train
         winner, _ = self._selected_plan()
-        if winner is None or winner.plan is None or not train.is_parked():
-            self._notify("Deleting a schedule requires a parked train", FeedbackLevel.WARNING)
+        if winner is None or winner.plan is None:
+            self._notify("当前没有调度计划", FeedbackLevel.WARNING)
             return
+        self._prepare_schedule_mutation(train)
         winner.plan = None
         self.schedule_selected_index = 0
         self._refresh_schedule_overlay()
@@ -714,6 +887,11 @@ class GameLoop:
             self.running = False
             return
 
+        # Diagnostics remain available even when a GUI overlay consumes keys.
+        if action_for_key(event, "global") == "debug.route.toggle":
+            self._handle_ui_action("debug.route.toggle")
+            return
+
         resize_events = {pygame.VIDEORESIZE}
         if hasattr(pygame, "WINDOWRESIZED"):
             resize_events.add(pygame.WINDOWRESIZED)
@@ -734,13 +912,33 @@ class GameLoop:
         if action_id is not None:
             self._handle_ui_action(action_id)
             return
+        if self.consist_builder is not None:
+            pointer_action = self.gui.consist_builder_pointer_action(event, self.consist_builder)
+            if pointer_action is not None:
+                self._handle_ui_action(pointer_action)
+                return
+        if self.plan_menu_open:
+            if event.type == pygame.KEYDOWN:
+                action_id = action_for_key(event, "schedule")
+                if action_id is not None:
+                    self._handle_ui_action(action_id)
+                    return
+            pointer_action = self.gui.schedule_pointer_action(
+                event, self._schedule_lines(self.active_train)
+                if self.active_train is not None else (),
+            )
+            if pointer_action is not None:
+                if pointer_action != "schedule.refresh":
+                    self._handle_ui_action(pointer_action)
+                return
         if consumed:
             return
 
         # The consist builder is a modal overlay.  Once open, clicks outside the
         # panel must not pick world objects or trigger PLAY tools.
         if (getattr(self, "consist_builder", None) is not None
-                or self.gui.overlay_visible is not None):
+                or (self.gui.overlay_visible is not None
+                    and not self.plan_menu_open)):
             return
 
         if event.type == pygame.KEYDOWN:
@@ -806,40 +1004,54 @@ class GameLoop:
             self._notify(f"编组配置：第 {self.inspect_wagon_index + 1} 节设为{status}")
         return True
 
+    def _toggle_route_debug(self) -> None:
+        from model import route_debug
+        enabled = not route_debug.is_enabled()
+        try:
+            log_path = route_debug.set_enabled(enabled)
+        except OSError as exc:
+            self._notify(f"寻路调试日志无法创建：{exc}", FeedbackLevel.WARNING)
+            return
+        if enabled:
+            # Include already-active routes when tracing starts mid-scenario.
+            for train in self.trains:
+                route_debug.emit("train.initial", snapshot=route_debug.train_snapshot(train))
+            print(f"[ROUTE_DEBUG] 日志文件：{log_path}")
+        self._notify(f"F3 寻路调试：{'开启（日志路径见终端）' if enabled else '关闭'}")
+
     def _handle_keydown(self, event: pygame.event.Event) -> None:
+        if action_for_key(event, "global") == "debug.route.toggle":
+            self._handle_ui_action("debug.route.toggle")
+            return
         # Keep builder shortcuts isolated from all workspace/global shortcuts.
         # GUI buttons arrive through _handle_event above; only the six builder
         # operations are allowed to reach the keyboard path here.
         if getattr(self, "consist_builder", None) is not None:
-            builder_keys = {
-                pygame.K_l, pygame.K_c, pygame.K_BACKSPACE, pygame.K_r,
-                pygame.K_RETURN, pygame.K_KP_ENTER,
-            }
-            if event.key in builder_keys:
-                self._handle_depot_builder_key(event)
+            action_id = action_for_key(event, "consist_builder")
+            if action_id is not None:
+                self._handle_ui_action(action_id)
             return
         overlay = getattr(getattr(self, "gui", None), "overlay_visible", None)
         if overlay == "train_info":
-            if event.key == pygame.K_i:
-                self._close_play_overlay()
-            elif event.key == pygame.K_p:
-                self._open_schedule_overlay()
-            elif event.key == pygame.K_ESCAPE:
-                self._close_play_overlay()
+            action_id = action_for_key(event, "train_info")
+            if action_id is not None:
+                self._handle_ui_action(action_id)
             return
         if overlay == "schedule":
-            if event.key == pygame.K_p:
-                self._close_play_overlay()
-                self._enter_plan_editor_from_active()
-            elif event.key in (pygame.K_LEFTBRACKET, pygame.K_RIGHTBRACKET):
-                self._adjust_schedule_priority(
-                    -1 if event.key == pygame.K_LEFTBRACKET else 1,
-                )
-            elif event.key == pygame.K_x:
-                self._delete_schedule_item()
-            elif event.key in (pygame.K_ESCAPE, pygame.K_o):
-                self._close_play_overlay()
+            action_id = action_for_key(event, "schedule")
+            if action_id is not None:
+                self._handle_ui_action(action_id)
             return
+        if getattr(getattr(self, "plan_editor", None), "active", False):
+            action_id = action_for_key(event, "plan_edit")
+            if action_id is not None:
+                self._handle_ui_action(action_id)
+            return
+        if getattr(getattr(self, "editor", None), "mode", None) == EditMode.POI:
+            action_id = action_for_key(event, "poi")
+            if action_id is not None:
+                self._handle_ui_action(action_id)
+                return
         if self._handle_inspect_control_key(event):
             return
         if event.key == pygame.K_p and event.mod & pygame.KMOD_CTRL:
@@ -849,6 +1061,17 @@ class GameLoop:
                 self.editor.parallel_snap_enabled = not self.editor.parallel_snap_enabled
                 status = "开启" if self.editor.parallel_snap_enabled else "关闭"
                 self._notify(f"平行吸附：{status}")
+            return
+        if event.key == pygame.K_v and self.editor.mode == EditMode.BUILD:
+            self.debug_show_ids = not self.debug_show_ids
+            self._notify(f"Node/Edge ID 显示：{'开启' if self.debug_show_ids else '关闭'}")
+            return
+        workspace_context = (
+            "workspace_play" if self.editor.mode == EditMode.PLAY else "workspace"
+        )
+        action_id = action_for_key(event, workspace_context)
+        if action_id is not None:
+            self._handle_ui_action(action_id)
             return
         if event.key == pygame.K_ESCAPE:
             if self.consist_builder is not None:
@@ -894,11 +1117,10 @@ class GameLoop:
                     self.plan_editor.cancel()
             elif self.active_train is None:
                 self._notify("计划编辑拒绝：请先选中列车", FeedbackLevel.WARNING)
-            elif self.gui.overlay_visible == "schedule":
-                self._close_play_overlay()
-                self._enter_plan_editor_from_active()
             else:
-                self._open_schedule_overlay()
+                if self.gui.overlay_visible == "schedule":
+                    self._close_play_overlay()
+                self._enter_plan_editor_from_active()
         elif event.key == pygame.K_o:
             if self.editor.mode != EditMode.PLAY:
                 self._notify("调度计划选单只在 PLAY 模式可用", FeedbackLevel.WARNING)
@@ -1056,14 +1278,15 @@ class GameLoop:
             # S 键保存当前路网 + 信号 + 列车到固定存档（启动时会优先加载它）。
             # roadmap #2 会话持久化：列车状态（位置/速度/编组/route/goal/v_target）
             # 一并落盘，见 docs/session_persistence.md。
-            from model.geojson_writer import write_geojson
-            write_geojson(self.editor.network, SAVE_PATH,
-                          signals=self.signals, trains=self.trains,
-                          pois=self.pois, stations=self.stations)
+            try:
+                saved_path = self.save_session()
+            except SaveError as exc:
+                self._notify(f"保存失败：{exc}", FeedbackLevel.ERROR)
+                return
             print(f"已保存 {len(self.editor.network.edges)} 条边 + "
                   f"{len(self.signals.all_signals())} 个信号 + "
                   f"{len(self.trains)} 列列车 + {len(self.pois)} 个 POI + "
-                  f"{len(self.stations)} 个车站到 {SAVE_PATH}")
+                  f"{len(self.stations)} 个车站到 {saved_path}")
         elif event.key == pygame.K_i:
             if self.editor.mode == EditMode.PLAY:
                 if self.active_train is not None:
@@ -1139,6 +1362,7 @@ class GameLoop:
                         print("计划自动驾驶继续")
                 else:
                     train.emergency_stop()
+                    train.control_authority = TrainControlAuthority.NONE
                     self.train_v_target = 0.0
                     print("列车紧急停止")
     def _handle_mouse_down(self, event: pygame.event.Event) -> None:
@@ -1859,7 +2083,15 @@ class GameLoop:
             return
         from controller.consist_builder import WagonPreset
 
-        if action_id == "consist.catalog.powered_control":
+        if action_id == "consist.add.powered_control":
+            builder.select_preset(WagonPreset.POWERED_CONTROL)
+            builder.add_wagon()
+            self._notify("Consist: powered control car added")
+        elif action_id == "consist.add.coach":
+            builder.select_preset(WagonPreset.COACH)
+            builder.add_wagon()
+            self._notify("Consist: ordinary coach added")
+        elif action_id == "consist.catalog.powered_control":
             builder.select_preset(WagonPreset.POWERED_CONTROL)
         elif action_id == "consist.catalog.coach":
             builder.select_preset(WagonPreset.COACH)
@@ -1877,6 +2109,17 @@ class GameLoop:
             builder.move_selected(1)
         elif action_id == "consist.reverse":
             builder.reverse()
+        elif action_id == "consist.flip":
+            if builder.flip_selected():
+                self._notify("Consist: selected car orientation reversed")
+        elif action_id == "consist.add.double":
+            builder.select_preset(WagonPreset.POWERED_CONTROL)
+            builder.add_wagon()
+            builder.select_preset(WagonPreset.COACH)
+            builder.add_wagon()
+            self._notify("Consist: powered control car + coach added")
+        elif action_id == "consist.preview.scroll":
+            return
         elif action_id == "consist.cancel":
             self._cancel_consist_builder()
             return
@@ -2017,9 +2260,8 @@ class GameLoop:
     ) -> None:
         """将 find_path_from_point 的结果转换为 route + remaining_to_goal，下达给 train。
 
-        occupancy 本身不动（车身位置/历史不受影响），只设置待走的 route。
-        goal 三元组一并记录到 state.goal，供 route 中途出现折返点时
-        （TrainEntity._do_auto_reversal）从新车头位置重新寻路，见 Step 3。
+        保留车身位置和车头后方历史；assign_route 清除窗口中车头前方的
+        整边余量，再接入待走 route。goal 三元组用于中途折返后的距离记账。
 
         stop_before_m: 车头转向架在到达几何目标点前提前停车的距离（米）。连挂
         驶向用——停车点是"车头转向架"，但连挂要求**车钩**贴住对方尾钩；车钩在
@@ -2096,7 +2338,7 @@ class GameLoop:
         consist_length = train.state.consist.total_length
         result = self._find_path_any_goal_direction(
             start_edge_id, start_t, start_direction, goal_edge_id, goal_t,
-            allow_reversal=True, debug=True, consist_length=consist_length,
+            allow_reversal=True, debug=False, consist_length=consist_length,
             fixed_goal_direction=goal_direction,
             ignore_signals=ignore_signals,
         )
@@ -2104,6 +2346,11 @@ class GameLoop:
             print(f"PLAY: 不可达 ({label})")
             return
         path, start_offset, end_offset, goal_direction = result
+
+        # Right-click and manual K coupling are deliberately retained as an
+        # explicitly named, temporary takeover. The next PlanDispatcher tick
+        # observes the changed goal and drops the old plan execution lease.
+        train.control_authority = TrainControlAuthority.MANUAL_TAKEOVER
 
         se = self.network.edges[start_edge_id]
         ge = self.network.edges[goal_edge_id]

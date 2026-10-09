@@ -54,7 +54,14 @@ The long-term vision is:
 - **Reliability comes before spectacle.** The current goal is a dependable and
   understandable simulation, not a polished AAA visual presentation.
 
-## Development roadmap
+## Development status
+
+The prototype-to-demo roadmap is complete and archived in
+[`docs/archive/roadmap-prototype-to-demo.md`](docs/archive/roadmap-prototype-to-demo.md).
+The current work starts with save management and architecture stabilization; see
+[`docs/roadmap_next.md`](docs/roadmap_next.md),
+[`docs/architecture_debt.md`](docs/architecture_debt.md), and the
+[`demo release checklist`](docs/release/demo_release.md).
 
 ### Early prototype
 

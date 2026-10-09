@@ -44,6 +44,7 @@ from model.pathfinding import (
 )
 from model.plan import Anchor, FixedRoute, Goal, PlanCommand, PlanItem
 from model.rail_network import RailNetwork
+from model.route_debug import trace_search
 
 
 @dataclass(frozen=True)
@@ -119,6 +120,7 @@ class PlanResolution:
         return self.path is not None
 
 
+@trace_search
 def resolve_plan_item(
     network: RailNetwork,
     start: PathStart,
