@@ -86,8 +86,9 @@ goto-couple 的 C、wait-couple 的 W 标记。BUILD 模式新增 `V` 切换 Nod
 错误来自 occupied 窗口保留的整边余量在折返后落到真实车头前方，与新 route 重复持有同一
 edge。现已在占用边界按真实车头裁剪，并在自动死端折返后消费车身已覆盖的有向路线前缀；
 不做 edge ID 去重，合法环线与必要折返保持有效。针对原 E16/E18 场景的完整驱车回归、
-长编组跨多边自动折返回归和全套 **36 个测试文件**通过；用户人工测试通过。细节见
-`docs/route_debug.md`。
+长编组跨多边自动折返回归和全套 **36 个测试文件**通过；用户人工测试通过。诊断实现为
+默认关闭的 F3 开关，回归覆盖位于 `tests/test_route_debug.py`、
+`tests/test_route_occupancy_join.py` 与 `tests/test_route_join_contract.py`。
 
 ### 1.1 研究对象（一句话）
 
